@@ -166,8 +166,7 @@ class artificial_dataset:
         artificial_mol = np.moveaxis(artificial_mol, 2, 1)
         artificial_mol = np.reshape(artificial_mol, (artificial_mol.shape[0] * artificial_mol.shape[1], artificial_mol.shape[2], artificial_mol.shape[3]))
         #artificial_mol = np.flip(artificial_mol,axis=2)
-
-        np.save('artificial_training_data-'+str(self.num_samp)+'.npy', artificial_mol)
+        np.save('artificial_training_data-'+str(self.wavenumber_1+self.shift)+'_'+str(self.wavenumber_2+self.shift)+'_'+str(self.num_samp)+'.npy', artificial_mol)
 
 
 
