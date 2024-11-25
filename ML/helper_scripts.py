@@ -5,7 +5,7 @@ from scipy.signal import savgol_filter
 def normalize(array, max=1, min=0):
     min_val = np.min(array)
     max_val = np.max(array)
-    
+
     if min > max:
         min = max
     
@@ -14,11 +14,26 @@ def normalize(array, max=1, min=0):
     return norm
 
 def normalize_manual(array, max_val, min_val, max=1, min=0):
-    
+
     if min > max:
         min = max
     
     norm = ((array-min_val)/(max_val-min_val))*(max-min)+min
+
+    return norm
+
+def normalize_idx(array, max_idx=-1, min_idx=0, max=1, min=0):
+
+    max_val = array[max_idx]
+    min_val = array[min_idx]
+
+    diff = max_val-min_val
+    diff[diff<=0] = np.min(diff[diff>0])   
+
+    if min > max:
+        min = max
+    
+    norm = ((array-min_val)/(diff))*(max-min)+min
 
     return norm
 

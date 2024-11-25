@@ -19,6 +19,25 @@ import helper_scripts
 
 def create_background(wavenumber_1, wavenumber_2, num_samp, background_df):
 
+    """Generate background (PBS) baseline from background .csv file (WARNING: Only for CH-stretching region)
+    
+    Parameters
+    ----------
+    wavenumber_1 : int
+        Initial Raman wavenumber (lower wavenumber) captured by hyperspectral image (measured in cm^-1).
+    wavenumber_2 : int
+        Final Raman wavenumber (higher wavenumber) captured by hyperspectral image (measured in cm^-1).
+    num_samp : int
+        Number of hyperspectral slices
+    background_df : Pandas DataFrame
+        Dataframe generated from background .csv file corresponding to PBS baseline
+
+    Outputs
+    ----------
+    background : ndarray of shape (num_samp,)
+        1-dimensional array corresponding to the PBS background between the two wavenumbers
+    """
+
     CH_wavenumber = np.linspace(wavenumber_1,wavenumber_2,num_samp)
     temp = background_df[8:].to_numpy() 
     temp = temp[:,0]
@@ -113,8 +132,22 @@ class artificial_dataset:
     
         return mol_norm, mol_names
     
+    def DAE_dataset(self, mol_norm):
+        dataset_size = len(mol_norm)
+        total_classes_size = int(((dataset_size-1) * (dataset_size)) / 2) + 1
+        mol_add = np.zeros((total_classes_size - (dataset_size), self.num_samp), dtype='float32')
+        count = 0
+        for j in range(dataset_size - 2):
+            for i in tqdm(range(j + 1, dataset_size - 1)):
+                temp_spectra = mol_norm[j, :] + mol_norm[i, :]
+                mol_add[count, :] = helper_scripts.normalize(temp_spectra)
+                count += 1
+        dataset_norm = np.vstack((mol_norm, mol_add))
+
+        return dataset_norm
     
     def save_srs_params(self, data_dir):
+
         count = 0
         data_list = os.listdir(data_dir)
         for name in tqdm(data_list):
@@ -123,16 +156,16 @@ class artificial_dataset:
             image_vector = np.flip(image_vector, axis=0)
             first_val = np.median(image_vector[:self.ch_start, :])
             image_vector = image_vector - first_val.T
-        if count > 0:
-            temp = np.concatenate((temp, image_vector), axis=1)
-        else:
-            temp = image_vector
-        count += 1
+            if count > 0:
+                temp = np.concatenate((temp, image_vector), axis=1)
+            else:
+                temp = image_vector
+                count += 1
         image_spec = helper_scripts.normalize(temp)
         image_spec = image_spec[:, np.logical_not(image_spec[0, :] > image_spec[-1, :])]
         spec_start = image_spec[:self.ch_start]
         image_vec = image_spec[:, np.all(
-        np.logical_and(spec_start < np.mean(spec_start) + 3 * np.std(spec_start),
+            np.logical_and(spec_start < np.mean(spec_start) + 3 * np.std(spec_start),
                     spec_start > np.mean(spec_start) - 3 * np.std(spec_start)), axis=0)] 
         
         noise_scale_vec = np.std(spec_start, axis=0)
@@ -144,10 +177,7 @@ class artificial_dataset:
         return image_vec.T, noise_scale_vec, bg_scale_vec, ratio_scale_vec
 
         # Generate artificial SRS spectra from the molecular spectra
-    def save_artificial_dataset(self, molecule_df, data_dir, num_values=200, num_repeats=10, bg_param=1, ch_param=1, noise_param=1):
-
-        [mol_norm, mol_names] = self.molecule_dataset(molecule_df)
-        [image_vec, noise_scale_vec, bg_scale_vec, ratio_scale_vec] = self.save_srs_params(data_dir)
+    def save_artificial_dataset(self, mol_norm, noise_scale_vec, bg_scale_vec, ratio_scale_vec, num_values=200, num_repeats=10, bg_param=1, ch_param=1, noise_param=1, name='artificial_training_data-'):
         mol_norm = np.flip(mol_norm,axis=1)
 
         random_integers = np.random.randint(0, int(bg_scale_vec.shape[0]), size=num_values)
@@ -166,7 +196,7 @@ class artificial_dataset:
         artificial_mol = np.moveaxis(artificial_mol, 2, 1)
         artificial_mol = np.reshape(artificial_mol, (artificial_mol.shape[0] * artificial_mol.shape[1], artificial_mol.shape[2], artificial_mol.shape[3]))
         #artificial_mol = np.flip(artificial_mol,axis=2)
-        np.save('artificial_training_data-'+str(self.wavenumber_1+self.shift)+'_'+str(self.wavenumber_2+self.shift)+'_'+str(self.num_samp)+'.npy', artificial_mol)
+        np.save('artificial_data/'+name+str(self.wavenumber_1+self.shift)+'_'+str(self.wavenumber_2+self.shift)+'_'+str(self.num_samp)+'.npy', artificial_mol)
 
 
 
@@ -278,11 +308,11 @@ class K_means_cluster():
         centers = kmeans.cluster_centers_
         cent_range = list(range(len(centers)))
         row_max = centers.max(axis=1)
-        labels = kmeans.labels_
-        temp = np.empty((labels.shape[0],3))
+        orig_labels = kmeans.labels_
+        temp = np.empty((orig_labels.shape[0],3))
         for idx in cent_range:
             new_idx = int(np.argsort(row_max)[idx])
-            temp[np.where(labels==idx)[0]] = rgb_list[new_idx]
+            temp[np.where(orig_labels==new_idx)[0]] = rgb_list[idx]
         labels = temp
         label_img = labels.reshape((original_image.shape[1], original_image.shape[2],3))
         plt.imshow(label_img)
@@ -354,10 +384,9 @@ class semi_supervised_outputs():
                 ax = fig.add_subplot(111)
                 ax.set(yticklabels=[])
                 ymean = cur_label.mean(axis=0)
-                y25 = np.percentile(cur_label,25, axis=0)
-                y75 = np.percentile(cur_label,75, axis=0)
-                yerror = np.stack((ymean-y25, y75-ymean))
-                plt.fill_between(wavenumbers, y25-y25[0], y75-y75[0], alpha=0.5, color='green', label='sample signal (25%-75%)')
+                yerror = cur_label.std(axis=0)/2
+                plt.plot(wavenumbers, ymean,color='green', label='sample signal mean' )
+                plt.fill_between(wavenumbers, ymean-yerror, ymean+yerror, alpha=0.5, color='green')
                 plt.plot(wavenumbers,helper_scripts.normalize(mol_norm[idx], np.max(ymean),0), alpha=0.75, color='black', label=self.label[idx]+' signal',linewidth = 3)
                 plt.legend(loc='center left',fontsize='16')
                 plt.title('Predicted SRS Spectra for \n'+str(self.label[idx]),fontsize='28', weight ='bold')
