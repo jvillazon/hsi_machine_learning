@@ -6,7 +6,7 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import silhouette_score, calinski_harabasz_score, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import mean_squared_error, silhouette_score, calinski_harabasz_score, confusion_matrix, ConfusionMatrixDisplay
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.pipeline import make_pipeline
 from scipy.signal import savgol_filter, correlate
@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import helper_scripts
 
 
-def create_background(wavenumber_1, wavenumber_2, num_samp, background_df):
+def create_background(wavenumber_1, wavenumber_2, num_samp, background_df, br_shift):
 
     """Generate background (PBS) baseline from background .csv file (WARNING: Only for CH-stretching region)
     
@@ -38,7 +38,7 @@ def create_background(wavenumber_1, wavenumber_2, num_samp, background_df):
         1-dimensional array corresponding to the PBS background between the two wavenumbers
     """
 
-    CH_wavenumber = np.linspace(wavenumber_1,wavenumber_2,num_samp)
+    CH_wavenumber = np.linspace(wavenumber_1,wavenumber_2,num_samp-br_shift)
     temp = background_df[8:].to_numpy() 
     temp = temp[:,0]
     x = np.linspace(wavenumber_1, wavenumber_2,len(temp))
@@ -47,6 +47,9 @@ def create_background(wavenumber_1, wavenumber_2, num_samp, background_df):
     background = spline(CH_wavenumber)
     background = helper_scripts.normalize(background)
     background = np.flip(background)
+    back_temp = np.zeros(num_samp)
+    back_temp[br_shift:]=background
+    background = back_temp
 
     return background
 
@@ -101,7 +104,7 @@ class artificial_dataset:
         self.wavenumber_2 = wavenumber_2-self.shift
         self.num_samp = num_samp
         self.ch_start = ch_start
-        self.background = create_background(self.wavenumber_1, self.wavenumber_2, self.num_samp, background_df)
+        self.background = create_background(self.wavenumber_1, self.wavenumber_2, self.num_samp, background_df,br_shift=0)
     
 
     def molecule_dataset(self, molecule_df):
@@ -195,7 +198,7 @@ class artificial_dataset:
         artificial_mol = np.tile(artificial_mol, (num_repeats, 1, 1, 1))
         artificial_mol = np.moveaxis(artificial_mol, 2, 1)
         artificial_mol = np.reshape(artificial_mol, (artificial_mol.shape[0] * artificial_mol.shape[1], artificial_mol.shape[2], artificial_mol.shape[3]))
-        #artificial_mol = np.flip(artificial_mol,axis=2)
+
         np.save('artificial_data/'+name+str(self.wavenumber_1+self.shift)+'_'+str(self.wavenumber_2+self.shift)+'_'+str(self.num_samp)+'.npy', artificial_mol)
 
 
@@ -206,18 +209,24 @@ class preprocessing():
         self.wavenumber_2 = wavenumber_2
         self.num_samp = num_samp
         self.ch_start = ch_start
-        self.background = create_background(self.wavenumber_1, self.wavenumber_2, self.num_samp, background_df)
+        self.background_df = background_df
 
-    def spectral_standardization(self, data):
+
+    def spectral_standardization(self, data, br_shift=0):
+        self.background = create_background(self.wavenumber_1, self.wavenumber_2, self.num_samp, self.background_df, br_shift)
         temp_norm = helper_scripts.normalize(data)
         temp_end = temp_norm[:,-1:-2:-1]
         temp_start = temp_norm[:,:self.ch_start]
-        temp = temp_norm-np.median(temp_start,axis=1)[0]
-        spectra_magnitude = np.median(temp_end, axis=1)-np.median(temp_start, axis=1)
+        temp = temp_norm-np.mean(temp_start,axis=1)[0]
+        spectra_magnitude = np.mean(temp_end, axis=1)-np.mean(temp_start, axis=1)
         background_arr = np.outer(spectra_magnitude, self.background)
         spectra_standard = temp-background_arr
+        spectra_max_idx = np.argmax(np.mean(spectra_standard,axis=0))
+        spectra_norm = helper_scripts.normalize_manual(spectra_standard, max_val=np.mean(spectra_standard[:,spectra_max_idx])+3*np.std(spectra_standard[:,spectra_max_idx]),min_val=0)
+        spectra = spectra_norm.T-np.median(spectra_norm[:,:self.ch_start],axis=1)
+        spectra = spectra.T
 
-        return spectra_standard
+        return spectra
 
     def sav_gol_optimization(self, standardized_data, w, p):
         wavenumbers = np.linspace(self.wavenumber_1, self.wavenumber_2, self.num_samp)
@@ -291,7 +300,7 @@ class K_means_cluster():
         plt.tight_layout()
         for idx in cent_range:
             cent = sorted_centers[idx,:]
-            plt.plot(wavenumbers, cent, label='Cluster '+str(idx+1), color=color_list[idx])
+            plt.plot(wavenumbers, cent-cent[0], label='Cluster '+str(idx+1), color=color_list[idx])
         plt.grid()
         plt.tick_params(right = False , labelleft = False) 
         plt.xlabel('Wavenumber (cm$^-$$^1$)',fontsize=14,fontweight='bold')
@@ -302,7 +311,7 @@ class K_means_cluster():
         if save_input == True:
             plt.savefig(save_dir + 'Clustered_Graph.png', bbox_inches='tight')       
 
-    def kmeans_image (self, kmeans, original_image, save_input, color_list=['#FFFFFF', '#FF00FF', '#FFFF00', '#00FFFF', '#00FF00','#0000FF','#FF0000'], save_dir=None):
+    def kmeans_image (self, kmeans, sample_list, original_image, save_input, color_list=['#FFFFFF', '#FF00FF', '#FFFF00', '#00FFFF', '#00FF00','#0000FF','#FF0000'], save_dir=None):
         rgb_list = [hex_2_rgb(hexcode) for hexcode in color_list]
 
         centers = kmeans.cluster_centers_
@@ -313,12 +322,22 @@ class K_means_cluster():
         for idx in cent_range:
             new_idx = int(np.argsort(row_max)[idx])
             temp[np.where(orig_labels==new_idx)[0]] = rgb_list[idx]
+
         labels = temp
-        label_img = labels.reshape((original_image.shape[1], original_image.shape[2],3))
-        plt.imshow(label_img)
+        label_arr = np.reshape(labels, (len(sample_list), original_image.shape[1], original_image.shape[2], 3))
+        # label_img = labels.reshape((original_image.shape[1], original_image.shape[2],3))
+        fig, ax = plt.subplots(len(sample_list), 2, figsize=(8,16))
+        for i in range(len(sample_list)):
+            ax[i,0].imshow(np.max(original_image,axis=0))
+            ax[i,0].set_yticks([])
+            ax[i,0].set_xticks([])
+            ax[i,1].imshow(label_arr[i])
+            ax[i,1].set_yticks([])
+            ax[i,1].set_xticks([])
         plt.show()
         if save_input == True:
-            io.imsave(save_dir + 'Clustered_Image.tif', label_img)
+            for i in range(len(sample_list)):
+                io.imsave(save_dir + str(i) + '-Clustered_Image.tif', label_arr[i])
 
 
     
@@ -349,15 +368,12 @@ class RF_classify():
         plt.show()
     
 def calculate_mse(spectrum1, spectrum2):
-    """Calculate Mean Squared Error between exosome and lipid spectra."""
-    return np.mean((spectrum1 - spectrum2) ** 2)
+    return mean_squared_error(spectrum1, spectrum2)
 
 def compute_cosine_similarity(spectrum1, spectrum2):
-    """Compute Cosine Similarity between two spectra."""
     return cosine_similarity([spectrum1], [spectrum2])[0, 0]
 
 def compute_crosscor(spectrum1, spectrum2):
-    """Compute Cosine Similarity between two spectra."""
     crosscorrelation = correlate(spectrum1, spectrum2, mode='full')
     norm_signal1 = np.sqrt(np.sum(spectrum1**2))
     norm_signal2 = np.sqrt(np.sum(spectrum2**2))
@@ -394,13 +410,19 @@ class semi_supervised_outputs():
                 plt.ylabel('Normalized Intensity',fontsize='24', weight ='bold')
                 plt.xticks(fontsize=16)
                 if save_input == True:
-                    plt.savefig(save_dir + 'Predicted '+str([idx])+' Match'+'.tif', bbox_inches = "tight")
+                    plt.savefig(save_dir + 'Predicted '+str(self.label[idx])+' Match'+'.tif', bbox_inches = "tight")
 
     def probability_images (self, original_image, save_input, save_dir=None):
         temp_image = self.y_prob.T
         prob_image  = temp_image.reshape(self.y_prob.shape[1],original_image.shape[1],original_image.shape[2])
+        background_image = prob_image[-1,:,:]
+        background_mask = np.zeros(background_image.shape)
+        background_mask[background_image<0.01]=1
         if save_input == True:
-            io.imsave(save_dir + 'Probability_Figure.tif', (prob_image*100).astype('float32'))
+            for idx in tqdm(range(len(temp_image)-1)):
+                image = prob_image[idx]*background_mask
+                io.imsave(save_dir +str(self.label[idx])+'-Probability_Figure.tif', (image*100).astype('float32'))
+            io.imsave(save_dir +'Bacgkground-Probability_Figure.tif', (background_image*100).astype('float32'))
 
 
     def similarity_metrics (self, mol_norm, save_input, save_dir=None):

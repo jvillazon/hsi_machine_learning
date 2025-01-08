@@ -96,11 +96,18 @@ def lip_normalize(lipids):
     return lip_norm
 
 def save_input():
-    y_n_input = input('Save into save directory (y/n)?: ').lower()
-    if y_n_input == 'y':
-        return True
-    elif y_n_input == 'n':
-        return False
-    else:
-        raise Exception('Invalid input, please press y/n.')
+    while True:
+        try:
+            y_n_input = input('Save into save directory (y/n)?: ').lower()
+            if y_n_input in ['y', 'n']:
+                if y_n_input == 'y':
+                    return True
+                if y_n_input == 'n':
+                    return False
+            else:
+                raise Exception('Invalid input, please press y/n.')
+        except Exception('Invalid input, please press y/n.'):
+            continue
+        else:
+            break
             
