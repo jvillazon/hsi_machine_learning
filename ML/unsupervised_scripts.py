@@ -39,7 +39,7 @@ def create_background(wavenumber_1, wavenumber_2, num_samp, background_df, br_sh
     """
 
     CH_wavenumber = np.linspace(wavenumber_1,wavenumber_2,num_samp-br_shift)
-    temp = background_df[8:].to_numpy() 
+    temp = background_df[:].to_numpy() 
     temp = temp[:,0]
     x = np.linspace(wavenumber_1, wavenumber_2,len(temp))
     y = np.array(temp)
@@ -151,7 +151,7 @@ class artificial_dataset:
     
     def save_srs_params(self, data_dir):
 
-        count = 0
+        boolean = True
         data_list = os.listdir(data_dir)
         for name in tqdm(data_list):
             image = io.imread(data_dir + name)
@@ -159,11 +159,11 @@ class artificial_dataset:
             image_vector = np.flip(image_vector, axis=0)
             first_val = np.median(image_vector[:self.ch_start, :])
             image_vector = image_vector - first_val.T
-            if count > 0:
-                temp = np.concatenate((temp, image_vector), axis=1)
+            if boolean:
+                 temp = image_vector
+                 boolean = False
             else:
-                temp = image_vector
-                count += 1
+                temp = np.concatenate((temp, image_vector), axis=1)
         image_spec = helper_scripts.normalize(temp)
         image_spec = image_spec[:, np.logical_not(image_spec[0, :] > image_spec[-1, :])]
         spec_start = image_spec[:self.ch_start]
@@ -300,44 +300,62 @@ class K_means_cluster():
         plt.tight_layout()
         for idx in cent_range:
             cent = sorted_centers[idx,:]
-            plt.plot(wavenumbers, cent-cent[0], label='Cluster '+str(idx+1), color=color_list[idx])
+            plt.plot(wavenumbers, cent-cent.min(), label='Cluster '+str(idx+1), color=color_list[idx])
         plt.grid()
         plt.tick_params(right = False , labelleft = False) 
         plt.xlabel('Wavenumber (cm$^-$$^1$)',fontsize=14,fontweight='bold')
         plt.ylabel('Raman Intensity (A.U.)',fontsize=14,fontweight='bold')
         plt.legend(loc='upper left')
         plt.title('K-means Cluster',fontsize=14,fontweight='bold')
+        if save_input:
+            fig1 = plt.gcf()
+            fig1.savefig(save_dir + 'Graph.png', bbox_inches='tight')    
         plt.show()
-        if save_input == True:
-            plt.savefig(save_dir + 'Clustered_Graph.png', bbox_inches='tight')       
+   
 
-    def kmeans_image (self, kmeans, sample_list, original_image, save_input, color_list=['#FFFFFF', '#FF00FF', '#FFFF00', '#00FFFF', '#00FF00','#0000FF','#FF0000'], save_dir=None):
+    def kmeans_image (self, kmeans, image_list, save_input, color_list=['#FFFFFF', '#FF00FF', '#FFFF00', '#00FFFF', '#00FF00','#0000FF','#FF0000'], save_dir=None):
         rgb_list = [hex_2_rgb(hexcode) for hexcode in color_list]
-
-        centers = kmeans.cluster_centers_
-        cent_range = list(range(len(centers)))
-        row_max = centers.max(axis=1)
+        cent_range = list(range(len(kmeans.cluster_centers_)))
+        row_idx = np.argsort(kmeans.cluster_centers_.max(axis=1))
         orig_labels = kmeans.labels_
         temp = np.empty((orig_labels.shape[0],3))
+        label_idx = np.empty(orig_labels.shape[0])
         for idx in cent_range:
-            new_idx = int(np.argsort(row_max)[idx])
+            new_idx = row_idx[idx]
             temp[np.where(orig_labels==new_idx)[0]] = rgb_list[idx]
+            label_idx[np.where(orig_labels==new_idx)[0]] = idx
 
         labels = temp
-        label_arr = np.reshape(labels, (len(sample_list), original_image.shape[1], original_image.shape[2], 3))
-        # label_img = labels.reshape((original_image.shape[1], original_image.shape[2],3))
-        fig, ax = plt.subplots(len(sample_list), 2, figsize=(8,16))
-        for i in range(len(sample_list)):
-            ax[i,0].imshow(np.max(original_image,axis=0))
-            ax[i,0].set_yticks([])
-            ax[i,0].set_xticks([])
-            ax[i,1].imshow(label_arr[i])
-            ax[i,1].set_yticks([])
-            ax[i,1].set_xticks([])
+        counter = 0
+        label_list = []
+        for image in image_list:
+            size = image.shape[0]*image.shape[1]
+            label_img = np.reshape(labels[counter:counter+(size)], (image.shape[0], image.shape[1], 3))
+            label_list.append(label_img)
+            counter += size
+        if save_input:
+            for i in range(len(image_list)):
+                io.imsave(save_dir + 'Image_' + str(i) + '.tif', label_list[i])
+    
+        fig, ax = plt.subplots(len(image_list), 2, figsize=(8,16))
+    
+        if len(image_list)==1:
+            ax[0].imshow(image_list[0])
+            ax[0].set_yticks([])
+            ax[0].set_xticks([])
+            ax[1].imshow(label_list[0])
+            ax[1].set_yticks([])
+            ax[1].set_xticks([])
+        else:
+            for i in range(len(image_list)):
+                ax[i,0].imshow(image_list[i])
+                ax[i,0].set_yticks([])
+                ax[i,0].set_xticks([])
+                ax[i,1].imshow(label_list[i])
+                ax[i,1].set_yticks([])
+                ax[i,1].set_xticks([])
         plt.show()
-        if save_input == True:
-            for i in range(len(sample_list)):
-                io.imsave(save_dir + str(i) + '-Clustered_Image.tif', label_arr[i])
+        return label_idx
 
 
     
@@ -409,7 +427,7 @@ class semi_supervised_outputs():
                 plt.xlabel('Wavenumber (cm$^-$$^1$)',fontsize='24', weight ='bold')
                 plt.ylabel('Normalized Intensity',fontsize='24', weight ='bold')
                 plt.xticks(fontsize=16)
-                if save_input == True:
+                if save_input:
                     plt.savefig(save_dir + 'Predicted '+str(self.label[idx])+' Match'+'.tif', bbox_inches = "tight")
 
     def probability_images (self, original_image, save_input, save_dir=None):
@@ -418,7 +436,7 @@ class semi_supervised_outputs():
         background_image = prob_image[-1,:,:]
         background_mask = np.zeros(background_image.shape)
         background_mask[background_image<0.01]=1
-        if save_input == True:
+        if save_input:
             for idx in tqdm(range(len(temp_image)-1)):
                 image = prob_image[idx]*background_mask
                 io.imsave(save_dir +str(self.label[idx])+'-Probability_Figure.tif', (image*100).astype('float32'))
@@ -458,7 +476,7 @@ class semi_supervised_outputs():
             'Average Correlation': correlation_arr
         }
         metric_df = pd.DataFrame(metric_dic)
-        if save_input == True:
+        if save_input:
             metric_df.to_csv(save_dir+'Metrics.csv', index=False)
             
 
