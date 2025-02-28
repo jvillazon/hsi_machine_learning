@@ -44,7 +44,7 @@ class load_data():
        
         # temp_spectra = normalize(temp_spectra)
         spectra_max_idx = np.argmax(np.mean(temp_spectra,axis=1))
-        temp_spectra = normalizebyvalue(temp_spectra, max_val=np.mean(temp_spectra[spectra_max_idx])+2*np.std(temp_spectra[spectra_max_idx]),min_val=0)
+        temp_spectra = normalizebyvalue(temp_spectra, max_val=np.mean(temp_spectra[spectra_max_idx])+3*np.std(temp_spectra[spectra_max_idx]),min_val=0)
         temp_spectra = np.flip(temp_spectra, axis=0)
         temp_spectra = temp_spectra - np.median(temp_spectra[:self.ch_start:,:],axis=0)
 

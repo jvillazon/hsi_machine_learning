@@ -281,7 +281,7 @@ class K_means_cluster():
             pca = PCA(n_components=n_clusters).fit(self.data)
             kmeans = KMeans(init=pca.components_, n_clusters=n_clusters, n_init=1)
             print(f'Clusters: {n_clusters}') 
-            bench_k_means(kmeans=kmeans, name="PCA-based", data=self.data)
+            bench_k_means(kmeans=kmeans, name="PCA-based K-means", data=self.data)
         print(82 * "_")
 
     def kmeans (self, n_clusters):
@@ -300,7 +300,6 @@ class K_means_cluster():
         plt.tight_layout()
         for idx in cent_range:
             cent = sorted_centers[idx,:]
-            # br = helper_scripts.normalize(sorted_centers[0], cent[-1],cent[0])
             plt.plot(wavenumbers, cent, label='Cluster '+str(idx+1), color=color_list[idx])
         plt.grid()
         plt.tick_params(right = False , labelleft = False) 
