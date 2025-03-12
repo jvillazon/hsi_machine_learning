@@ -13,6 +13,24 @@ import imageio
 from tkinter import filedialog, Tk
 
 
+def spectra_correction(spectrum, ch_start):
+    """Correct HSI Spectra"""
+
+    temp_spectra = spectrum
+    temp_spectra[np.isinf(temp_spectra)] = 0
+    temp_spectra[np.isnan(temp_spectra)] = 0
+
+    # temp_spectra = normalize(temp_spectra)
+    spectra_max_idx = np.argmax(np.mean(temp_spectra, axis=1))
+    temp_spectra = normalizebyvalue(temp_spectra, max_val=np.mean(temp_spectra[spectra_max_idx]) + 3 * np.std(
+        temp_spectra[spectra_max_idx]), min_val=0)
+    temp_spectra = np.flip(temp_spectra, axis=0)
+    temp_spectra = temp_spectra - np.median(temp_spectra[:ch_start:, :], axis=0)
+
+    # temp_spectra, arr_mean = snv(temp_spectra)
+
+    return temp_spectra
+
 class load_data():
 
     def __init__(self, wn_1=2700, wn_2=3100):
@@ -33,37 +51,17 @@ class load_data():
         self.wn_1 = wn_1
         self.wn_2 = wn_2
 
-    def spectra_correction(self, spectrum):
-        """Correct HSI Spectra"""
-
-        temp_spectra = spectrum
-        temp_spectra[np.isinf(temp_spectra)] = 0
-        temp_spectra[np.isnan(temp_spectra)] = 0
-   
-
-       
-        # temp_spectra = normalize(temp_spectra)
-        spectra_max_idx = np.argmax(np.mean(temp_spectra,axis=1))
-        temp_spectra = normalizebyvalue(temp_spectra, max_val=np.mean(temp_spectra[spectra_max_idx])+3*np.std(temp_spectra[spectra_max_idx]),min_val=0)
-        temp_spectra = np.flip(temp_spectra, axis=0)
-        temp_spectra = temp_spectra - np.median(temp_spectra[:self.ch_start:,:],axis=0)
-
-        # temp_spectra, arr_mean = snv(temp_spectra)
-
-
-
-        return temp_spectra
 
     def load_spectra(self):
         """Load HSI spectra"""
 
-        list_dir = os.listdir(self.data_dir)
+        list_dir = [name for name in os.listdir(self.data_dir)if not name.startswith(".")]
         img_dict = {key: {} for key in list_dir}
 
         for idx, image in tqdm(enumerate(list_dir)):
 
             img_path = os.path.join(self.data_dir+os.sep+image)
-            img = imageio.imread(img_path)
+            img = io.imread(img_path)
 
             img_dict[image]['shape'] = img.shape
 
@@ -74,16 +72,17 @@ class load_data():
                 self.ch_start = 1
 
             old_spectra = img.reshape(img.shape[0], img.shape[1]*img.shape[2])
-            temp_spectra = self.spectra_correction(old_spectra)
+            temp_spectra = spectra_correction(old_spectra, self.ch_start)
 
             if idx == 0:
                 spectra = temp_spectra
-                orig_spectra = old_spectra
+                # orig_spectra = old_spectra
             else:
                 spectra = np.concatenate((spectra, temp_spectra), axis=1)
-                orig_spectra = np.concatenate((orig_spectra, old_spectra), axis=1)
+                print(f"Spectra size is: {spectra.shape}")
+                # orig_spectra = np.concatenate((orig_spectra, old_spectra), axis=1)
 
-        return spectra, img_dict, orig_spectra
+        return spectra, img_dict #, orig_spectra
 
     def create_background(self, background_path):
         background_df = pd.read_csv(background_path)

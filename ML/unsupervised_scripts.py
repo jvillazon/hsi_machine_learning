@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 from skimage import io
+import imageio
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split
@@ -13,8 +14,25 @@ from scipy.signal import savgol_filter, correlate
 from scipy.interpolate import CubicSpline
 from time import time
 from tqdm import tqdm
+import glob
 import matplotlib.pyplot as plt
 import helper_scripts
+
+def save_input():
+    while True:
+        try:
+            y_n_input = input('Save into save directory (y/n)?: ').lower().strip() or 'y'
+            if y_n_input in ['y', 'n']:
+                if y_n_input == 'y':
+                    return True
+                if y_n_input == 'n':
+                    return False
+            else:
+                raise Exception('Invalid input, please press y/n.')
+        except Exception('Invalid input, please press y/n.'):
+            continue
+        else:
+            break
 
 
 def create_background(wavenumber_1, wavenumber_2, num_samp, background_df, br_shift):
@@ -154,7 +172,10 @@ class artificial_dataset:
         boolean = True
         data_list = os.listdir(data_dir)
         for name in tqdm(data_list):
-            image = io.imread(data_dir + name)
+            if not name.startswith("."):
+                image = imageio.imread(data_dir + name)
+            else:
+                continue
             image_vector = np.reshape(image, (image.shape[0], image.shape[1] * image.shape[2]))
             image_vector = np.flip(image_vector, axis=0)
             first_val = np.median(image_vector[:self.ch_start, :])
@@ -186,7 +207,7 @@ class artificial_dataset:
         random_integers = np.random.randint(0, int(bg_scale_vec.shape[0]), size=num_values)
         background_scale = bg_param*bg_scale_vec[random_integers]
         ch_scale = ch_param*ratio_scale_vec[random_integers]
-        noise_scale = noise_param*noise_scale_vec[random_integers]
+        noise_scale = np.maximum(noise_param*noise_scale_vec[random_integers], 0.25)
         background = np.flip(np.outer(background_scale, self.background),axis=1)
         noise = np.random.normal(0, noise_scale, (self.num_samp, num_values)).T
         artificial_mol = np.zeros((mol_norm.shape[0], num_values, mol_norm.shape[1]), dtype='float32')
@@ -314,7 +335,7 @@ class K_means_cluster():
         return sorted_centers
    
 
-    def kmeans_image (self, kmeans, image_list, save_input, color_list=['#FFFFFF', '#FF00FF', '#FFFF00', '#00FFFF', '#00FF00','#0000FF','#FF0000'], save_dir=None):
+    def kmeans_image (self, kmeans, image_list, img_dict, save_input, color_list=['#FFFFFF', '#FF00FF', '#FFFF00', '#00FFFF', '#00FF00','#0000FF','#FF0000'], save_dir=None):
         rgb_list = [hex_2_rgb(hexcode) for hexcode in color_list]
         centers = kmeans.cluster_centers_
         cent_range = list(range(len(kmeans.cluster_centers_)))
@@ -331,14 +352,19 @@ class K_means_cluster():
         labels = temp
         counter = 0
         label_list = []
-        for image in image_list:
+        for i, image in enumerate(image_list):
             size = image.shape[0]*image.shape[1]
             label_img = np.reshape(labels[counter:counter+(size)], (image.shape[0], image.shape[1], 3))
             label_list.append(label_img)
             counter += size
-        if save_input:
-            for i in range(len(image_list)):
-                io.imsave(save_dir + 'Image_' + str(i) + '.tif', label_list[i])
+
+            cluster_stack = np.empty((len(centers), image.shape[0], image.shape[1], 3))
+            for idx, color in tqdm(enumerate(rgb_list)):
+                mask = np.all(label_img == color, axis=-1)
+                cluster_stack[idx] = label_img * (mask[:, :, None])
+            if save_input:
+                io.imsave(save_dir + [*img_dict.keys()][i], label_img)
+                io.imsave(save_dir + 'cluster_stack-'+[*img_dict.keys()][i], cluster_stack)
     
         fig, ax = plt.subplots(len(image_list), 2, figsize=(8,int(len(image_list)*4)))
     
