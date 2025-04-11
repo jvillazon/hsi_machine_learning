@@ -206,8 +206,11 @@ class artificial_dataset:
 
         random_integers = np.random.randint(0, int(bg_scale_vec.shape[0]), size=num_values)
         background_scale = bg_param*bg_scale_vec[random_integers]
+        # background_scale = np.maximum(background_scale, 0.25)
         ch_scale = ch_param*ratio_scale_vec[random_integers]
-        noise_scale = np.maximum(noise_param*noise_scale_vec[random_integers], 0.25)
+        ch_scale = np.maximum(ch_scale, 0.75)
+        noise_scale = noise_param*noise_scale_vec[random_integers]
+        noise_scale = np.maximum(noise_scale, 0.02)
         background = np.flip(np.outer(background_scale, self.background),axis=1)
         noise = np.random.normal(0, noise_scale, (self.num_samp, num_values)).T
         artificial_mol = np.zeros((mol_norm.shape[0], num_values, mol_norm.shape[1]), dtype='float32')
