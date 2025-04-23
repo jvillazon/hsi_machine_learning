@@ -83,19 +83,19 @@ for sample in tqdm(sample_list):
     plt.title("Spectra Peak Intensity")
     plt.show()
 
-    ## Visualize random spectra for validation of preprocessing
-
-    wavenumbers = np.linspace(wavenum_1, wavenum_2, num_samp)
-    indeces = [random.randint(0, image_norm.shape[0] - 1), random.randint(0, image_norm.shape[0] - 1),
-               random.randint(0, image_norm.shape[0] - 1)]
-    plt.plot(wavenumbers, image_norm[indeces].T, label='Training Spectra')
-    rand_idx = np.random.randint(0, X_norm.shape[0])
-    plt.plot(wavenumbers, X_norm[rand_idx].T, label=f'{Y[rand_idx]} Spectra')
-    plt.legend()
-    plt.title('Baseline Corrected + Normalized Spectra')
-    plt.xlabel('Wavenumbers (cm$^{-1}$)')
-    plt.ylabel('Normalized Intensity (A.U.)')
-    plt.show()
+    # ## Visualize random spectra for validation of preprocessing
+    #
+    # wavenumbers = np.linspace(wavenum_1, wavenum_2, num_samp)
+    # indeces = [random.randint(0, image_norm.shape[0] - 1), random.randint(0, image_norm.shape[0] - 1),
+    #            random.randint(0, image_norm.shape[0] - 1)]
+    # plt.plot(wavenumbers, image_norm[indeces].T, label='Training Spectra')
+    # rand_idx = np.random.randint(0, X_norm.shape[0])
+    # plt.plot(wavenumbers, X_norm[rand_idx].T, label=f'{Y[rand_idx]} Spectra')
+    # plt.legend()
+    # plt.title('Baseline Corrected + Normalized Spectra')
+    # plt.xlabel('Wavenumbers (cm$^{-1}$)')
+    # plt.ylabel('Normalized Intensity (A.U.)')
+    # plt.show()
 
     ## Save Normalized Image and channels (ONLY FOR 2700-3100)
     print('Saving macromolecule channels...')
@@ -150,6 +150,5 @@ for sample in tqdm(sample_list):
     outputs.spectral_graphs(mol_norm, wavenumbers, save_input, save_dir)
     plt.show()
     outputs.probability_images(image, save_input, save_dir)
-    plt.show()
     outputs.similarity_metrics(mol_norm, save_input, save_dir)
     print('done.')
