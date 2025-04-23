@@ -17,6 +17,7 @@ from tqdm import tqdm
 import glob
 import matplotlib.pyplot as plt
 import helper_scripts
+import processing
 
 def save_input():
     while True:
@@ -63,7 +64,7 @@ def create_background(wavenumber_1, wavenumber_2, num_samp, background_df, br_sh
     y = np.array(temp)
     spline = CubicSpline(x, y)
     background = spline(CH_wavenumber)
-    background = helper_scripts.normalize(background)
+    background = processing.normalize(background)
     background = np.flip(background)
     back_temp = np.zeros(num_samp)
     back_temp[br_shift:]=background
@@ -146,7 +147,7 @@ class artificial_dataset:
                 remove_nan.append(int(i / 2))
         keep = [i for i in range(temp.shape[0]) if i not in remove_nan]
         molecules = temp[keep, :]
-        mol_norm = helper_scripts.normalize(molecules)
+        mol_norm = molecules
         mol_norm = np.vstack((mol_norm, np.zeros(self.num_samp,dtype='float32')))
         mol_names = temp_names[keep]
         mol_names = np.hstack((mol_names, 'Background'))
@@ -161,7 +162,7 @@ class artificial_dataset:
         for j in range(dataset_size - 2):
             for i in tqdm(range(j + 1, dataset_size - 1)):
                 temp_spectra = mol_norm[j, :] + mol_norm[i, :]
-                mol_add[count, :] = helper_scripts.normalize(temp_spectra)
+                mol_add[count, :] = processing.normalize(temp_spectra)
                 count += 1
         dataset_norm = np.vstack((mol_norm, mol_add))
 
@@ -185,7 +186,7 @@ class artificial_dataset:
                  boolean = False
             else:
                 temp = np.concatenate((temp, image_vector), axis=1)
-        image_spec = helper_scripts.normalize(temp)
+        image_spec = processing.normalize(temp)
         image_spec = image_spec[:, np.logical_not(image_spec[0, :] > image_spec[-1, :])]
         spec_start = image_spec[:self.ch_start]
         image_vec = image_spec[:, np.all(
@@ -197,31 +198,29 @@ class artificial_dataset:
         bg_scale_vec = image_vec[-1] - image_vec[0]
         max_vec = np.max(image_vec, axis=0)
         ratio_scale_vec = max_vec-start_vec
+        ratio_scale_vec = np.maximum(ratio_scale_vec, np.mean(ratio_scale_vec))
 
         return image_vec.T, noise_scale_vec, bg_scale_vec, ratio_scale_vec
 
         # Generate artificial SRS spectra from the molecular spectra
     def save_artificial_dataset(self, mol_norm, noise_scale_vec, bg_scale_vec, ratio_scale_vec, num_values=200, num_repeats=10, bg_param=1, ch_param=1, noise_param=1, name='artificial_training_data-'):
         mol_norm = np.flip(mol_norm,axis=1)
-
         random_integers = np.random.randint(0, int(bg_scale_vec.shape[0]), size=num_values)
         background_scale = bg_param*bg_scale_vec[random_integers]
         # background_scale = np.maximum(background_scale, 0.25)
         ch_scale = ch_param*ratio_scale_vec[random_integers]
-        ch_scale = np.maximum(ch_scale, 0.75)
+        # ch_scale = np.maximum(ch_scale, 0.75)
         noise_scale = noise_param*noise_scale_vec[random_integers]
         noise_scale = np.maximum(noise_scale, 0.02)
         background = np.flip(np.outer(background_scale, self.background),axis=1)
         noise = np.random.normal(0, noise_scale, (self.num_samp, num_values)).T
-        artificial_mol = np.zeros((mol_norm.shape[0], num_values, mol_norm.shape[1]), dtype='float32')
-        for mol_index in tqdm(range(len(mol_norm))):
-            mol_temp = mol_norm[mol_index]
+        artificial_mol = np.zeros((num_values, mol_norm.shape[0],mol_norm.shape[1]), dtype='float32')
+        for idx, mol_temp in tqdm(enumerate(mol_norm)):
+            mol_temp = processing.normalize(mol_temp)
             mol_vec = np.outer(ch_scale, mol_temp)
-            artificial_mol[mol_index] = (mol_vec + noise + background)
-        artificial_mol= helper_scripts.normalize(artificial_mol)
-        artificial_mol = np.tile(artificial_mol, (num_repeats, 1, 1, 1))
-        artificial_mol = np.moveaxis(artificial_mol, 2, 1)
-        artificial_mol = np.reshape(artificial_mol, (artificial_mol.shape[0] * artificial_mol.shape[1], artificial_mol.shape[2], artificial_mol.shape[3]))
+            artificial_mol[:,idx,:] = (mol_vec + noise + background)
+        artificial_mol = np.repeat(artificial_mol, repeats=num_repeats, axis=0)
+        # artificial_mol = np.reshape(artificial_mol, (artificial_mol.shape[0] * artificial_mol.shape[1], artificial_mol.shape[2], artificial_mol.shape[3]))
 
         np.save('artificial_data/'+name+str(self.wavenumber_1+self.shift)+'_'+str(self.wavenumber_2+self.shift)+'_'+str(self.num_samp)+'.npy', artificial_mol)
 
@@ -238,7 +237,7 @@ class preprocessing():
 
     def spectral_standardization(self, data, br_shift=0):
         self.background = create_background(self.wavenumber_1, self.wavenumber_2, self.num_samp, self.background_df, br_shift)
-        temp_norm = helper_scripts.normalize(data)
+        temp_norm = processing.normalize(data)
         temp_end = temp_norm[:,-1:-4:-1]
         temp_start = temp_norm[:,:self.ch_start]
         temp = temp_norm-np.mean(temp_start,axis=1)[0]
@@ -443,8 +442,8 @@ class semi_supervised_outputs():
         self.car_hab_score = calinski_harabasz_score(self.x, self.y_pred)
     
     def spectral_graphs (self, mol_norm, wavenumbers, save_input, save_dir=None):
-        for idx in tqdm(range(len(self.label)-1)):
-            cur_label = self.x[self.y_pred==idx]
+        for idx, label in tqdm(enumerate(list(self.label)[:-1])):
+            cur_label = self.x[self.y_pred==label]
             if cur_label.shape[0] > 0:
                 fig = plt.figure(figsize=(10, 8))
                 ax = fig.add_subplot(111)
@@ -453,26 +452,34 @@ class semi_supervised_outputs():
                 yerror = cur_label.std(axis=0)/2
                 plt.plot(wavenumbers, ymean,color='green', label='sample signal mean' )
                 plt.fill_between(wavenumbers, ymean-yerror, ymean+yerror, alpha=0.5, color='green')
-                plt.plot(wavenumbers,helper_scripts.normalize(mol_norm[idx], np.max(ymean),0), alpha=0.75, color='black', label=self.label[idx]+' signal',linewidth = 3)
+                plt.plot(wavenumbers,helper_scripts.normalize(mol_norm[idx], np.max(ymean),0),
+                         alpha=0.75, color='black', label=self.label[idx]+' signal',linewidth = 3)
                 plt.legend(loc='center left',fontsize='16')
                 plt.title('Predicted SRS Spectra for \n'+str(self.label[idx]),fontsize='28', weight ='bold')
                 plt.xlabel('Wavenumber (cm$^-$$^1$)',fontsize='24', weight ='bold')
                 plt.ylabel('Normalized Intensity',fontsize='24', weight ='bold')
                 plt.xticks(fontsize=16)
                 if save_input:
-                    plt.savefig(save_dir + 'Predicted '+str(self.label[idx])+' Match'+'.tif', bbox_inches = "tight")
+                    plt.savefig(save_dir + 'Predicted '+str(self.label[idx])+' Match'+'.svg', bbox_inches = "tight")
+                plt.show()
 
     def probability_images (self, original_image, save_input, save_dir=None):
         temp_image = self.y_prob.T
-        prob_image  = temp_image.reshape(self.y_prob.shape[1],original_image.shape[1],original_image.shape[2])
+        prob_image = np.zeros((self.y_prob.shape[1],original_image.shape[1] * original_image.shape[2]))
+        prob_image[:, ~np.all(original_image.reshape((original_image.shape[0],original_image.shape[1]*original_image.shape[2]))==0,
+                              axis=0)] = temp_image
+        prob_image = np.reshape(prob_image, (self.y_prob.shape[1],original_image.shape[1],original_image.shape[2]))
+        # prob_image  = temp_image.reshape(self.y_prob.shape[1],original_image.shape[1],original_image.shape[2])
         background_image = prob_image[-1,:,:]
         background_mask = np.zeros(background_image.shape)
         background_mask[background_image<0.01]=1
         if save_input:
-            for idx in tqdm(range(len(temp_image)-1)):
-                image = prob_image[idx]*background_mask
-                io.imsave(save_dir +str(self.label[idx])+'-Probability_Figure.tif', (image*100).astype('float32'))
-            io.imsave(save_dir +'Bacgkground-Probability_Figure.tif', (background_image*100).astype('float32'))
+            # for idx in tqdm(range(len(temp_image)-1)):
+            #     image = prob_image[idx]*background_mask
+            #     io.imsave(save_dir +str(self.label[idx])+'-Probability_Figure.tif', (image*100).astype('float32'))
+            image = prob_image * background_mask
+            io.imsave(save_dir + 'Probability Figures.tif', (image*100).astype('float32'))
+            io.imsave(save_dir +'Background-Probability_Figure.tif', (background_image*100).astype('float32'))
 
 
     def similarity_metrics (self, mol_norm, save_input, save_dir=None):
