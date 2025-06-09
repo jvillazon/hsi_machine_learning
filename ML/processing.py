@@ -55,11 +55,10 @@ class load_data():
     def load_spectra(self):
         """Load HSI spectra"""
 
-        list_dir = [name for name in os.listdir(self.data_dir)if not name.startswith(".")]
-        img_dict = {key: {} for key in list_dir}
+        list_dir = [name for name in os.listdir(self.data_dir)if not name.startswith(".") and name.endswith('.tif')]
+        img_dict = {key: {} for key in list_dir if key.endswith('.tif')}
 
         for idx, image in tqdm(enumerate(list_dir)):
-
             img_path = os.path.join(self.data_dir+os.sep+image)
             img = io.imread(img_path)
 
@@ -116,8 +115,8 @@ def normalize(array, max=1, min=0,axis=None):
             norm = ((array-min_val)/(diff))*(max-min)+min
     else:
         norm = array.copy()
-        idx = np.where(diff!=0)[0]
-        norm[idx] = (((array[idx].T-min_val[idx])/(diff[idx]))*(max-min)+min).T
+
+        norm = (((array.T-min_val)/(diff))*(max-min)+min).T
 
     return norm
 

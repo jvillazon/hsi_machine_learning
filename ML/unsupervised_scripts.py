@@ -369,7 +369,7 @@ class K_means_cluster():
                 mask = np.all(label_img == color, axis=-1)
                 cluster_stack[idx] = label_img * (mask[:, :, None])
             if save_input:
-                io.imsave(save_dir + [*img_dict.keys()][i], label_img)
+                # io.imsave(save_dir + [*img_dict.keys()][i], label_img)
                 io.imsave(save_dir + 'cluster_stack-'+[*img_dict.keys()][i], cluster_stack)
     
         fig, ax = plt.subplots(len(image_list), 2, figsize=(8,int(len(image_list)*4)))
@@ -445,7 +445,7 @@ class semi_supervised_outputs():
         self.y_prob = self.classifier.predict_proba(x)
         self.car_hab_score = calinski_harabasz_score(self.x, self.y_pred)
     
-    def spectral_graphs (self, mol_norm, wavenumbers, save_input, save_dir=None):
+    def spectral_graphs (self, mol_norm, background, wavenumbers, save_input, save_dir=None):
         for idx in tqdm(range(len(self.label)-1)):
             cur_label = self.x[self.y_pred==idx]
             if cur_label.shape[0] > 0:
@@ -453,11 +453,14 @@ class semi_supervised_outputs():
                 ax = fig.add_subplot(111)
                 ax.set(yticklabels=[])
                 ymean = cur_label.mean(axis=0)
+                ymean = ymean-np.median(ymean[0:ymean.shape[0]//4])
                 yerror = cur_label.std(axis=0)/2
                 plt.plot(wavenumbers, ymean,color='green', label='sample signal mean' )
                 plt.fill_between(wavenumbers, ymean-yerror, ymean+yerror, alpha=0.5, color='green')
-                plt.plot(wavenumbers,helper_scripts.normalize(mol_norm[idx], np.max(ymean),0),
-                         alpha=0.75, color='black', label=self.label[idx]+' signal',linewidth = 3)
+                label_spectra = processing.normalize(mol_norm[idx], ymean[int(np.argmax(mol_norm[idx]))], 0)
+                label_spectra  = label_spectra + processing.normalize(background, ymean[-1], 0)
+                plt.plot(wavenumbers, label_spectra, alpha=0.75, color='black',
+                         label=self.label[idx]+' signal',linewidth = 3)
                 plt.legend(loc='center left',fontsize='16')
                 plt.title('Predicted SRS Spectra for \n'+str(self.label[idx]),fontsize='28', weight ='bold')
                 plt.xlabel('Wavenumber (cm$^-$$^1$)',fontsize='24', weight ='bold')
@@ -470,8 +473,7 @@ class semi_supervised_outputs():
     def probability_images (self, original_image, save_input, save_dir=None):
         temp_image = self.y_prob.T
         prob_image = np.empty((self.y_prob.shape[1],original_image.shape[1] * original_image.shape[2]))
-        prob_image[:, ~np.all(original_image.reshape((original_image.shape[0],original_image.shape[1]*original_image.shape[2]))==0,
-                              axis=0)] = temp_image
+        prob_image[:, :] = temp_image
         prob_image = np.reshape(prob_image, (self.y_prob.shape[1],original_image.shape[1],original_image.shape[2]))
         # prob_image  = temp_image.reshape(self.y_prob.shape[1],original_image.shape[1],original_image.shape[2])
         background_image = prob_image[-1,:,:]

@@ -20,12 +20,14 @@ def macro_idx(wavenumber, num_samp, wavenum_1=2700, wavenum_2=3100):
     idx = int(((wavenumber - wavenum_1) / (wavenum_2 - wavenum_1)) * num_samp)
     return idx
 
+
+
 class RandomForestDetect():
     def __init__(self, wavenum_1=2700, wavenum_2=3100):
         self.wavenum_1 = wavenum_1
         self.wavenum_2 = wavenum_2
 
-    def RF_classify(self, num_estimators=250):
+    def RF_classify(self, num_estimators=250, save_input = True):
         for sample in sample_list:
             if sample.startswith('.') or not sample.endswith('.tif'):
                 continue
@@ -69,33 +71,9 @@ class RandomForestDetect():
                                                              X_data.shape[2]), order='F')
 
             ## Process both datasets
+            background = unsupervised_scripts.create_background(wavenum_1, wavenum_2, num_samp, background_df, br_shift=shift)
             preprocessing = unsupervised_scripts.preprocessing(wavenum_1, wavenum_2, num_samp, ch_start, background_df)
-            X_norm = preprocessing.spectral_standardization(np.flip(X, axis=1))
             image_norm = preprocessing.spectral_standardization(np.flip(image_vec, axis=1), br_shift=shift)
-            # X_norm = processing.normalize(X_norm, max=np.max(image_norm))
-            # X_norm = (X_norm.T-np.median(X_norm[:ch_start])).T
-
-            save_input = True
-
-            plt.hist(np.max(image_norm, axis=1) - image_norm[:, 0], label="Image Spectra")
-            plt.hist(np.max(X_norm, axis=1) - X_norm[:, 0], alpha=0.5, label="Artificial Spectra")
-            plt.legend()
-            plt.title("Spectra Peak Intensity")
-            plt.show()
-
-            ## Visualize random spectra for validation of preprocessing
-
-            wavenumbers = np.linspace(wavenum_1, wavenum_2, num_samp)
-            indeces = [random.randint(0, image_norm.shape[0] - 1), random.randint(0, image_norm.shape[0] - 1),
-                       random.randint(0, image_norm.shape[0] - 1)]
-            plt.plot(wavenumbers, image_norm[indeces].T, label='Training Spectra')
-            rand_idx = np.random.randint(0, X_norm.shape[0])
-            plt.plot(wavenumbers, X_norm[rand_idx].T, label=f'{mol_names[Y[rand_idx]]} Spectra')
-            plt.legend()
-            plt.title('Baseline Corrected + Normalized Spectra')
-            plt.xlabel('Wavenumbers (cm$^{-1}$)')
-            plt.ylabel('Normalized Intensity (A.U.)')
-            plt.show()
 
             ## Save Normalized Image and channels (ONLY FOR 2700-3100)
             print('Saving macromolecule channels...')
@@ -109,20 +87,46 @@ class RandomForestDetect():
             norm_image = np.moveaxis(norm_image, 2, 0)
             io.imsave(save_dir + 'normalized-' + sample, norm_image.astype('float32'))
             io.imsave(save_dir + 'normalized-unsat-' + sample,
-                      np.max(norm_image[list(range(unsat_idx - 1, unsat_idx + 1))], axis=0).astype('float32'))
+                      np.max(norm_image[list(range(unsat_idx - 2, unsat_idx + 2))], axis=0).astype('float32'))
             io.imsave(save_dir + 'normalized-protein-' + sample,
-                      np.max(norm_image[list(range(protein_idx - 1, protein_idx + 1))], axis=0).astype('float32'))
+                      np.max(norm_image[list(range(protein_idx - 2, protein_idx + 2))], axis=0).astype('float32'))
             io.imsave(save_dir + 'normalized-sat-' + sample,
-                      np.max(norm_image[list(range(sat_idx - 1, sat_idx + 1))], axis=0).astype('float32'))
+                      np.max(norm_image[list(range(sat_idx - 2, sat_idx + 2))], axis=0).astype('float32'))
             io.imsave(save_dir + 'normalized-lipid-' + sample,
-                      np.max(norm_image[list(range(lipid_idx - 1, lipid_idx + 1))], axis=0).astype('float32'))
+                      np.max(norm_image[list(range(lipid_idx - 2, lipid_idx + 2))], axis=0).astype('float32'))
             print('done.')
 
-            ## No smoothing (OPTIONAL)
+
+            image_norm = processing.normalize(np.flip(image_vec, axis=1))
+            image_norm = (image_norm.T - np.median(image_norm[:, :ch_start])).T
+            X_norm = processing.normalize(np.flip(X, axis=1), max=np.max(image_norm))
+            X_norm = (X_norm.T - np.median(X_norm[:, :ch_start])).T
+
+            ## Visualize distribution of CH scale
+            # plt.hist(np.max(image_norm, axis=1) - image_norm[:, 0], label="Image Spectra")
+            # plt.hist(np.max(X_norm, axis=1) - X_norm[:, 0], alpha=0.5, label="Artificial Spectra")
+            # plt.legend()
+            # plt.title("Spectra Peak Intensity")
+            # plt.show()
+
+            ## Visualize random spectra for validation of preprocessing
+
+            # wavenumbers = np.linspace(wavenum_1, wavenum_2, num_samp)
+            # indeces = [random.randint(0, image_norm.shape[0] - 1), random.randint(0, image_norm.shape[0] - 1),
+            #            random.randint(0, image_norm.shape[0] - 1)]
+            # plt.plot(wavenumbers, image_norm[indeces].T, label='Training Spectra')
+            # rand_idx = np.random.randint(0, X_norm.shape[0])
+            # plt.plot(wavenumbers, X_norm[rand_idx].T, label=f'{mol_names[Y[rand_idx]]} Spectra')
+            # plt.legend()
+            # plt.title('Baseline Corrected + Normalized Spectra')
+            # plt.xlabel('Wavenumbers (cm$^{-1}$)')
+            # plt.ylabel('Normalized Intensity (A.U.)')
+            # plt.show()
+
             x = image_norm
             X = X_norm
 
-            smooth = 'No Smoothing'
+            smooth = 'No Correction'
 
             ## Random Forest Classification
             print('Classifying  validation data...')
@@ -148,10 +152,10 @@ class RandomForestDetect():
             ## Spectral Graphs
             print('Generating outputs...')
             wavenumbers = np.linspace(wavenum_1, wavenum_2, num_samp)
-            outputs.spectral_graphs(mol_norm, wavenumbers, save_input, save_dir)
+            outputs.spectral_graphs(mol_norm, background, wavenumbers, save_input, save_dir)
             plt.show()
             outputs.probability_images(image, save_input, save_dir)
-            # outputs.similarity_metrics(mol_norm, save_input, save_dir=save_dir)
+            outputs.similarity_metrics(mol_norm, save_input, save_dir=save_dir)
             print('done.')
 
 if __name__ == '__main__':
@@ -168,4 +172,5 @@ if __name__ == '__main__':
     wavenum_2 = int(input('Enter wavenumber 2 (default=3100): ') or '3100')
     detect = RandomForestDetect(wavenum_1, wavenum_2)
     num_estimators = int(input('Enter number of estimators (default=250): ') or '250')
-    detect.RF_classify(num_estimators)
+    detect.RF_classify(num_estimators, save_input=True)
+
