@@ -77,7 +77,7 @@ class RandomForestDetect():
 
             ## Save Normalized Image and channels (ONLY FOR 2700-3100)
             print('Saving macromolecule channels...')
-            unsat_idx = macro_idx(3010 + shift, num_samp, wavenum_1, wavenum_2)
+            unsat_idx = macro_idx(3070 + shift, num_samp, wavenum_1, wavenum_2)
             protein_idx = macro_idx(2938 + shift, num_samp, wavenum_1, wavenum_2)
             sat_idx = macro_idx(2885 + shift, num_samp, wavenum_1, wavenum_2)
             lipid_idx = macro_idx(2850 + shift, num_samp, wavenum_1, wavenum_2)
@@ -102,26 +102,26 @@ class RandomForestDetect():
             X_norm = processing.normalize(np.flip(X, axis=1), max=np.max(image_norm))
             X_norm = (X_norm.T - np.median(X_norm[:, :ch_start])).T
 
-            ## Visualize distribution of CH scale
-            # plt.hist(np.max(image_norm, axis=1) - image_norm[:, 0], label="Image Spectra")
-            # plt.hist(np.max(X_norm, axis=1) - X_norm[:, 0], alpha=0.5, label="Artificial Spectra")
-            # plt.legend()
-            # plt.title("Spectra Peak Intensity")
-            # plt.show()
+            # Visualize distribution of CH scale
+            plt.hist(np.max(image_norm, axis=1) - image_norm[:, 0], label="Image Spectra")
+            plt.hist(np.max(X_norm, axis=1) - X_norm[:, 0], alpha=0.5, label="Artificial Spectra")
+            plt.legend()
+            plt.title("Spectra Peak Intensity")
+            plt.show()
 
-            ## Visualize random spectra for validation of preprocessing
+            # Visualize random spectra for validation of preprocessing
 
-            # wavenumbers = np.linspace(wavenum_1, wavenum_2, num_samp)
-            # indeces = [random.randint(0, image_norm.shape[0] - 1), random.randint(0, image_norm.shape[0] - 1),
-            #            random.randint(0, image_norm.shape[0] - 1)]
-            # plt.plot(wavenumbers, image_norm[indeces].T, label='Training Spectra')
-            # rand_idx = np.random.randint(0, X_norm.shape[0])
-            # plt.plot(wavenumbers, X_norm[rand_idx].T, label=f'{mol_names[Y[rand_idx]]} Spectra')
-            # plt.legend()
-            # plt.title('Baseline Corrected + Normalized Spectra')
-            # plt.xlabel('Wavenumbers (cm$^{-1}$)')
-            # plt.ylabel('Normalized Intensity (A.U.)')
-            # plt.show()
+            wavenumbers = np.linspace(wavenum_1, wavenum_2, num_samp)
+            indeces = [random.randint(0, image_norm.shape[0] - 1), random.randint(0, image_norm.shape[0] - 1),
+                       random.randint(0, image_norm.shape[0] - 1)]
+            plt.plot(wavenumbers, image_norm[indeces].T, label='Training Spectra')
+            rand_idx = np.random.randint(0, X_norm.shape[0])
+            plt.plot(wavenumbers, X_norm[rand_idx].T, label=f'{mol_names[Y[rand_idx]]} Spectra')
+            plt.legend()
+            plt.title('Baseline Corrected + Normalized Spectra')
+            plt.xlabel('Wavenumbers (cm$^{-1}$)')
+            plt.ylabel('Normalized Intensity (A.U.)')
+            plt.show()
 
             x = image_norm
             X = X_norm
