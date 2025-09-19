@@ -23,105 +23,133 @@ def macro_idx(wavenumber, num_samp, wavenum_1=2700, wavenum_2=3100):
 
 
 class RandomForestDetect():
-    def __init__(self, wavenum_1=2700, wavenum_2=3100):
+    def __init__(self, wavenum_1=2700, wavenum_2=3100, num_samp=61, background_path='water_HSI_76.csv', molecule_path='lipid_subtype.xlsx', shift=20):
+        ## Initialize spectral information
         self.wavenum_1 = wavenum_1
         self.wavenum_2 = wavenum_2
+        self.num_samp = num_samp
+        self.ch_start = int(np.floor(num_samp / ((self.wavenum_2 - self.wavenum_1) / (2800 - self.wavenum_1))))
 
-    def RF_classify(self, num_estimators=250, save_input = True):
+        background_df = pd.read_csv(background_path)
+        molecule_df = pd.read_excel(molecule_path)
+        self.shift = shift
+
+        ## Load artificial dataset
+        artificial_data = unsupervised_scripts.artificial_dataset(
+            self.wavenum_1,
+            self.wavenum_2,
+            self.num_samp,
+            self.ch_start,
+            background_df,
+            self.shift,
+        )
+
+        [self.mol_norm, self.mol_names] = artificial_data.molecule_dataset(molecule_df)
+        X_data = np.load(
+            'artificial_data/artificial_training_data-'
+            + str(self.wavenum_1) + '_'
+            + str(self.wavenum_2) + '_'
+            + str(num_samp) + '.npy'
+        )
+        self.Y = np.asarray(list((self.mol_names)) * len(X_data))
+        self.X_data = np.reshape(
+            np.transpose(X_data, (1, 0, 2)),
+            (X_data.shape[0] * X_data.shape[1], X_data.shape[2]),
+            order='F'
+        )
+
+        ## Process both datasets
+        self.background = unsupervised_scripts.create_background(
+            self.wavenum_1,
+            self.wavenum_2,
+            self.num_samp,
+            background_df,
+            br_shift=self.shift
+        )
+        self.preprocessing = unsupervised_scripts.preprocessing(
+            self.wavenum_1,
+            self.wavenum_2,
+            self.num_samp,
+            self.ch_start,
+            background_df
+        )
+
+        self.unsat_idx = macro_idx(3010 + self.shift, self.num_samp, self.wavenum_1, self.wavenum_2)
+        self.protein_idx = macro_idx(2938 + self.shift, self.num_samp, self.wavenum_1, self.wavenum_2)
+        self.sat_idx = macro_idx(2885 + self.shift, self.num_samp, self.wavenum_1, self.wavenum_2)
+        self.lipid_idx = macro_idx(2850 + self.shift, self.num_samp, self.wavenum_1, self.wavenum_2)
+
+    def RF_classify(self, sample_dir, sample_list, num_estimators=250, save_input = True):
+
         for sample in sample_list:
             if sample.startswith('.') or not sample.endswith('.tif'):
                 continue
+
             print(f'\nProcessing {sample}...')
+
+            # Load image and process
             image = io.imread(sample_dir+os.sep+sample)
-
-            indeces = [index for index, char in enumerate(sample) if char == '/']
-            sample_name = os.path.splitext(sample)[0]
-
-            data_dir = sample_dir
-
-            save_dir = data_dir + '/'+ sample_name + '-output/'
-            if os.path.exists(save_dir) is False:
-                os.mkdir(save_dir)
-
+            image_shape = image.shape
+            if image_shape[0] != self.num_samp:
+                print(f"Wavenumber count is not equal to {self.num_samp} for sample {sample}. Continuing to next image...")
+                continue
+            ## Flip and correct gradient
+            image = np.flip(image, axis=0)
+            image = image - np.mean(image[:self.ch_start], axis=0)
             ## Remove NaNs and inf
             image[np.isinf(image)] = 0
             image[np.isnan(image)] = 0
-
             ## Vectorize Image
             image_vec = np.reshape(image, (image.shape[0], image.shape[1] * image.shape[2]))
             image_vec = image_vec.T
 
-            ## Initialize start and end of hyperspectral sweep; num_samp is calculated from image stack
-            num_samp = int(image_vec.shape[1])
-            ch_start = int(np.floor(num_samp / ((self.wavenum_2 - self.wavenum_1) / (2800 - wavenum_1))))
-            background_df = pd.read_csv('water_HSI_76.csv')
-            molecule_df = pd.read_excel('lipid_subtype.xlsx')
 
-            ### Semi-Supervised Learning
+            sample_name = os.path.splitext(sample)[0]
+            data_dir = sample_dir
+            save_dir = data_dir + '/'+ sample_name + '-output/'
+            if os.path.exists(save_dir) is False:
+                os.mkdir(save_dir)
 
-            shift = 20
-            ## Load artificial dataset
-            artificial_data = unsupervised_scripts.artificial_dataset(wavenum_1, wavenum_2, num_samp, ch_start, background_df,
-                                                                      shift=shift)
-            [mol_norm, mol_names] = artificial_data.molecule_dataset(molecule_df)
-            X_data = np.load('artificial_data/artificial_training_data-' + str(wavenum_1) + '_' + str(wavenum_2) + '_' + str(
-                num_samp) + '.npy')
-            Y = list(range(len(mol_names)))*len(X_data)
-            X = np.reshape(np.transpose(X_data, (1, 0, 2)), (X_data.shape[0] * X_data.shape[1],
-                                                             X_data.shape[2]), order='F')
+            output_macromolecule = True
+            if output_macromolecule:
 
-            ## Process both datasets
-            background = unsupervised_scripts.create_background(wavenum_1, wavenum_2, num_samp, background_df, br_shift=shift)
-            preprocessing = unsupervised_scripts.preprocessing(wavenum_1, wavenum_2, num_samp, ch_start, background_df)
-            image_norm = preprocessing.spectral_standardization(np.flip(image_vec, axis=1), br_shift=shift)
+                image_norm = self.preprocessing.spectral_standardization(image_vec, br_shift=self.shift)
 
-            ## Save Normalized Image and channels (ONLY FOR 2700-3100)
-            print('Saving macromolecule channels...')
-            unsat_idx = macro_idx(3010 + shift, num_samp, wavenum_1, wavenum_2)
-            protein_idx = macro_idx(2938 + shift, num_samp, wavenum_1, wavenum_2)
-            sat_idx = macro_idx(2885 + shift, num_samp, wavenum_1, wavenum_2)
-            lipid_idx = macro_idx(2850 + shift, num_samp, wavenum_1, wavenum_2)
+                ## Save Normalized Image and channels (ONLY FOR 2700-3100)
+                print('Saving macromolecule channels...')
+
+                norm_image = np.reshape(image_norm, (image.shape[1], image.shape[2], image.shape[0]))
+                norm_image = np.moveaxis(norm_image, 2, 0)
+                io.imsave(save_dir + 'normalized-' + sample, norm_image.astype('float32'))
+                io.imsave(save_dir + 'normalized-unsat-' + sample,
+                          np.max(norm_image[list(range(self.unsat_idx - 2, self.unsat_idx + 2))], axis=0).astype('float32'))
+                io.imsave(save_dir + 'normalized-protein-' + sample,
+                          np.max(norm_image[list(range(self.protein_idx - 2, self.protein_idx + 2))], axis=0).astype('float32'))
+                io.imsave(save_dir + 'normalized-sat-' + sample,
+                          np.max(norm_image[list(range(self.sat_idx - 2, self.sat_idx + 2))], axis=0).astype('float32'))
+                io.imsave(save_dir + 'normalized-lipid-' + sample,
+                          np.max(norm_image[list(range(self.lipid_idx - 2, self.lipid_idx + 2))], axis=0).astype('float32'))
+                print('done.')
 
 
-            norm_image = np.reshape(image_norm, (image.shape[1], image.shape[2], image.shape[0]))
-            norm_image = np.moveaxis(norm_image, 2, 0)
-            io.imsave(save_dir + 'normalized-' + sample, norm_image.astype('float32'))
-            io.imsave(save_dir + 'normalized-unsat-' + sample,
-                      np.max(norm_image[list(range(unsat_idx - 2, unsat_idx + 2))], axis=0).astype('float32'))
-            io.imsave(save_dir + 'normalized-protein-' + sample,
-                      np.max(norm_image[list(range(protein_idx - 2, protein_idx + 2))], axis=0).astype('float32'))
-            io.imsave(save_dir + 'normalized-sat-' + sample,
-                      np.max(norm_image[list(range(sat_idx - 2, sat_idx + 2))], axis=0).astype('float32'))
-            io.imsave(save_dir + 'normalized-lipid-' + sample,
-                      np.max(norm_image[list(range(lipid_idx - 2, lipid_idx + 2))], axis=0).astype('float32'))
-            print('done.')
+            image_norm = processing.normalize(image_vec)
+            image_norm = (image_norm.T - np.median(image_norm[:, :self.ch_start])).T
+            X_norm = processing.normalize(np.flip(self.X_data, axis=1), max=np.max(image_norm))
+            X_norm = (X_norm.T - np.median(X_norm[:, :self.ch_start])).T
 
 
-            image_norm = processing.normalize(np.flip(image_vec, axis=1))
-            image_norm = (image_norm.T - np.median(image_norm[:, :ch_start])).T
-            X_norm = processing.normalize(np.flip(X, axis=1), max=np.max(image_norm))
-            X_norm = (X_norm.T - np.median(X_norm[:, :ch_start])).T
-
-            ## Visualize distribution of CH scale
-            # plt.hist(np.max(image_norm, axis=1) - image_norm[:, 0], label="Image Spectra")
-            # plt.hist(np.max(X_norm, axis=1) - X_norm[:, 0], alpha=0.5, label="Artificial Spectra")
-            # plt.legend()
-            # plt.title("Spectra Peak Intensity")
-            # plt.show()
-
-            ## Visualize random spectra for validation of preprocessing
-
-            # wavenumbers = np.linspace(wavenum_1, wavenum_2, num_samp)
-            # indeces = [random.randint(0, image_norm.shape[0] - 1), random.randint(0, image_norm.shape[0] - 1),
-            #            random.randint(0, image_norm.shape[0] - 1)]
-            # plt.plot(wavenumbers, image_norm[indeces].T, label='Training Spectra')
-            # rand_idx = np.random.randint(0, X_norm.shape[0])
-            # plt.plot(wavenumbers, X_norm[rand_idx].T, label=f'{mol_names[Y[rand_idx]]} Spectra')
-            # plt.legend()
-            # plt.title('Baseline Corrected + Normalized Spectra')
-            # plt.xlabel('Wavenumbers (cm$^{-1}$)')
-            # plt.ylabel('Normalized Intensity (A.U.)')
-            # plt.show()
+            # Visualize random spectra for validation of preprocessing
+            wavenumbers = np.linspace(self.wavenum_1, self.wavenum_2, self.num_samp)
+            indeces = [random.randint(0, image_norm.shape[0] - 1), random.randint(0, image_norm.shape[0] - 1),
+                       random.randint(0, image_norm.shape[0] - 1)]
+            plt.plot(wavenumbers, image_norm[indeces].T, label='Training Spectra')
+            rand_idx = np.random.randint(0, X_norm.shape[0])
+            plt.plot(wavenumbers, X_norm[rand_idx].T, label=f'{self.Y[rand_idx]} Spectra')
+            plt.legend()
+            plt.title('Baseline Corrected + Normalized Spectra')
+            plt.xlabel('Wavenumbers (cm$^{-1}$)')
+            plt.ylabel('Normalized Intensity (A.U.)')
+            plt.show()
 
             x = image_norm
             X = X_norm
@@ -130,20 +158,34 @@ class RandomForestDetect():
 
             ## Random Forest Classification
             print('Classifying  validation data...')
-            rf_classifier = unsupervised_scripts.RF_classify(x[~np.all(x == 0, axis=1)], X, Y, .25)
+            rf_classifier = unsupervised_scripts.RF_classify(
+                x,
+                X,
+                self.Y,
+                .25
+            )
+
             rfc = load(
-                'rf_classifiers/rfc-' +
-                smooth + '_' + str(wavenum_1) + '_' + str(wavenum_2) + '_' + str(num_samp) + '_' + str(num_estimators)
-                + '.joblib')
+                'rf_classifiers/rfc-'
+                + smooth + '_'
+                + str(self.wavenum_1) + '_'
+                + str(self.wavenum_2) + '_'
+                + str(self.num_samp) + '_'
+                + str(num_estimators) + '.joblib'
+            )
             print('Accuracy Score: ' + str(rfc.score(rf_classifier.X_train, rf_classifier.y_train)))
-            rf_classifier.confusion_matrix(mol_names, rfc)
+            rf_classifier.confusion_matrix(self.mol_names, rfc)
             print('done.')
             # plt.show()
 
             ## Use Random Forest Classifier on Unlabeled HSI
             print('Classifying...')
             start_time = time.time()
-            outputs = unsupervised_scripts.semi_supervised_outputs(x[~np.all(x == 0, axis=1)], mol_names, rfc)
+            outputs = unsupervised_scripts.semi_supervised_outputs(
+                x,
+                self.mol_names,
+                rfc
+            )
             end_time = time.time()
             execution_time = end_time - start_time
             print(f"Execution time: {execution_time} seconds")
@@ -151,14 +193,14 @@ class RandomForestDetect():
 
             ## Spectral Graphs
             print('Generating outputs...')
-            wavenumbers = np.linspace(wavenum_1, wavenum_2, num_samp)
-            outputs.spectral_graphs(mol_norm, background, wavenumbers, save_input, save_dir)
+            wavenumbers = np.linspace(self.wavenum_1, self.wavenum_2, self.num_samp)
+            outputs.spectral_graphs(self.mol_norm, self.background, wavenumbers, save_input, save_dir)
             plt.show()
-            outputs.probability_images(image, save_input, save_dir)
-            outputs.similarity_metrics(mol_norm, save_input, save_dir=save_dir)
-            print('done.')
+            outputs.probability_images(image_shape, save_input, save_dir)
+            outputs.similarity_metrics(self.mol_norm, image_shape, self.unsat_idx, self.background, save_input, save_dir=save_dir)
 
-if __name__ == '__main__':
+
+def main():
     ## Sample Directory (different for everyone)
     data_dir = os.getcwd()
     print('Choose the data directory.')
@@ -172,5 +214,11 @@ if __name__ == '__main__':
     wavenum_2 = int(input('Enter wavenumber 2 (default=3100): ') or '3100')
     detect = RandomForestDetect(wavenum_1, wavenum_2)
     num_estimators = int(input('Enter number of estimators (default=250): ') or '250')
-    detect.RF_classify(num_estimators, save_input=True)
+    detect.RF_classify(sample_dir, sample_list, num_estimators, save_input=True)
+
+
+if __name__ == '__main__':
+    main()
+
+    print('Done.')
 

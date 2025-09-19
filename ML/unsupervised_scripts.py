@@ -12,12 +12,14 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.pipeline import make_pipeline
 from scipy.signal import savgol_filter, correlate
 from scipy.interpolate import CubicSpline
+import scipy
 from time import time
 from tqdm import tqdm
 import glob
 import matplotlib.pyplot as plt
 import helper_scripts
 import processing
+import tifffile
 
 def save_input():
     while True:
@@ -177,8 +179,9 @@ class artificial_dataset:
                 image = imageio.imread(data_dir + name)
             else:
                 continue
+            image = np.flip(image, axis=0)
+            image = image - np.mean(image[:self.ch_start], axis=0)
             image_vector = np.reshape(image, (image.shape[0], image.shape[1] * image.shape[2]))
-            image_vector = np.flip(image_vector, axis=0)
             first_val = np.median(image_vector[:self.ch_start, :])
             image_vector = image_vector - first_val.T
             if boolean:
@@ -454,7 +457,7 @@ class semi_supervised_outputs():
                 ax.set(yticklabels=[])
                 ymean = cur_label.mean(axis=0)
                 ymean = ymean-np.median(ymean[0:ymean.shape[0]//4])
-                yerror = cur_label.std(axis=0)/2
+                yerror = cur_label.std(axis=0)
                 plt.plot(wavenumbers, ymean,color='green', label='sample signal mean' )
                 plt.fill_between(wavenumbers, ymean-yerror, ymean+yerror, alpha=0.5, color='green')
                 label_spectra = processing.normalize(mol_norm[idx], ymean[int(np.argmax(mol_norm[idx]))], 0)
@@ -467,63 +470,100 @@ class semi_supervised_outputs():
                 plt.ylabel('Normalized Intensity',fontsize='24', weight ='bold')
                 plt.xticks(fontsize=16)
                 if save_input:
-                    plt.savefig(save_dir + 'Predicted '+str(self.label[idx])+' Match'+'.svg', bbox_inches = "tight")
+                    output_dir = os.path.join(os.path.dirname(save_dir), 'Spectral_Figures/')
+                    if not os.path.exists(output_dir):
+                        os.makedirs(output_dir)
+                    plt.savefig(output_dir +str(self.label[idx])+'-Predicted_Match.svg', bbox_inches = "tight")
                 plt.show()
 
-    def probability_images (self, original_image, save_input, save_dir=None):
+
+    def probability_images(self, image_shape , save_input, save_dir=None):
+
         temp_image = self.y_prob.T
-        prob_image = np.empty((self.y_prob.shape[1],original_image.shape[1] * original_image.shape[2]))
+        prob_image = np.empty((self.y_prob.shape[1], image_shape[1] * image_shape[2]))
         prob_image[:, :] = temp_image
-        prob_image = np.reshape(prob_image, (self.y_prob.shape[1],original_image.shape[1],original_image.shape[2]))
-        # prob_image  = temp_image.reshape(self.y_prob.shape[1],original_image.shape[1],original_image.shape[2])
-        background_image = prob_image[-1,:,:]
-        background_mask = np.where(background_image<0.01, 0, 1)
+        prob_image = np.reshape(prob_image, (self.y_prob.shape[1], image_shape[1], image_shape[2]))
+
+        background_image = prob_image[-1, :, :]
+        background_mask = np.where(background_image < 0.01, 1, 0)
+
         if save_input:
-            for idx in tqdm(range(len(temp_image)-1)):
+            output_dir = os.path.join(os.path.dirname(save_dir), 'Probability_Figures/')
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+
+            for idx in tqdm(range(len(temp_image) - 1)):
                 image = prob_image[idx]
-                image = np.where(image<np.mean(image), 0, image)
-                io.imsave(save_dir +self.label[idx]+'-Probability_Figure.tif', (image*100).astype('float32'))
-            # image = prob_image * background_mask
-            # io.imsave(save_dir + 'Probability Figures.tif', (image*100).astype('float32'))
-            io.imsave(save_dir +'Background-Probability_Figure.tif', (background_image*100).astype('float32'))
+                image = image * background_mask
+                io.imsave(output_dir + self.label[idx] + '-Probability_Figure.tif', (image * 100).astype(np.float16))
 
+            io.imsave(output_dir + 'Background-Probability_Figure.tif', (background_image * 100).astype(np.float16))
 
-    def similarity_metrics (self, mol_norm, save_input, save_dir=None):
-        MSE_arr = np.zeros(len(self.label))
-        similarity_arr = np.zeros(len(self.label))
+    def similarity_metrics (self, mol_norm, image_shape, unsat_idx, background, save_input, save_dir=None):
         correlation_arr = np.zeros(len(self.label))
+        corr_image = np.zeros(self.y_pred.shape)
+        for idx, label_name in enumerate(self.label[:-1]):
+            cur_label_idx = np.where(self.y_pred==label_name)
+            cur_label = self.x[self.y_pred==label_name]
 
-        for idx in range(len(self.label)-1):
-            cur_label = self.x[self.y_pred==idx]
+            print(f"{label_name} : {cur_label.shape[0]}")
+
             if cur_label.shape[0] > 0:
-                mse_values = []
-                similarities = []
                 correlations = []
-                ymean = cur_label.mean(axis=0)
+                mol_label = np.tile(mol_norm[idx], (cur_label.shape[0], 1))
+                mol_label = processing.normalize(mol_label, np.max(cur_label[:,:unsat_idx], axis=1), 0, axis=1)
+                background_label = np.tile(background, (cur_label.shape[0], 1))
+                mol_label = mol_label + processing.normalize(background_label, cur_label[:, -1], 0, axis=1)
+
+                plt.plot(mol_label.mean(axis=0))
+                plt.plot(cur_label.mean(axis=0))
+                plt.show()
+
+
                 for spectrum_idx in tqdm(range(len(cur_label))):
-                    mse = calculate_mse(helper_scripts.normalize(mol_norm[idx], np.max(ymean),0), cur_label[spectrum_idx])
-                    mse_values.append(mse)
-                    similarity = compute_cosine_similarity(helper_scripts.normalize(mol_norm[idx], np.max(ymean),0), cur_label[spectrum_idx])
-                    similarities.append(similarity)
-                    crosscorrelation = compute_crosscor(helper_scripts.normalize(mol_norm[idx], np.max(ymean),0),  cur_label[spectrum_idx])
+                    crosscorrelation = compute_crosscor(mol_label[spectrum_idx], cur_label[spectrum_idx])
                     max_correlation = np.max(crosscorrelation)
                     correlations.append(max_correlation)
-                MSE_arr[idx] = np.mean(mse)
-                similarity_arr[idx] = np.mean(similarity)
+
+                # for spectrum_idx in tqdm(range(len(cur_label))):
+                #     mol_label = (processing.normalize(mol_norm[idx], np.max(cur_label[spectrum_idx,:-sat_idx]),0))
+                #     mol_label = mol_label + processing.normalize(background, cur_label[spectrum_idx,-1], 0)
+                #     # mse = calculate_mse(mol_label, cur_label[spectrum_idx])
+                #     # mse_values.append(mse)
+                #     # similarity = compute_cosine_similarity(mol_label, cur_label[spectrum_idx])
+                #     # similarities.append(similarity)
+                #     crosscorrelation = compute_crosscor(mol_label, cur_label[spectrum_idx])
+                #     max_correlation = np.max(crosscorrelation)
+                #     correlations.append(max_correlation)
+
+                correlations = np.where(np.asarray(correlations) < 0.75, 0, idx+1)
+                corr_image[cur_label_idx] = correlations
                 correlation_arr[idx] = np.mean(max_correlation)
-                print('The MSE for ' + self.label[idx] + ' is: ' + str(np.mean(mse)))
-                print('The Cosine Similarity for ' + self.label[idx] + ' is: ' + str(np.mean(similarity)))
-                print('The Cross-Correlation for ' + self.label[idx] + ' is: ' + str(np.mean(max_correlation)))
+
+                print(f'The Average Cross-Correlation for {self.label[idx]} is: {correlation_arr[idx]:.2f}')
+
+        corr_image = corr_image.reshape((image_shape[1], image_shape[2]))
+
+
         metric_dic = {
             'Molecule': self.label,
-            'Average MSE': MSE_arr,
-            'Average Cosine': similarity_arr,
             'Average Correlation': correlation_arr
         }
         metric_df = pd.DataFrame(metric_dic)
         if save_input:
-            metric_df.to_csv(save_dir+'Metrics.csv', index=False)
-            
+            output_dir = os.path.join(os.path.dirname(save_dir), 'Correlation_Metrics/')
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+
+            metric_df.to_csv(output_dir+'Metrics.csv', index=False)
+            io.imsave(output_dir+'Correlation-Image.tif', corr_image.astype(np.float16))
+            for idx, label in enumerate(self.label):
+                print(f"{label}...")
+                binary_slice = (corr_image == idx+1)
+
+                io.imsave(output_dir+label+'-Correlation-Image.tif', (binary_slice).astype('uint8'))
+
+
 
 
 
