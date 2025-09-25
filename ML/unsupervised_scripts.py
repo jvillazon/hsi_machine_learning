@@ -503,10 +503,9 @@ class semi_supervised_outputs():
         correlation_arr = np.zeros(len(self.label))
         corr_image = np.zeros(self.y_pred.shape)
         for idx, label_name in enumerate(self.label[:-1]):
-            cur_label_idx = np.where(self.y_pred==label_name)
-            cur_label = self.x[self.y_pred==label_name]
+            cur_label_idx = np.where(self.y_pred==idx)
+            cur_label = self.x[self.y_pred==idx]
 
-            print(f"{label_name} : {cur_label.shape[0]}")
 
             if cur_label.shape[0] > 0:
                 correlations = []
@@ -536,8 +535,18 @@ class semi_supervised_outputs():
                 #     max_correlation = np.max(crosscorrelation)
                 #     correlations.append(max_correlation)
 
-                correlations = np.where(np.asarray(correlations) < 0.75, 0, idx+1)
-                corr_image[cur_label_idx] = correlations
+                corr_metric = np.zeros_like(corr_image)
+                corr_metric[cur_label_idx] = correlations
+                corr_metric = corr_metric.reshape((image_shape[1], image_shape[2]))
+
+                if save_input:
+                    output_dir = os.path.join(os.path.dirname(save_dir), 'Correlation_Metrics/')
+                    if not os.path.exists(output_dir):
+                        os.makedirs(output_dir)
+                    io.imsave(output_dir + label_name + '-Correlation-Image.tif', corr_metric.astype(np.float16))
+
+                corr_idx = np.where(np.asarray(correlations) < 0.75, 0, idx+1)
+                corr_image[cur_label_idx] = corr_idx
                 correlation_arr[idx] = np.mean(max_correlation)
 
                 print(f'The Average Cross-Correlation for {self.label[idx]} is: {correlation_arr[idx]:.2f}')
@@ -557,11 +566,6 @@ class semi_supervised_outputs():
 
             metric_df.to_csv(output_dir+'Metrics.csv', index=False)
             io.imsave(output_dir+'Correlation-Image.tif', corr_image.astype(np.float16))
-            for idx, label in enumerate(self.label):
-                print(f"{label}...")
-                binary_slice = (corr_image == idx+1)
-
-                io.imsave(output_dir+label+'-Correlation-Image.tif', (binary_slice).astype('uint8'))
 
 
 

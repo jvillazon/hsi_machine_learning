@@ -51,7 +51,7 @@ class RandomForestDetect():
             + str(self.wavenum_2) + '_'
             + str(num_samp) + '.npy'
         )
-        self.Y = np.asarray(list((self.mol_names)) * len(X_data))
+        self.Y = list(range(len(self.mol_names)))*len(X_data)
         self.X_data = np.reshape(
             np.transpose(X_data, (1, 0, 2)),
             (X_data.shape[0] * X_data.shape[1], X_data.shape[2]),
@@ -120,14 +120,18 @@ class RandomForestDetect():
 
                 norm_image = np.reshape(image_norm, (image.shape[1], image.shape[2], image.shape[0]))
                 norm_image = np.moveaxis(norm_image, 2, 0)
-                io.imsave(save_dir + 'normalized-' + sample, norm_image.astype('float32'))
-                io.imsave(save_dir + 'normalized-unsat-' + sample,
+                output_dir = os.path.join(os.path.dirname(save_dir), 'Normalized_Images/')
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+
+                io.imsave(output_dir + 'normalized-' + sample, norm_image.astype('float32'))
+                io.imsave(output_dir + 'Unsat-' + sample,
                           np.max(norm_image[list(range(self.unsat_idx - 2, self.unsat_idx + 2))], axis=0).astype('float32'))
-                io.imsave(save_dir + 'normalized-protein-' + sample,
+                io.imsave(output_dir + 'Protein-' + sample,
                           np.max(norm_image[list(range(self.protein_idx - 2, self.protein_idx + 2))], axis=0).astype('float32'))
-                io.imsave(save_dir + 'normalized-sat-' + sample,
+                io.imsave(output_dir + 'Sat-' + sample,
                           np.max(norm_image[list(range(self.sat_idx - 2, self.sat_idx + 2))], axis=0).astype('float32'))
-                io.imsave(save_dir + 'normalized-lipid-' + sample,
+                io.imsave(output_dir + 'Lipid-' + sample,
                           np.max(norm_image[list(range(self.lipid_idx - 2, self.lipid_idx + 2))], axis=0).astype('float32'))
                 print('done.')
 
