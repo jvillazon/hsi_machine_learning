@@ -216,7 +216,8 @@ def main():
     sample_list = os.listdir(sample_dir)
     wavenum_1 = int(input('Enter wavenumber 1 (default=2700): ') or '2700')
     wavenum_2 = int(input('Enter wavenumber 2 (default=3100): ') or '3100')
-    detect = RandomForestDetect(wavenum_1, wavenum_2)
+    num_samp = int(input('Enter number of spectra slices (default=61): ') or '61')
+    detect = RandomForestDetect(wavenum_1, wavenum_2, num_samp=num_samp)
     num_estimators = int(input('Enter number of estimators (default=250): ') or '250')
     detect.RF_classify(sample_dir, sample_list, num_estimators, save_input=True)
 

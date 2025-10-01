@@ -181,6 +181,8 @@ class artificial_dataset:
                 continue
             image = np.flip(image, axis=0)
             image = image - np.mean(image[:self.ch_start], axis=0)
+            image[np.isinf(image)] = 0
+            image[np.isnan(image)] = 0
             image_vector = np.reshape(image, (image.shape[0], image.shape[1] * image.shape[2]))
             first_val = np.median(image_vector[:self.ch_start, :])
             image_vector = image_vector - first_val.T
@@ -213,12 +215,13 @@ class artificial_dataset:
         random_integers = np.random.randint(0, int(bg_scale_vec.shape[0]), size=num_values)
         background_scale = bg_param*bg_scale_vec[random_integers]
         # background_scale = np.maximum(background_scale, 0.25)
-        ch_scale = ch_param*ratio_scale_vec[random_integers]
+        ch_scale = np.sort(ch_param*ratio_scale_vec[random_integers])
         # ch_scale = np.maximum(ch_scale, 0.75)
-        noise_scale = noise_param*noise_scale_vec[random_integers]
-        noise_scale = np.maximum(noise_scale, 0.02)
+        # noise_scale = noise_scale_vec[random_integers]
+        # noise_scale = np.maximum(noise_scale, noise_param)
         background = np.flip(np.outer(background_scale, self.background),axis=1)
-        noise = np.random.normal(0, noise_scale, (self.num_samp, num_values)).T
+        background = background[np.argsort(background.max(axis=1))]
+        noise = np.random.normal(0, noise_param, (self.num_samp, num_values)).T
         artificial_mol = np.zeros((num_values, mol_norm.shape[0],mol_norm.shape[1]), dtype='float32')
         for idx, mol_temp in tqdm(enumerate(mol_norm)):
             # mol_temp = processing.normalize(mol_temp)
