@@ -431,29 +431,29 @@ if __name__ == '__main__':
     # Datasets to process
     CONFIGS = [
         {
-            'molecule_file': 'unprocessed_data/lipid_subtype_reworked.xlsx',
+            'molecule_file': 'unprocessed_data/averaged_spectra.csv',
             'experimental_dir': 'training_data/61-2700-3100/',
             'wavenumber_start': 2700,
             'wavenumber_end': 3100,
             'num_samples': 61,
-            'shift': 0,
-            'molecule_output': 'lipid_subtype_CH_61_0_shift',
-            'params_output': 'srs_params_61_0_shift',
+            'shift': 2,
+            'molecule_output': 'lipid_subtype_wn_61_test',
+            'params_output': 'srs_params_61',
             'exclude_molecules': None
         },
         # Add more molecule datasets here as needed
-        {
-            'molecule_file': 'unprocessed_data/lipid_subtype_reworked.xlsx',
-            'experimental_dir': 'training_data/61-2700-3100/',
-            'wavenumber_start': 2700,
-            'wavenumber_end': 3100,
-            'num_samples': 61,
-            'shift': 0,
-            'molecule_output': 'lipid_subtype_organic_61_0_shift',
-            'params_output': 'srs_params_organic_61_0_shift',
-            'exclude_molecules': ['Cer(m18:1(4E)/24:1(15Z)', 'Cer(m18:1(4E)/16:0)']  # Add molecules to exclude here
+        # {
+        #     # 'molecule_file': 'unprocessed_data/lipid_subtype_reworked.xlsx',
+        #     # 'experimental_dir': 'training_data/61-2700-3100/',
+        #     # 'wavenumber_start': 2700,
+        #     # 'wavenumber_end': 3100,
+        #     # 'num_samples': 61,
+        #     # 'shift': 0,
+        #     # 'molecule_output': 'lipid_subtype_organic_61_0_shift',
+        #     # 'params_output': 'srs_params_organic_61_0_shift',
+        #     # 'exclude_molecules': ['Cer(m18:1(4E)/24:1(15Z)', 'Cer(m18:1(4E)/16:0)']  # Add molecules to exclude here
 
-        },
+        # },
     ]
     
     

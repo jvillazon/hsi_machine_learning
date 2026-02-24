@@ -588,7 +588,7 @@ def main():
     mixture_pairs = None  # None = create all possible pairs
     
     dataset = HSI_Denoising_Dataset(
-        molecule_dataset_path='molecule_dataset/lipid_subtype_CH_61',
+        molecule_dataset_path='molecule_dataset/lipid_subtype_wn_61_test',
         srs_params_path='params_dataset/srs_params_61',
         num_samples_per_class=2000,
         noise_multiplier=2.0,  # Increase noise for denoising task

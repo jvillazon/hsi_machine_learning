@@ -74,15 +74,16 @@ class HSI_Labeled_Dataset(Dataset):
         # Load SRS parameters
         print(f"Loading SRS parameters from: {srs_path}")
         srs_data = np.load(srs_path)
-        bg_scale_vec = srs_data['bg_scale_vec']
-        ratio_scale_vec = srs_data['ratio_scale_vec']
-        noise_scale_vec = srs_data['noise_scale_vec']
+        ratio_scale_vec = np.sort(srs_data['ratio_scale_vec'])[::-1]  # Sort descending for better SNR sampling
+        bg_scale_vec = np.sort(srs_data['bg_scale_vec'][:ratio_scale_vec.shape[0]])  # Align length, sort ascending
+        bg_scale_vec[bg_scale_vec < 1e-6] = np.min(bg_scale_vec[bg_scale_vec > 1e-6])  # Avoid zero background
+        noise_scale_vec = srs_data['noise_scale_vec'][:ratio_scale_vec.shape[0]]  # Align length
         ch_start = srs_data['ch_start']
         background = srs_data['background']
         
         # Convert to torch tensors
         self.mol_spectra = torch.from_numpy(mol_spectra).float()
-        self.bg_scale_vec = np.minimum(bg_scale_vec, 0.75*np.mean(bg_scale_vec))# Ensure min background scaling of 0.75*max
+        self.bg_scale_vec = bg_scale_vec
         self.ratio_scale_vec = ratio_scale_vec  
         self.noise_scale_vec = noise_scale_vec
         self.background = torch.from_numpy(background.copy()).float()
@@ -125,10 +126,11 @@ class HSI_Labeled_Dataset(Dataset):
         for mol_idx in range(self.n_molecules):
             max_val = 0.0
             for _ in range(num_samples):
-                # Sample experimental parameters
-                bg_amplitude = np.random.choice(self.bg_scale_vec)
-                snr_scale = max(np.random.choice(self.ratio_scale_vec) * self.noise_param, 
-                               self.noise_param)
+                # Sample experimental parameters (correlated index, same as __getitem__)
+                choice_idx = np.random.choice(len(self.ratio_scale_vec))
+                bg_amplitude = self.bg_scale_vec[choice_idx]
+                snr_scale = max(self.ratio_scale_vec[choice_idx] * self.noise_param,
+                               self.noise_param * self.noise_multiplier * 5)
                 noise = torch.randn(self.n_wavenumbers) * self.noise_param * self.noise_multiplier
                 
                 # Synthesize spectrum (same logic as __getitem__)
@@ -152,10 +154,11 @@ class HSI_Labeled_Dataset(Dataset):
         # Determine which molecule and which sample
         mol_idx = idx // self.num_samples_per_class
         
-        # Sample experimental parameters
-        bg_amplitude = np.random.choice(self.bg_scale_vec)
-        snr_scale = max(np.random.choice(self.ratio_scale_vec) * self.noise_param, 
-                       self.noise_param)
+        # Sample experimental parameters (correlated index, same as HSI_Denoising_Dataset)
+        choice_idx = np.random.choice(len(self.ratio_scale_vec))
+        bg_amplitude = self.bg_scale_vec[choice_idx]
+        snr_scale = max(self.ratio_scale_vec[choice_idx] * self.noise_param,
+                       self.noise_param * self.noise_multiplier * 5)
         
         # Generate noise
         noise = torch.randn(self.n_wavenumbers) * self.noise_param * self.noise_multiplier
