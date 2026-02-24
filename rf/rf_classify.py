@@ -6,57 +6,32 @@ from tqdm import tqdm
 import tifffile
 import warnings
 
-import sys
+import sys 
 from pathlib import Path
-
-# Add parent directory to path so we can import from core/
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
 
 from core.hsi_unlabeled_dataset import HSI_Unlabeled_Dataset
 from core.hsi_visualizer import HSI_Visualizer
-from rf.random_forest import HSI_RandomForest
+from rf.rf_random_forest import HSI_RandomForest
 
-# Suppress FutureWarning from pandas groupby
-warnings.filterwarnings('ignore', category=FutureWarning, module='pandas')
 
 def main():
     # Define processing options
-    perform_RF_classification = True # Set to True to run RandomForest classification   
+    perform_RF_classification = False # Set to True to run RandomForest classification   
 
     # Define dataset parameters
-    base_directory = "/Volumes/ADATA SE880/Lipid Reference Library/processed"
+    base_directory = "D:\\ADATA Backup\\HuBMAP\\HuBMAP CODEX\\data"
     num_samp = 61
     wn_1 = 2700
     wn_2 = 3100
     ch_start = int((2800 - wn_1) / (wn_2 - wn_1) * num_samp)
-
-    # TEMPORARY: Limit to single image for debugging
-    import glob as glob_module
-    all_images = sorted(glob_module.glob(os.path.join(base_directory, '*.tif')))
-    if all_images:
-        print(f"Found {len(all_images)} images. Using only the first one for debugging...")
-        # Create temp directory with symlink to first image
-        temp_dir = os.path.join(base_directory, '_temp_single_image')
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        # Remove any existing files
-        for f in glob_module.glob(os.path.join(temp_dir, '*')):
-            os.remove(f)
-        
-        # Copy first image to temp directory
-        import shutil
-        first_image = all_images[0]
-        shutil.copy(first_image, temp_dir)
-        base_directory = temp_dir
-        print(f"Using image: {os.path.basename(first_image)}")
 
     # Define model name
     chosen_model_name = 'best_model'  # Update with correct model name
     
     # Create visualizer
     visualizer = HSI_Visualizer(
-        mol_path='molecule_dataset/lipid_subtype_CH_61.npz',
+        mol_path='molecule_dataset/lipid_subtype_wn_61_test.npz',
         wavenumber_start=wn_1,
         wavenumber_end=wn_2,
         num_samples=num_samp
@@ -67,8 +42,8 @@ def main():
         base_directory,
         ch_start,
         transform=None,
-        image_normalization=False,
-        min_max_normalization=True,
+        image_normalization=True,
+        min_max_normalization=False,
         num_samples=num_samp,
         wavenumber_start=wn_1,
         wavenumber_end=wn_2,
@@ -111,11 +86,14 @@ def main():
                 visualizer.visualize_spectrum(spectra, img_idx=img_idx)
 
 
+
     # (Optional) Define masking and quantification options
-    perform_masking = False # Set to True to enable both FTU masking and ratio masking
+    perform_masking = True# Set to True to enable both FTU masking and ratio masking
     display_plots = False # Set to True to display statistical significance plots
+   
     # Define regions to identify in masked units
     regions = ['Cortex', 'Medulla']
+   
     # Define unit name mappings (abbreviated -> full name)
     unit_mappings = {
         'glom': 'Glomeruli',
@@ -123,7 +101,7 @@ def main():
         'disttub': 'Distal Tubule',
         'tal': 'Thick Ascending Limb',
         'distneph': 'Distal Nephron',
-        'thal': 'Thin Ascending Limb',
+        'tdl': 'Thin Descending Limb',
         'vasc': 'Vasculature'
     }
 
@@ -151,12 +129,32 @@ def main():
                 csv_path = os.path.join(img_folder, f"{img_name_no_ext}_predictions.csv")
                 ratio_folder = os.path.join(os.path.dirname(base_directory), 'Ratio', img_name_no_ext)
                 
-                if not os.path.exists(mask_folder):
-                    continue
-                
+                                
                 # Read original predictions CSV once
                 if not os.path.exists(csv_path):
+                    print(f"Prediction CSV not found for {img_name}: {csv_path}")
                     continue
+
+                # Plot class spectra for predictions if available
+                if os.path.exists(csv_path):
+                    try:
+                        for class_name in visualizer.molecule_names:
+                            if class_name != 'No Match':
+                                visualizer.visualize_class_spectra(
+                                    predictions=pd.read_csv(csv_path, header=None),
+                                    img_path=img_path,
+                                    img_name=f"{img_name_no_ext}_{class_name}",
+                                    max_spectra=10,
+                                    class_filter=class_name
+                                )
+                    except Exception as e:
+                        print(f"Failed to plot class spectra for {img_name}: {e}")
+                
+                # Check if mask folder exists
+                if not os.path.exists(mask_folder):
+                    print(f"Mask folder not found for {img_name}: {mask_folder}")
+                    continue
+
                 
                 # Extract sample name
                 sample_name = img_name.split('-')[0] if '-' in img_name else img_name_no_ext
@@ -256,36 +254,51 @@ def main():
         # Define display names for plots (optional - maps original names to display names)
         display_names = {
             # Glycerophospholipids 
-            'Cardiolipin': 'CL',
-            'Phosphatidylcholine Mix': 'PC',
-            'Phosphatidylethanolamine Mix': 'PE',
-            'Phosphatidylserine': 'PS',
-            'Phosphatidylinositol': 'PI',
-            'Phosphatidylglycerol': 'PG',
-            'Lysophosphatidic acid (PA 18:0/0:0))': 'PA(18:0/0:0)',
-            'PC 18:1(9Z)/18:1(9Z)': 'PC(18:1/18:1)',
-            'PE 18:1(9Z)/18:1(9Z)': 'PE(18:1/18:1)',
+            '16:0 Cardiolipin': 'CL',
+            'PC Mix': 'PC 18:1',
+            'PE Mix': 'PE 18:1',
+            'PS Mix': 'PS 18:0',
+            'PI Mix': 'PI XX:X',
+            'PG Mix': 'PG XX:X',
+            '18:0 LPA': 'PA(18:0/0:0)',
+            '18:1 LPA': 'PA(18:1/0:0)',
+            'DOPC': 'PC(18:1/18:1)',
+            'DOPE': 'PE(18:1/18:1)',
+            'DSPC': 'PC(18:0/18:0)',
+            '16:0 CDP DG' : 'CDP-DG(16:0)',
+
 
             
             # Sterols
-            'Cholesterol': 'Chol',
+            'Cholesterol (ovine)': 'Chol',
             '18:1 Cholesterol ester': 'CE(18:1)',
             
             # Glycerolipids
-            'Triglyceride 16:0': 'TG(16:0)',
-            'Diaglyceride 16:0': 'DG(16:0)',
+            'TAG 16:0': 'TG(16:0)',
+            'TAG 18:1': 'TG(18:1)',
+            'DAG 16:0': 'DG(16:0)',
+            'DAG 18:0 and 24:0 ': 'DG(18:0/24:0)',
             
             # Sphingolipids
             'Sphingosine': 'SM',
 
             # Ceramides
-            'Cer(d18:1/12:0)': 'Cer(d18:1/12:0)',
-            'Cer(d18:1/22:0)': 'Cer(d18:1/22:0)',
-            'Cer(d18:1/24:0)': 'Cer(d18:1/24:0)',
-            'Cer(d18:0/14:0)': 'dhCer(d18:0/14:0)',
-            'Cer(d18:1/24:1(15Z))': 'dhCer(d18:1/24:1)',
-            'Cer(m18:1(4E)/16:0)': 'doxCer(m18:1/16:0)',
-            'Cer(m18:1(4E)/24:1(15Z)': 'doxCer(m18:1/24:1)',
+            'Cer 18:1-12:0': 'Cer(d18:1/12:0)',
+            'Cer 18:1-18:0': 'Cer(d18:1/18:0)',
+            'Cer 18:1-18:1': 'Cer(d18:1/18:1)',
+            'Cer 18:1-22:0': 'Cer(d18:1/22:0)',
+            'Cer 18:1-24:0': 'Cer(d18:1/24:0)',
+            'Cer 18:1-24:1': 'Cer(d18:1/24:1)',
+            'Cer 18:0-14:0': 'dhCer(d18:0/14:0)',
+            'Cer 18:1-24:1(15Z)': 'dhCer(d18:0/24:1)',
+            'Cer m18:1-16:0': 'doxCer(m18:1/16:0)',
+            'Cer m18:1-24:1': 'doxCer(m18:1/24:1)',
+
+            # Carnitine
+            'C8 L-carnitine': 'CAR 8:0',
+            'C12 Carnitine': 'CAR 12:0',
+            'C16 Carnitine': 'CAR 16:0',
+            'C18 Carnitine (d9-cis)': 'CAR 18:0',
             
             # Fatty Acids
             'Stearic Acid': 'SA',
@@ -293,8 +306,13 @@ def main():
             'Docosahexaenoic Acid': 'DHA',
             'Tetracosapentaenoic Acid': 'TPA',
 
-
             # Add more mappings as needed for your specific molecules
+
+            # Non-lipids
+            "Glucosylceramide (Gaucher's Spleen)" : 'GlcCer',
+            "Glucose": 'Glc',
+            "Lactate": 'Lac',
+
 
             # Ratio Types
             'Lipid_to_Protein': 'Lipid/Protein',
@@ -311,7 +329,7 @@ def main():
             'Distal Tubule': '#EE3377',    # Magenta
             'Proximal Tubule': '#00A43D',  # Green (shifted from teal)
             'Thick Ascending Limb': '#339FEE',  # Cyan
-            'Thin Ascending Limb': '#002BAA',   # Blue
+            'Thin Descending Limb': '#002BAA',   # Blue
             'Vasculature': '#EE7733'            # Orange (shifted from purple)
         }
         
@@ -322,7 +340,7 @@ def main():
             'Distal Tubule': 'DT',
             'Thick Ascending Limb': 'TAL',
             'Distal Nephron': 'DN',
-            'Thin Ascending Limb': 'ATL',
+            'Thin Descending Limb': 'TDL',
             'Vasculature': 'V'
         }
         
@@ -335,7 +353,7 @@ def main():
             'Distal Nephron',
             'Thick Ascending Limb',
             'Vasculature',
-            'Thin Ascending Limb',
+            'Thin Descending Limb',
         ]
 
         # Create plots directory
@@ -361,7 +379,7 @@ def main():
 
             
         # Perform one-way ANOVA comparing units for percentages_df
-        if percentages_df is not None and not percentages_df.empty:
+        # if percentages_df is not None and not percentages_df.empty:
         #     print("\n" + "="*80)
         #     print("GENERATING BOX PLOTS AND PERFORMING ONE-WAY ANOVA")
         #     print("="*80)
@@ -429,52 +447,52 @@ def main():
             print("\nSkipping heatmap generation for ratios: No data available")
 
         # Generate multi-panel box plots for selected molecules/ratios
-        # print("\n" + "="*80)
-        # print("GENERATING MULTI-PANEL BOX PLOTS")
-        # print("="*80)
+        print("\n" + "="*80)
+        print("GENERATING MULTI-PANEL BOX PLOTS")
+        print("="*80)
         
-        # if percentages_df is not None and not percentages_df.empty:
-        #     # Define molecules to include in multi-panel figure
-        #     selected_molecules = ['18:1 Cholesterol ester', 'Triglyceride 16:0',
-        #                         'Phosphatidylethanolamine Mix', 'Cardiolipin']
+        if percentages_df is not None and not percentages_df.empty:
+            # Define molecules to include in multi-panel figure
+            selected_molecules = ['18:1 Cholesterol ester', 'Triglyceride 16:0',
+                                'Phosphatidylethanolamine Mix', 'Cardiolipin']
             
-        #     multi_panel_percentages_dir = os.path.join(plots_directory, 'multi_panel_percentages')
-        #     visualizer.create_multi_panel_boxplots(
-        #         df=percentages_df,
-        #         value_col='Percentage',
-        #         grouping_col='Molecule',
-        #         molecules_list=selected_molecules,
-        #         nrows=2,
-        #         ncols=2,
-        #         output_dir=multi_panel_percentages_dir,
-        #         data_type='percentage',
-        #         show_plots=False,
-        #         display_name_map=display_names,
-        #         unit_color_map=unit_colors,
-        #         unit_display_map=unit_display_names
-        #     )
-        #     print(f"\nGenerated multi-panel box plots for percentages in {multi_panel_percentages_dir}")
+            multi_panel_percentages_dir = os.path.join(plots_directory, 'multi_panel_percentages')
+            visualizer.create_multi_panel_boxplots(
+                df=percentages_df,
+                value_col='Percentage',
+                grouping_col='Molecule',
+                molecules_list=selected_molecules,
+                nrows=2,
+                ncols=2,
+                output_dir=multi_panel_percentages_dir,
+                data_type='percentage',
+                show_plots=False,
+                display_name_map=display_names,
+                unit_color_map=unit_colors,
+                unit_display_map=unit_display_names
+            )
+            print(f"\nGenerated multi-panel box plots for percentages in {multi_panel_percentages_dir}")
         
-        # if ratios_df is not None and not ratios_df.empty:
-        #     # Define ratio types to include in multi-panel figure
-        #     selected_ratios = ['Redox', 'Lipid_Unsaturation']
+        if ratios_df is not None and not ratios_df.empty:
+            # Define ratio types to include in multi-panel figure
+            selected_ratios = ['Redox', 'Lipid_Unsaturation']
             
-        #     multi_panel_ratios_dir = os.path.join(plots_directory, 'multi_panel_ratios')
-        #     visualizer.create_multi_panel_boxplots(
-        #         df=ratios_df,
-        #         value_col='Mean_Ratio',
-        #         grouping_col='Ratio_Type',
-        #         molecules_list=selected_ratios,
-        #         nrows=1,
-        #         ncols=2,
-        #         output_dir=multi_panel_ratios_dir,
-        #         data_type='ratio',
-        #         show_plots=False,
-        #         display_name_map=display_names,
-        #         unit_color_map=unit_colors,
-        #         unit_display_map=unit_display_names
-        #     )
-        #     print(f"\nGenerated multi-panel box plots for ratios in {multi_panel_ratios_dir}")
+            multi_panel_ratios_dir = os.path.join(plots_directory, 'multi_panel_ratios')
+            visualizer.create_multi_panel_boxplots(
+                df=ratios_df,
+                value_col='Mean_Ratio',
+                grouping_col='Ratio_Type',
+                molecules_list=selected_ratios,
+                nrows=1,
+                ncols=2,
+                output_dir=multi_panel_ratios_dir,
+                data_type='ratio',
+                show_plots=False,
+                display_name_map=display_names,
+                unit_color_map=unit_colors,
+                unit_display_map=unit_display_names
+            )
+            print(f"\nGenerated multi-panel box plots for ratios in {multi_panel_ratios_dir}")
 
 
 if __name__ == "__main__":

@@ -16,4 +16,5 @@
 ._*
 /.venv/
 !/.gitignore
-
+/__pycache__/
+*.pyc

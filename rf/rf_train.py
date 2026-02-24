@@ -1,12 +1,10 @@
 """
 Train Random Forest and SVM classifiers using HSI_Labeled_Dataset
 """
-import sys
+
+import sys 
 from pathlib import Path
-
-# Add parent directory to path so we can import from core/
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
 
 from core.hsi_labeled_dataset import HSI_Labeled_Dataset
 from core.hsi_trainer import HSI_Trainer
@@ -17,21 +15,22 @@ from sklearn.ensemble import RandomForestClassifier
 print("Loading dataset...")
 
 dataset = HSI_Labeled_Dataset(
-    molecule_dataset_path='molecule_dataset/lipid_subtype_organic_61_0_shift',
-    srs_params_path='params_dataset/srs_params_organic_61_0_shift',
-    num_samples_per_class=20000,
+    molecule_dataset_path='molecule_dataset/lipid_subtype_wn_61_test',
+    srs_params_path='params_dataset/srs_params_61',
+    num_samples_per_class=10000,
     normalize_per_molecule=False,
-    compute_min_max=True
+    compute_min_max=True,
+    noise_multiplier=0.5
 )
 
-# Visualize the dataset
-print("\n" + "=" * 80)
-print("VISUALIZING DATASET SAMPLES")
-print("=" * 80)
-dataset.visualize_dataset_samples(train_ratio=0.7, val_ratio=0.15, num_samples_per_class=3)
+# Visualize the dataset (optional)
+# print("\n" + "=" * 80)
+# print("VISUALIZING DATASET SAMPLES")
+# print("=" * 80)
+# dataset.visualize_dataset_samples(train_ratio=0.7, val_ratio=0.15, num_samples_per_class=3)
 
 # Training parameters
-num_estimators = 400
+num_estimators = 200
 max_depth = 20
 min_samples_split = 2
 min_samples_leaf = 2
@@ -75,7 +74,7 @@ fig1, ax1 = rf_trainer.plot_confusion_matrix(
     normalize=False,
     save_path='plots/rf_confusion_matrix.png',
     title='Random Forest Confusion Matrix',
-    figsize=(14, 12)
+    figsize=(len(dataset.molecule_names)*2, len(dataset.molecule_names)*2) #adjust size of the plots based on number of classes
 )
 
 fig2, ax2 = rf_trainer.plot_confusion_matrix(
@@ -84,7 +83,7 @@ fig2, ax2 = rf_trainer.plot_confusion_matrix(
     normalize=True,
     save_path='plots/rf_confusion_matrix_normalized.png',
     title='Random Forest Confusion Matrix (Normalized)',
-    figsize=(14, 12)
+    figsize=(len(dataset.molecule_names)*2, len(dataset.molecule_names)*2)
 )
 
 print("\nConfusion matrices saved to:")
@@ -92,7 +91,7 @@ print("  - plots/rf_confusion_matrix.png")
 print("  - plots/rf_confusion_matrix_normalized.png")
 
 # Save model
-model_name = 'rf_lipid_subtype_organic_61_0_shift'
+model_name = 'best_model'
 rf_trainer.save(f'rf/models/{model_name}.joblib')
 
 # Display output

@@ -444,7 +444,7 @@ class HSI_Visualizer:
         ax.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        # plt.show()
+        plt.show()
         
         # Return statistics
         stats = {
@@ -525,17 +525,12 @@ class HSI_Visualizer:
             tifffile.imwrite(
                 output_path,
                 prob_stack.astype(np.float32),
-                resolution=(1/stats['pixel_size_y'], 1/stats['pixel_size_x']),  # X and Y resolution
                 imagej=True,
                 metadata={
                     'axes': 'ZYX',  # Stack as Z slices
                     'Labels': channel_names,  # List of string labels for each slice
-                    'unit': 'um',
+                    'unit': 'pixel',
                     'spacing': 1.0,
-                    'PhysicalSizeX': stats['pixel_size_x'],  # Replace with actual pixel size if available
-                    'PhysicalSizeXUnit': 'um',
-                    'PhysicalSizeY': stats['pixel_size_y'],  # Replace with actual pixel size if available
-                    'PhysicalSizeYUnit': 'um',
                 },   
             )
             
@@ -1676,7 +1671,7 @@ class HSI_Visualizer:
         # Save figure
         safe_name = group_name.replace('/', '_').replace('\\', '_').replace(' ', '_')
         output_path = os.path.join(output_dir,
-                                   f"anova_unit_{data_type}_{safe_name}.png")
+                                   f"anova_unit_{data_type}_{safe_name}.svg")
         plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
         
         if show_plots:
@@ -2150,7 +2145,7 @@ class HSI_Visualizer:
         plt.tight_layout(rect=[0, 0.12, 1, 1])
         
         # Save figure
-        output_path = os.path.join(output_dir, f"multi_panel_{data_type}_boxplots.png")
+        output_path = os.path.join(output_dir, f"multi_panel_{data_type}_boxplots.svg")
         plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
         
         if show_plots:
@@ -2314,7 +2309,7 @@ class HSI_Visualizer:
                 # Save figure
                 safe_name = group_value.replace('/', '_').replace('\\', '_').replace(' ', '_')
                 output_path = os.path.join(output_dir, 
-                                          f"heatmap_normalized_{data_type}_{safe_name}.png")
+                                          f"heatmap_normalized_{data_type}_{safe_name}.svg")
                 plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
                 
                 if show_plots:
@@ -2645,7 +2640,7 @@ class HSI_Visualizer:
             plt.tight_layout()
 
             # Save figure
-            output_path = os.path.join(output_dir, 'heatmap_raw_ratios.png')
+            output_path = os.path.join(output_dir, 'heatmap_raw_ratios.svg')
             plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
 
             if show_plots:
@@ -2897,7 +2892,7 @@ class HSI_Visualizer:
             
             # Save figure
             output_path = os.path.join(output_dir, 
-                                      f"heatmap_unit_aggregated_{data_type}.png")
+                                      f"heatmap_unit_aggregated_{data_type}.svg")
             plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
             
             if show_plots:
@@ -3063,7 +3058,7 @@ class HSI_Visualizer:
             
             # Save figure
             safe_name = group_value.replace('/', '_').replace(' ', '_')
-            output_path = os.path.join(output_dir, f"bubble_chart_{safe_name}.png")
+            output_path = os.path.join(output_dir, f"bubble_chart_{safe_name}.svg")
             plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
             
             if show_plots:
@@ -3199,7 +3194,7 @@ class HSI_Visualizer:
             plt.tight_layout()
             
             # Save figure
-            output_path = os.path.join(output_dir, f"bubble_chart_unit_aggregated_{data_type}.png")
+            output_path = os.path.join(output_dir, f"bubble_chart_unit_aggregated_{data_type}.svg")
             plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
             
             if show_plots:
@@ -3337,7 +3332,7 @@ class HSI_Visualizer:
             plt.tight_layout()
             
             # Save figure
-            output_path = os.path.join(output_dir, "bubble_chart_raw_ratios.png")
+            output_path = os.path.join(output_dir, "bubble_chart_raw_ratios.svg")
             plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
             
             if show_plots:
@@ -3351,3 +3346,199 @@ class HSI_Visualizer:
         except Exception as e:
             print(f"Error creating raw ratio bubble chart: {str(e)}")
             return {}
+
+    def generate_class_spectra_comparison_plots(
+        self, dataset, prediction_dir, output_dir,
+        srs_params_path='params_dataset/srs_params_61.npz',
+        display_name_map=None,
+        classes_to_exclude=None
+    ):
+        """
+        Generate SVG plots comparing the standardized mean predicted spectrum
+        (with std shading) against the clean reference molecule for each class.
+
+        Args:
+            dataset: HSI_Unlabeled_Dataset instance (provides raw spectra)
+            prediction_dir: Path to rf_outputs directory containing per-image
+                            subfolders with _predictions.csv files
+            output_dir: Directory where SVG plots will be saved
+            srs_params_path: Path to srs_params .npz file containing background
+            display_name_map: Optional dict mapping molecule names to display names
+            classes_to_exclude: Optional list of class names to skip (e.g. ['No Match'])
+        """
+        from core.hsi_normalization import spectral_standardization
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Load background from srs_params
+        srs_path = srs_params_path if srs_params_path.endswith('.npz') else srs_params_path + '.npz'
+        srs_data = np.load(srs_path)
+        background = srs_data['background']
+        ch_start_val = int(srs_data['ch_start'])
+
+        # Build wavenumber axis
+        wavenumbers = np.linspace(self.wavenumber_start, self.wavenumber_end, self.num_samples)
+
+        # Collect per-image prediction CSVs
+        csv_paths = []
+        for root, dirs, files in os.walk(prediction_dir):
+            for f in files:
+                if f.endswith('_predictions.csv'):
+                    csv_paths.append(os.path.join(root, f))
+
+        if not csv_paths:
+            print(f"No prediction CSVs found in {prediction_dir}")
+            return
+
+        print(f"\nFound {len(csv_paths)} prediction CSV(s)")
+
+        # Map image basenames to dataset image paths for quick lookup
+        img_path_map = {}
+        for img_path in dataset.img_list:
+            basename_no_ext = os.path.splitext(os.path.basename(img_path))[0]
+            img_path_map[basename_no_ext] = img_path
+
+        # Accumulate raw spectra per class across all images
+        class_spectra = {}  # {class_name: list of 1D spectra arrays}
+
+        from tqdm import tqdm as tqdm_bar
+        for csv_path in tqdm_bar(csv_paths, desc="Collecting spectra per class"):
+            # Infer image name from CSV filename (e.g. "img_name_predictions.csv" -> "img_name")
+            csv_basename = os.path.basename(csv_path)
+            img_name_no_ext = csv_basename.replace('_predictions.csv', '')
+
+            if img_name_no_ext not in img_path_map:
+                print(f"  Warning: no dataset image for {img_name_no_ext}, skipping")
+                continue
+
+            img_path = img_path_map[img_name_no_ext]
+
+            # Load predictions matrix (each cell is a molecule name string)
+            pred_df = pd.read_csv(csv_path, header=None)
+            pred_matrix = pred_df.values  # shape (height, width), dtype object/str
+
+            # Load RAW spectra (no normalization) — spectral_standardization
+            # handles its own normalization internally, so feeding pre-normalized
+            # data would cause double-normalization artifacts
+            image = tifffile.memmap(img_path, mode='r')
+            image_spectra = image.reshape(image.shape[0], -1).T  # (n_pixels, n_channels)
+            image_spectra = np.flip(image_spectra, axis=1).astype(np.float32)
+            stats = dataset.image_stats[img_path]
+            height = stats['height']
+            width = stats['width']
+
+            # Flatten predictions to match pixel ordering
+            pred_flat = pred_matrix.flatten()  # length = height * width
+
+            # Sanity check
+            if len(pred_flat) != image_spectra.shape[0]:
+                print(f"  Warning: size mismatch for {img_name_no_ext}: "
+                      f"preds={len(pred_flat)}, spectra={image_spectra.shape[0]}, skipping")
+                continue
+
+            # Group pixel indices by predicted class
+            unique_classes = np.unique(pred_flat)
+            for cls_name in unique_classes:
+                cls_name_str = str(cls_name)
+                if classes_to_exclude and cls_name_str in classes_to_exclude:
+                    continue
+                mask = pred_flat == cls_name
+                cls_spectra = image_spectra[mask]  # (n_matched_pixels, n_wavenumbers)
+                if cls_name_str not in class_spectra:
+                    class_spectra[cls_name_str] = []
+                class_spectra[cls_name_str].append(cls_spectra)
+
+        if not class_spectra:
+            print("No spectra collected for any class.")
+            return
+
+        # Concatenate spectra per class and generate plots
+        print(f"\nGenerating comparison plots for {len(class_spectra)} classes...")
+
+        sorted_classes = sorted(class_spectra.keys())
+        for cls_name in tqdm_bar(sorted_classes, desc="Generating SVGs"):
+            spectra_list = class_spectra.pop(cls_name)  # pop to free memory progressively
+            all_spectra = np.concatenate(spectra_list, axis=0)  # (N, n_wavenumbers)
+            del spectra_list
+            n_spectra = all_spectra.shape[0]
+
+            if n_spectra < 2:
+                print(f"  Skipping '{cls_name}': only {n_spectra} spectrum(a)")
+                continue
+
+            # Apply spectral_standardization to all spectra at once, then compute mean/std
+            try:
+                all_standardized = spectral_standardization(
+                    all_spectra,
+                    wavenum_1=self.wavenumber_start,
+                    wavenum_2=self.wavenumber_end,
+                    num_samp=self.num_samples,
+                    background=background
+                )
+            except Exception as e:
+                print(f"  Warning: standardization failed for '{cls_name}': {e}")
+                all_standardized = all_spectra
+
+            standardized_mean = np.mean(all_standardized, axis=0)
+            standardized_std = np.std(all_standardized, axis=0)
+            del all_spectra, all_standardized  # free memory
+
+            # Find the matching reference molecule spectrum
+            ref_spectrum = None
+            mol_idx = None
+            for i, mol_name in enumerate(self.molecule_names):
+                if mol_name == cls_name:
+                    mol_idx = i
+                    break
+
+            if mol_idx is not None:
+                ref_raw = self.normalized_molecules[mol_idx]
+                # Min-max normalize reference to [0, 1]
+                ref_min = np.min(ref_raw)
+                ref_max = np.max(ref_raw)
+                if ref_max - ref_min > 1e-8:
+                    ref_spectrum = (ref_raw - ref_min) / (ref_max - ref_min)
+                else:
+                    ref_spectrum = ref_raw
+
+            # --- Plot ---
+            fig, ax = plt.subplots(figsize=(8, 5))
+
+            # Mean standardized spectrum
+            ax.plot(wavenumbers, standardized_mean, color='#1f77b4', linewidth=1.5,
+                    label=f'Mean predicted ({n_spectra:,} px)')
+
+            # Std shading from standardized spectra
+            ax.fill_between(
+                wavenumbers,
+                standardized_mean - standardized_std,
+                standardized_mean + standardized_std,
+                alpha=0.25, color='#1f77b4', label='± 1 std'
+            )
+
+            # Reference molecule
+            if ref_spectrum is not None:
+                ax.plot(wavenumbers, ref_spectrum, color='#d62728', linewidth=1.5,
+                        linestyle='--', label='Reference')
+
+            # Display name for title
+            display_name = cls_name
+            if display_name_map and cls_name in display_name_map:
+                display_name = display_name_map[cls_name]
+
+            ax.set_title(display_name, fontsize=14, fontweight='bold')
+            ax.set_xlabel('Wavenumber (cm⁻¹)', fontsize=11)
+            ax.set_ylabel('Intensity (a.u.)', fontsize=11)
+            ax.legend(fontsize=9, frameon=True, edgecolor='0.8')
+            ax.tick_params(labelsize=9)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            fig.tight_layout()
+
+            # Save as SVG
+            safe_name = cls_name.replace('/', '_').replace(' ', '_').replace(':', '_')
+            svg_path = os.path.join(output_dir, f"{safe_name}.svg")
+            fig.savefig(svg_path, format='svg', bbox_inches='tight')
+            plt.close(fig)
+
+        print(f"\nSaved {len(sorted_classes)} SVG plots to {output_dir}")

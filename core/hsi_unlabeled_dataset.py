@@ -77,7 +77,7 @@ class HSI_Unlabeled_Dataset(Dataset):
                     # Compute image min and max for normalization
                     img_data = img_data - np.mean(img_data[:,:self.ch_start], axis=1, keepdims=True)
                     image_min = 0 # np.median(img_data[:,:self.ch_start]) --- IGNORE ---
-                    image_max = np.max(img_data)
+                    image_max = np.mean(img_data) + 3*np.std(img_data)   # robust global max estimate
                 else:
                     # Image normalization disabled
                     image_min = None
