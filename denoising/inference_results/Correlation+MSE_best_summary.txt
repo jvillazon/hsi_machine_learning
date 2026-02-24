@@ -1,0 +1,19 @@
+Inference Results: Correlation+MSE_best
+======================================================================
+
+Test Set Size: 3900 samples
+
+Pearson Correlation:
+  Mean:   0.984919
+  Std:    0.040191
+  Median: 0.993467
+  Range:  [0.354036, 0.998625]
+
+MSE (Reconstruction Error):
+  Mean:   0.014210
+  Std:    0.016523
+  Median: 0.010096
+
+Cosine Similarity:
+  Mean:   0.974845
+  Std:    0.097850

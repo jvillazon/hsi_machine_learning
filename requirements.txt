@@ -1,0 +1,30 @@
+## Fully pinned pip requirements for hsi_machine_learning (CPU-only PyTorch)
+## PyTorch CPU wheels are served from the PyTorch index below. These '+cpu' wheels are platform-specific
+## and pip will select them via the find-links URL.
+--find-links https://download.pytorch.org/whl/cpu/torch_stable.html
+
+numpy==1.24.3
+pandas==1.5.3
+matplotlib==3.6.3
+scipy==1.10.1
+scikit-image==0.19.3
+scikit-learn==1.1.3
+tqdm==4.65.0
+tifffile==2023.10.0
+seaborn==0.12.2
+statsmodels==0.14.0
+joblib==1.2.0
+sympy==1.11.1
+typing-extensions==4.7.1
+
+# CPU builds of PyTorch and related packages
+torch==2.0.1+cpu
+torchvision==0.15.2+cpu
+torchaudio==2.0.2+cpu
+
+## Additional packages
+rampy
+# Usage:
+#   python -m pip install -r requirements.txt
+# If installation fails for the PyTorch wheels on macOS, please follow platform-specific
+# instructions at https://pytorch.org for compatible wheels.
