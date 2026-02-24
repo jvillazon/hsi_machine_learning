@@ -360,6 +360,7 @@ class HSI_Loader:
         bg_scale_vec = image_vec[-1] - np.median(start_vec, axis=0)
         bg_scale_vec = np.maximum(bg_scale_vec, 0)  # Ensure non-negative background
         bg_scale_vec = np.minimum(bg_scale_vec, 0.75*np.mean(bg_scale_vec))  # Avoid extreme values
+        bg_scale_vec[bg_scale_vec < 1e-6] = np.min(bg_scale_vec[bg_scale_vec > 1e-6])  # Avoid zero background
         
         # Signal-to-noise ratio
         max_vec = np.max(image_vec, axis=0)

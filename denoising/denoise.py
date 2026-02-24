@@ -55,14 +55,14 @@ def load_model(model_path, model=None, device='cpu'):
 def main():
     """Main function to run denoising inference."""
     # Dataset Configuration
-    img_dir = r"D:/ADATA Backup/HuBMAP/HuBMAP CosMx/CosMx HSI/HSI/"
+    img_dir = r"D:\ADATA Backup\HuBMAP\HuBMAP CODEX\data"
     num_samp = 61
     wn_1 = 2700
     wn_2 = 3100
     ch_start = int((2800 - wn_1) / (wn_2 - wn_1) * num_samp)
 
     # Model Configuration
-    model_path = r"denoising/denoising_models/Correlation+MSE_best.pth"
+    model_path = r"denoising/denoising_models/aMSE + Prom_best.pth"
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # Output Configuration
@@ -75,7 +75,7 @@ def main():
         ch_start=ch_start,
         transform=None,
         image_normalization=True,
-        min_max_normalization=True,
+        min_max_normalization=False,
         num_samples=num_samp,
         wavenumber_start=wn_1,
         wavenumber_end=wn_2,

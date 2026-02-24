@@ -28,6 +28,7 @@ from tqdm import tqdm
 from core.hsi_labeled_dataset import HSI_Denoising_Dataset, create_denoising_dataloaders
 from denoising.denoise_loss import Spectral_Preserving_Loss, Metrics
 from denoising.denoise_model import DenoisingAutoencoder
+from denoising.denoise_model_residual import ResidualDenoisingAutoencoder
 
 
 def train_epoch(model, train_loader, criterion, optimizer, device):
@@ -236,7 +237,7 @@ def plot_denoising_progress(model, val_loader, device, epoch, model_name, save_d
     output = output.cpu()
     
     # Create figure
-    fig, axes = plt.subplots(num_samples, 1, figsize=(12, 3*num_samples))
+    fig, axes = plt.subplots(num_samples, 1, figsize=(8, 3*num_samples))
     if num_samples == 1:
         axes = [axes]
     
@@ -280,11 +281,11 @@ def plot_denoising_progress(model, val_loader, device, epoch, model_name, save_d
 
 
 def train_model(model, train_loader, val_loader, criterion, optimizer, 
-                num_epochs, device, model_name, save_dir):
+                num_epochs, device, model_name, save_dir, resume=True):
     """Train model and track metrics."""
-    print(f"\n{'='*70}")
+    
     print(f"Training: {model_name}")
-    print(f"{'='*70}")
+
     
     history = {
         'train_loss': [],
@@ -299,8 +300,22 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
     
     best_val_loss = float('inf')
     best_epoch = 0
+    start_epoch = 0
+
+    # Resume from checkpoint if available
+    checkpoint_path = save_dir / f'{model_name}_best.pth'
+    if resume and checkpoint_path.exists():
+        print(f"  Resuming from checkpoint: {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(ckpt['model_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        best_val_loss = ckpt.get('val_loss', float('inf'))
+        start_epoch = ckpt.get('epoch', 0) + 1
+        history = ckpt.get('history', history)
+        best_epoch = ckpt.get('epoch', 0)
+        print(f"  Resumed at epoch {start_epoch}, best val loss so far: {best_val_loss:.6f}")
     
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         start_time = time.time()
         
         # Train
@@ -531,9 +546,9 @@ def visualize_reconstructions(models, model_names, test_loader, device, save_dir
 
 def evaluate_test_set(models, model_names, test_loader, criterion, device):
     """Evaluate all models on test set."""
-    print(f"\n{'='*70}")
+    
     print("TEST SET EVALUATION")
-    print(f"{'='*70}")
+
     
     results = []
     for model, name in zip(models, model_names):
@@ -548,10 +563,10 @@ def evaluate_test_set(models, model_names, test_loader, criterion, device):
     
     # Find best model
     best_idx = np.argmax([r['spectral_similarity'] for r in results])
-    print(f"\n{'='*70}")
+    
     print(f"BEST MODEL: {model_names[best_idx]}")
     print(f"  Spectral Similarity: {results[best_idx]['spectral_similarity']:.6f}")
-    print(f"{'='*70}")
+
     
     return results
 
@@ -576,15 +591,16 @@ def main():
         molecule_dataset_path='molecule_dataset/lipid_subtype_CH_61',
         srs_params_path='params_dataset/srs_params_61',
         num_samples_per_class=2000,
-        noise_multiplier=1.0,  # Increase noise for denoising task
+        noise_multiplier=2.0,  # Increase noise for denoising task
         exclude_molecules=[],  # Include all molecules including "No Match"
         create_mixtures=True,
-        mixture_pairs=mixture_pairs  # None = creates all unique pairs
+        mixture_pairs=mixture_pairs,  # None = creates all unique pairs
+        instance_clean_target=True,   # Fix 3: clean = same SNR+bg instance, no noise
     )
 
-    print(f"\n{'='*70}")
+    
     print("Dataset Summary:")
-    print(f"{'='*70}")
+
     
     # Create dataloaders
     train_loader, val_loader, test_loader = create_denoising_dataloaders(
@@ -599,12 +615,12 @@ def main():
     # Testing shape + MSE only (no gradient or curvature)
     loss_configs = [
         # Modify these configurations as needed
-        {'name': 'MSE', 'w_shape': 0.0, 'w_grad': 0.0, 'w_curv': 0.0, 'w_mse': 1},
+        {'name': 'aMSE + Prom - Residual', 'w_shape': 0.0, 'w_grad': 0.0, 'w_curv': 0.0, 'w_mse': 0.8, 'w_prom': 0.2},
     ]
 
-    print(f"\n{'='*70}")
+    
     print("Training Configuration:")
-    print(f"{'='*70}")
+
     print(f"Batch Size: {BATCH_SIZE}")
     print(f"Epochs: {NUM_EPOCHS}")
     print(f"Learning Rate: {LEARNING_RATE}")
@@ -618,21 +634,24 @@ def main():
     criterions = []
     
     for config in loss_configs:
-        print(f"\n{'='*70}")
+        
         print(f"Testing Loss Configuration: {config['name']}")
-        print(f"{'='*70}")
+    
         
         # Create loss function with specific weights
         criterion = Spectral_Preserving_Loss(
             w_shape=config['w_shape'],
             w_grad=config['w_grad'],
             w_curv=config['w_curv'],
-            w_mse=config['w_mse']
+            w_mse=config['w_mse'],
+            w_prom=config['w_prom']
         )
         criterions.append(criterion)
         
         # Create model (same architecture for all)
-        model = DenoisingAutoencoder(
+        # ResidualDenoisingAutoencoder: output = noisy - noise_estimate
+        # prevents hallucination of peaks not present in input
+        model = ResidualDenoisingAutoencoder(
             in_channels=1,
             base_channels=16,
             kernels=[3, 5, 7],
@@ -648,7 +667,7 @@ def main():
         # Train
         history = train_model(
             model, train_loader, val_loader, criterion, optimizer,
-            NUM_EPOCHS, DEVICE, config['name'], SAVE_DIR
+            NUM_EPOCHS, DEVICE, config['name'], SAVE_DIR, resume=False
         )
         
         models.append(model)
@@ -659,9 +678,8 @@ def main():
     plot_training_curves(histories, model_names, SAVE_DIR)
     
     # Load best models for evaluation
-    print("\n" + "="*70)
+    
     print("Loading Best Models for Evaluation")
-    print("="*70)
     for i, (model, name) in enumerate(zip(models, model_names)):
         checkpoint_path = SAVE_DIR / f"{name}_best.pth"
         checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
@@ -669,9 +687,9 @@ def main():
         print(f"✓ Loaded {name} from epoch {checkpoint['epoch']+1}")
     
     # Evaluate on test set with corresponding loss functions
-    print(f"\n{'='*70}")
-    print("TEST SET EVALUATION")
-    print(f"{'='*70}")
+    
+    print("Test Set Evaluation with Best Models")
+
     
     results = []
     for model, name, criterion in zip(models, model_names, criterions):
@@ -686,7 +704,7 @@ def main():
     
     # Find best model by spectral similarity
     best_idx = np.argmax([r['spectral_similarity'] for r in results])
-    print(f"\n{'='*70}")
+    
     print(f"BEST MODEL: {model_names[best_idx]}")
     print(f"  Spectral Similarity: {results[best_idx]['spectral_similarity']:.6f}")
     print("  Loss Configuration:")
@@ -694,7 +712,8 @@ def main():
     print(f"    w_grad:  {loss_configs[best_idx]['w_grad']}")
     print(f"    w_curv:  {loss_configs[best_idx]['w_curv']}")
     print(f"    w_mse:   {loss_configs[best_idx]['w_mse']}")
-    print(f"{'='*70}")
+    print(f"    w_prom:  {loss_configs[best_idx]['w_prom']}")
+
     
     # Visualize reconstructions
     visualize_reconstructions(models, model_names, test_loader, DEVICE, SAVE_DIR, num_samples=4)
@@ -708,7 +727,7 @@ def main():
         for i, (name, config, result) in enumerate(zip(model_names, loss_configs, results)):
             f.write(f"{i+1}. {name}\n")
             f.write(f"   Weights: w_shape={config['w_shape']}, w_grad={config['w_grad']}, ")
-            f.write(f"w_curv={config['w_curv']}, w_mse={config['w_mse']}\n")
+            f.write(f"w_curv={config['w_curv']}, w_mse={config['w_mse']}, w_prom={config['w_prom']}\n")
             f.write(f"   Spectral Similarity: {result['spectral_similarity']:.6f}\n")
             f.write(f"   Total Loss: {result['total_loss']:.6f}\n")
             f.write(f"   Shape Loss: {result['shape_loss']:.6f}\n")

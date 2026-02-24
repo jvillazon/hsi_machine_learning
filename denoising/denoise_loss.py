@@ -102,8 +102,8 @@ def second_derivative_loss(x, y):
     return f.mse_loss(x_grad2, y_grad2)
 
 
-def scale_invariant_mse(x, y):
-    """Scale-invariant MSE with magnitude-based weighting.
+def magnitude_weighted_mse(x, y):
+    """MSE with magnitude-based weighting.
     
     Normalizes both predicted and target by their standard deviations before
     computing MSE. Additionally, weights errors by the magnitude of the target signal,
@@ -153,6 +153,112 @@ def scale_invariant_mse(x, y):
     # Return mean of weighted errors
     return weighted_squared_error.mean()
 
+def amplitude_weighted_mse(x, y, p=2.0):
+    """Amplitude-weighted MSE - emphasizes residuals at high-magnitude peaks.
+    
+    Weights each point's squared error by the target amplitude raised to power p.
+    Higher p = stronger focus on peak regions. Unlike scale_invariant_mse, this
+    operates on the raw signal so absolute magnitude drives weighting directly.
+    
+    Loss = mean( |y|^p * (x - y)^2 ) / mean( |y|^p )
+    
+    Args:
+        x: predicted spectra (B, L) or (B, 1, L)
+        y: target spectra (B, L) or (B, 1, L)
+        p: amplitude weighting exponent (default 2.0; higher = more peak focus)
+    
+    Returns:
+        scalar loss value
+    """
+    # Flatten to (B, L) if needed
+    if x.dim() == 3:
+        x = x.squeeze(1)
+    if y.dim() == 3:
+        y = y.squeeze(1)
+
+    weights = y.abs() ** p + 1e-8
+    weighted_sq_err = weights * (x - y) ** 2
+    return (weighted_sq_err / weights).mean()
+
+
+def prominence_weighted_mse(x, y, alpha=2.0, baseline_window=5):
+    """Prominence-weighted MSE - emphasizes residuals at prominent peaks.
+    
+    Weights squared errors by each point's prominence: how much it rises above
+    the local baseline (rolling minimum). Points at peak tips receive high weight;
+    flat baseline regions receive low weight. Fully scale-invariant per-spectrum
+    since prominence is normalized to [0, 1] within each spectrum.
+    
+    Prominence_i = max(0, y_i - local_min_i)
+    Weight_i     = 1 + alpha * (prominence_i / max_prominence)
+    
+    Args:
+        x: predicted spectra (B, L) or (B, 1, L)
+        y: target spectra (B, L) or (B, 1, L)
+        alpha: weight scaling factor (default 2.0; higher = more peak focus)
+        baseline_window: rolling window size for local baseline estimation (default 5)
+    
+    Returns:
+        scalar loss value
+    """
+    # Flatten to (B, L) if needed
+    if x.dim() == 3:
+        x = x.squeeze(1)
+    if y.dim() == 3:
+        y = y.squeeze(1)
+
+    # Estimate local baseline as rolling minimum via max_pool1d on negated signal
+    padding = baseline_window // 2
+    local_min = -f.max_pool1d(
+        -y.unsqueeze(1), kernel_size=baseline_window, stride=1, padding=padding
+    ).squeeze(1)  # shape (B, L)
+
+    # Prominence: how much each point rises above its local baseline
+    prominence = (y - local_min).clamp(min=0)  # shape (B, L)
+
+    # Normalize prominence to [0, 1] per spectrum
+    prom_max = prominence.max(dim=1, keepdim=True)[0] + 1e-8
+    prom_norm = prominence / prom_max
+
+    # Weights: 1 at baseline, (1 + alpha) at the most prominent peak
+    weights = 1.0 + alpha * prom_norm
+
+    weighted_sq_err = weights * (x - y) ** 2
+    return (weighted_sq_err / weights).mean()
+
+
+def mean_squared_log_error(x, y):
+    """Mean Squared Logarithmic Error (MSLE) - emphasizes relative differences.
+    
+    Computes MSE of log-transformed spectra. This loss emphasizes relative
+    differences and is less sensitive to large absolute errors in high-value regions,
+    while still penalizing errors in low-value regions. It can help preserve overall
+    spectral shape and relative peak intensities, especially when spectra have
+    wide dynamic range.
+    
+    Args:
+        x: predicted spectra (B, L) or (B, 1, L)
+        y: target spectra (B, L) or (B, 1, L)
+    
+    Returns:
+        scalar loss value
+    """
+    # Flatten to (B, L) if needed
+    if x.dim() == 3:
+        x = x.squeeze(1)
+    if y.dim() == 3:
+        y = y.squeeze(1)
+    
+
+    # Add small constant to avoid log(0)
+    epsilon = 1e-8
+    x = x - x.min() + epsilon
+    y = y - y.min() + epsilon 
+    x_log = torch.log(x)
+    y_log = torch.log(y)
+    
+    return f.mse_loss(x_log, y_log)
+
 
 class Spectral_Preserving_Loss(nn.Module):
     """Comprehensive spectral loss that preserves shape, peaks, width, and position.
@@ -162,31 +268,36 @@ class Spectral_Preserving_Loss(nn.Module):
     1. Shape similarity (Pearson correlation): Overall spectral shape
     2. Gradient loss (1st derivative): Peak positions and slopes  
     3. Curvature loss (2nd derivative): Peak width and sharpness
-    4. Scale-invariant MSE: Pixel-level reconstruction accuracy
+    4. Magnitude-weighted MSE: Pixel-level reconstruction accuracy
+    5. Prominence-weighted MSE: Emphasizes errors at prominent peaks
     
     Loss = w_shape * pearson_loss + 
            w_grad * gradient_loss + 
            w_curv * curvature_loss +
-           w_mse * scale_invariant_mse
+           w_mse * magnitude_weighted_mse +
+           w_prom * prominence_weighted_mse
     
     Based on comprehensive testing:
     - Point-wise MSE removed (poor noise/background robustness)
     - Pearson correlation preferred over SAM (baseline invariant)
-    - Scale-invariant MSE added for reconstruction accuracy without scale sensitivity
+    - Magnitude-weighted MSE added for reconstruction accuracy without scale sensitivity
+    - Prominence-weighted MSE added to emphasize errors at prominent peaks  
     - Default weights optimized for discrimination + reconstruction
     
     Args:
         w_shape (float): Weight for Pearson correlation, default 0.4
         w_grad (float): Weight for gradient (1st derivative), default 0.25
         w_curv (float): Weight for curvature (2nd derivative), default 0.15
-        w_mse (float): Weight for scale-invariant MSE, default 0.2
+        w_mse (float): Weight for Magnitude-weighted MSE, default 0.2
+        w_prom (float): Weight for Prominence-weighted MSE, default 0.05
     """
     
     def __init__(self, 
                  w_shape: float = 0.4,
                  w_grad: float = 0.25,
                  w_curv: float = 0.15,
-                 w_mse: float = 0.2):
+                 w_mse: float = 0.2,
+                 w_prom: float = 0.05):
         super().__init__()
         
         # Store weights
@@ -194,17 +305,19 @@ class Spectral_Preserving_Loss(nn.Module):
         self.w_grad = float(w_grad)
         self.w_curv = float(w_curv)
         self.w_mse = float(w_mse)
+        self.w_prom = float(w_prom)
         
         # Normalize weights to sum to 1
-        total = self.w_shape + self.w_grad + self.w_curv + self.w_mse
+        total = self.w_shape + self.w_grad + self.w_curv + self.w_mse + self.w_prom
         self.w_shape /= total
         self.w_grad /= total
         self.w_curv /= total
         self.w_mse /= total
+        self.w_prom /= total
         
         print("Spectral_Preserving_Loss initialized:")
         print(f"  w_shape={self.w_shape:.3f}, w_grad={self.w_grad:.3f}, "
-              f"w_curv={self.w_curv:.3f}, w_mse={self.w_mse:.3f}")
+              f"w_curv={self.w_curv:.3f}, w_mse={self.w_mse:.3f}, w_prom={self.w_prom:.3f}")
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
@@ -240,14 +353,19 @@ class Spectral_Preserving_Loss(nn.Module):
         # Component 3: Curvature loss (preserves peak width and sharpness)
         curv_loss = second_derivative_loss(pred_flat, target_flat)
         
-        # Component 4: Scale-invariant MSE (pixel-level reconstruction)
-        mse_loss = scale_invariant_mse(pred_flat, target_flat)
+        # Component 4: Magnitude-weighted MSE (pixel-level reconstruction)
+        mse_loss = amplitude_weighted_mse(pred_flat, target_flat)
+        # mse_loss = mean_squared_log_error(pred_flat, target_flat)
+
+        # Component 5: Prominence-weighted MSE (emphasizes errors at prominent peaks)
+        prom_loss = prominence_weighted_mse(pred_flat, target_flat)
         
         # Combine with weights
         total_loss = (self.w_shape * shape_loss + 
                      self.w_grad * grad_loss + 
                      self.w_curv * curv_loss +
-                     self.w_mse * mse_loss)
+                     self.w_mse * mse_loss +
+                     self.w_prom * prom_loss)
         
         return total_loss
     
@@ -256,7 +374,7 @@ class Spectral_Preserving_Loss(nn.Module):
         Get individual loss components for monitoring.
         
         Returns:
-            dict with keys: 'shape', 'grad', 'curv', 'mse', 'total'
+            dict with keys: 'shape', 'grad', 'curv', 'mse', 'prom', 'total'
         """
         pred = pred.float()
         target = target.float()
@@ -275,18 +393,20 @@ class Spectral_Preserving_Loss(nn.Module):
         shape_loss = corr_loss(pred_flat, target_flat)
         grad_loss = gradient_loss(pred_flat, target_flat)
         curv_loss = second_derivative_loss(pred_flat, target_flat)
-        mse_loss = scale_invariant_mse(pred_flat, target_flat)
-        
+        mse_loss = magnitude_weighted_mse(pred_flat, target_flat)
+        prom_loss = prominence_weighted_mse(pred_flat, target_flat)
         total_loss = (self.w_shape * shape_loss + 
                      self.w_grad * grad_loss + 
                      self.w_curv * curv_loss +
-                     self.w_mse * mse_loss)
+                     self.w_mse * mse_loss +
+                     self.w_prom * prom_loss)
         
         return {
             'shape': shape_loss.item(),
             'grad': grad_loss.item(),
             'curv': curv_loss.item(),
             'mse': mse_loss.item(),
+            'prom': prom_loss.item(),
             'total': total_loss.item()
         }
 

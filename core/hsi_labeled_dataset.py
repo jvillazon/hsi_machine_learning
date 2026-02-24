@@ -316,9 +316,9 @@ def create_dataloaders(dataset, batch_size=32, train_ratio=0.7, val_ratio=0.15, 
     return train_loader, val_loader, test_loader
 
 
-# =============================================================================
+
 # SRS Denoising Dataset - Real HSI pixels paired with molecule class annotations
-# =============================================================================
+
 
 class HSI_SRS_Vector_Dataset(Dataset):
     """
@@ -551,9 +551,8 @@ class HSI_SRS_Vector_Dataset(Dataset):
         return [i for i, (_, m_idx) in enumerate(self.samples) if m_idx == mol_idx]
 
 
-# =============================================================================
 # Denoising Dataset - Target is clean normalized molecule spectrum
-# =============================================================================
+
 
 class HSI_Denoising_Dataset(Dataset):
     """
@@ -582,7 +581,7 @@ class HSI_Denoising_Dataset(Dataset):
     
     def __init__(self, molecule_dataset_path, srs_params_path,
                  num_samples_per_class=20000, exclude_molecules=None, noise_multiplier=1.0,
-                 create_mixtures=False, mixture_pairs=None):
+                 create_mixtures=False, mixture_pairs=None, instance_clean_target=False):
         """
         Initialize denoising dataset.
         
@@ -603,6 +602,8 @@ class HSI_Denoising_Dataset(Dataset):
         mixture_pairs : list of tuples, optional
             List of (index1, index2) or (name1, name2) pairs to mix. If None and create_mixtures=True,
             creates mixtures for all unique pairs (default None)
+        instance_clean_target : bool
+            If True, the clean target is a noise-free version of the spectrum instance with the same SNR
         """
         # Add .npz extension if needed
         mol_path = molecule_dataset_path if molecule_dataset_path.endswith('.npz') else molecule_dataset_path + '.npz'
@@ -647,25 +648,28 @@ class HSI_Denoising_Dataset(Dataset):
         # Load SRS parameters
         print(f"Loading SRS parameters from: {srs_path}")
         srs_data = np.load(srs_path)
-        bg_scale_vec = srs_data['bg_scale_vec']
-        ratio_scale_vec = srs_data['ratio_scale_vec']
-        noise_scale_vec = srs_data['noise_scale_vec']
+        ratio_scale_vec = np.sort(srs_data['ratio_scale_vec'])[::-1]  # Sort in descending order for better SNR sampling
+        bg_scale_vec = np.sort(srs_data['bg_scale_vec'][:ratio_scale_vec.shape[0]])  # Ensure bg_scale_vec matches ratio_scale_vec length    
+        bg_scale_vec[bg_scale_vec < 1e-6] = np.min(bg_scale_vec[bg_scale_vec > 1e-6])  # Avoid zero background
+        noise_scale_vec = srs_data['noise_scale_vec'][:ratio_scale_vec.shape[0]]  # Ensure noise_scale_vec matches ratio_scale_vec length
         ch_start = srs_data['ch_start']
         background = srs_data['background']
         
         # Convert to torch tensors
         self.mol_spectra = torch.from_numpy(mol_spectra).float()
+        self.noise_multiplier = noise_multiplier
         self.bg_scale_vec = bg_scale_vec
         self.ratio_scale_vec = ratio_scale_vec  
         self.noise_scale_vec = noise_scale_vec
         self.background = torch.from_numpy(background.copy()).float()
         self.num_samples_per_class = num_samples_per_class
         self.noise_param = np.mean(noise_scale_vec) 
-        self.noise_multiplier = noise_multiplier
+   
         self.ch_start = int(ch_start)
         
         self.n_molecules = mol_spectra.shape[0]
         self.n_wavenumbers = mol_spectra.shape[1]
+        self.instance_clean_target = instance_clean_target
 
         print("Denoising Dataset initialized:")
         print(f"  Spectra: {self.n_molecules}")
@@ -673,7 +677,10 @@ class HSI_Denoising_Dataset(Dataset):
         print(f"  Samples per class: {num_samples_per_class}")
         print(f"  Total samples: {len(self)}")
         print("  Noisy normalization: Min-max (baseline as min)")
-        print("  Clean normalization: Min-max (0-1)")
+        if instance_clean_target:
+            print("  Clean target: instance-matched (same SNR+bg, zero noise) [Fix 3]")
+        else:
+            print("  Clean target: pure molecule template × snr_scale (original)")
     
     def _create_mixture_classes(self, mol_spectra, molecule_names, mixture_pairs=None):
         """
@@ -777,9 +784,10 @@ class HSI_Denoising_Dataset(Dataset):
         mol_idx = idx // self.num_samples_per_class
         
         # Sample experimental parameters
-        bg_amplitude = np.random.choice(self.bg_scale_vec)
-        snr_scale = max(np.random.choice(self.ratio_scale_vec) * self.noise_param, 
-                       self.noise_param)
+        choice_idx = np.random.choice(len(self.ratio_scale_vec))    
+        bg_amplitude = self.bg_scale_vec[choice_idx]
+        snr_scale = max(self.ratio_scale_vec[choice_idx] * self.noise_param, 
+                       self.noise_param*self.noise_multiplier*5) # Ensure SNR scaling is at least proportional to noise level
         
         # Generate noise
         noise = torch.randn(self.n_wavenumbers) * self.noise_param * self.noise_multiplier
@@ -789,8 +797,15 @@ class HSI_Denoising_Dataset(Dataset):
                          self.background * bg_amplitude + 
                          noise)
         
-        # Get clean molecule spectrum (just the molecule, scaled by SNR)
-        clean_spectrum = self.mol_spectra[mol_idx] * snr_scale
+        if self.instance_clean_target:
+            # Fix 3: clean target is the SAME spectrum instance with noise removed.
+            # Same snr_scale and bg_amplitude as the noisy input — only the noise
+            # term is omitted. The model learns to suppress noise without being
+            # biased toward the pure molecule template shape.
+            clean_spectrum = (self.mol_spectra[mol_idx] * snr_scale)
+        else:
+            # Original: pure molecule template scaled by SNR (no background, no noise)
+            clean_spectrum = self.mol_spectra[mol_idx] * snr_scale
         
         # Min-max normalize noisy spectrum (SAME AS HSI_Labeled_Dataset with compute_min_max=True)
         # Use baseline (mean of first ch_start channels) as min, max as max
@@ -807,7 +822,7 @@ class HSI_Denoising_Dataset(Dataset):
             clean_max = torch.max(clean_spectrum)
             clean_normalized = (clean_spectrum - clean_min) / (clean_max - clean_min + 1e-8)
         
-        return noisy_spectrum, clean_spectrum, mol_idx # Switching back to unnormalized versions for training
+        return noisy_spectrum, clean_spectrum, mol_idx  # Unnormalized versions for training
 
 
 def create_denoising_dataloaders(dataset, batch_size=32, train_ratio=0.7, val_ratio=0.15, seed=42):
