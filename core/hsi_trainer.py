@@ -14,11 +14,15 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score, log_loss
+from sklearn.calibration import CalibratedClassifierCV
 from tqdm import tqdm
 import joblib
 import os
 import time
+
+from core.hsi_labeled_dataset import HSI_Labeled_Dataset, create_dataloaders
+from sk_classifier.debug_sk_classifier_stratified_kfold import compute_sam_weights    
 
 
 class HSI_Trainer:
@@ -28,25 +32,39 @@ class HSI_Trainer:
     Supports both sklearn and PyTorch models with a consistent interface.
     """
     
-    def __init__(self, model, model_type='sklearn'):
+    def __init__(self, dataset, model, model_type='sklearn'):
         """
         Initialize trainer.
         
         Parameters
         ----------
+        dataset : HSI_Labeled_Dataset
+            The dataset to use for training
         model : sklearn model or torch.nn.Module
             The model to train
         model_type : str
             'sklearn' or 'pytorch'
         """
+        self.dataset = dataset
         self.model = model
         self.model_type = model_type.lower()
-        self.history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
+        self.calibrated_model = None  # Set by train_sklearn_classifier when use_platt=True
+        self.history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': [], 'train_f1': [], 'val_f1': []}
         
         if self.model_type not in ['sklearn', 'pytorch']:
             raise ValueError("model_type must be 'sklearn' or 'pytorch'")
+
+    @property
+    def active_model(self):
+        """Return the Platt-calibrated model if fitted, otherwise the base model."""
+        return self.calibrated_model if self.calibrated_model is not None else self.model
+
+    def loader_to_numpy(self, loader):
+        X, y = zip(*[(X.numpy(), y.numpy()) for X, y in loader])
+        return np.concatenate(X), np.concatenate(y)
+
     
-    def train_sklearn(self, dataset, train_ratio=0.7, val_ratio=0.15, verbose=True, seed=42):
+    def train_sklearn_classifier(self, train_ratio=0.7, val_ratio=0.15, verbose=True, seed=42, use_platt=True, **kwargs):
         """
         Train sklearn model using synthetic dataset.
         
@@ -67,62 +85,28 @@ class HSI_Trainer:
         -------
         dict : Training metrics
         """
-        if verbose:
-            print("=" * 80)
-            print("TRAINING SKLEARN MODEL")
-            print("=" * 80)
-        
+
         # Create stratified split indices (balanced per class)
-        train_size_per_class = int(dataset.num_samples_per_class * train_ratio)
-        val_size_per_class = int(dataset.num_samples_per_class * val_ratio)
+        train_size_per_class = int(self.dataset.num_samples_per_class * train_ratio)
+        val_size_per_class = int(self.dataset.num_samples_per_class * val_ratio)
         
         if verbose:
             print("\nCreating stratified splits:")
-            print(f"  Train: {train_size_per_class} samples per class ({train_size_per_class * dataset.n_molecules} total)")
-            print(f"  Val:   {val_size_per_class} samples per class ({val_size_per_class * dataset.n_molecules} total)")
+            print(f"  Train: {train_size_per_class} samples per class ({train_size_per_class * self.dataset.n_molecules} total)")
+            print(f"  Val:   {val_size_per_class} samples per class ({val_size_per_class * self.dataset.n_molecules} total)")
         
-        np.random.seed(seed)
-        train_indices = []
-        val_indices = []
-        
-        for mol_idx in range(dataset.n_molecules):
-            # All indices for this class
-            class_start = mol_idx * dataset.num_samples_per_class
-            class_indices = np.arange(class_start, class_start + dataset.num_samples_per_class)
-            
-            # Shuffle and split
-            np.random.shuffle(class_indices)
-            train_indices.extend(class_indices[:train_size_per_class])
-            val_indices.extend(class_indices[train_size_per_class:train_size_per_class + val_size_per_class])
-        
-        # Shuffle the combined indices
-        np.random.shuffle(train_indices)
-        np.random.shuffle(val_indices)
-        
-        # Generate training data
-        if verbose:
-            print(f"\nGenerating {len(train_indices)} training samples...")
-        X_train = []
-        y_train = []
-        for i in tqdm(train_indices, disable=not verbose):
-            spec, label = dataset[i]
-            X_train.append(spec.numpy())
-            y_train.append(label)
-        X_train = np.array(X_train)
-        y_train = np.array(y_train)
-        
-        # Generate validation data
-        if verbose:
-            print(f"Generating {len(val_indices)} validation samples...")
-        X_val = []
-        y_val = []
-        for i in tqdm(val_indices, disable=not verbose):
-            spec, label = dataset[i]
-            X_val.append(spec.numpy())
-            y_val.append(label)
-        X_val = np.array(X_val)
-        y_val = np.array(y_val)
-        
+        train_loader, val_loader, test_loader = create_dataloaders(
+            self.dataset,
+            batch_size=256,
+            train_ratio=0.7,
+            val_ratio=0.15,
+        seed=seed,
+        )
+            # Create train/val split (test set not used in hyperparameter search)
+        self.X_train, self.y_train = self.loader_to_numpy(train_loader)
+        self.X_val,   self.y_val   = self.loader_to_numpy(val_loader)
+        self.X_test,  self.y_test  = self.loader_to_numpy(test_loader)
+
         # Timing info
         if verbose:
             start_time = time.time()
@@ -130,34 +114,113 @@ class HSI_Trainer:
         # Train model
         if verbose:
             print("\nTraining model...")
-        self.model.fit(X_train, y_train)
+        self.model.fit(self.X_train, self.y_train)
+
+        # --- Platt scaling (post-hoc probability calibration) ---
+        self.calibrated_model = None
+        if use_platt:
+            if verbose:
+                print("\nFitting Platt scaling (sigmoid calibration) on validation set...")
+            calib = CalibratedClassifierCV(estimator=self.model, cv='prefit', method='sigmoid')
+            calib.fit(self.X_val, self.y_val)
+            self.calibrated_model = calib
+            if verbose:
+                base_probs  = self.model.predict_proba(self.X_val)
+                calib_probs = self.calibrated_model.predict_proba(self.X_val)
+                # Multiclass Brier: mean sum-of-squared-errors over class probability vectors
+                n_cls = len(self.model.classes_)
+                one_hot = np.eye(n_cls)[self.y_val]  # (N, C)
+                base_brier  = float(np.mean(np.sum((base_probs  - one_hot) ** 2, axis=1)))
+                calib_brier = float(np.mean(np.sum((calib_probs - one_hot) ** 2, axis=1)))
+                base_ll  = log_loss(self.y_val, base_probs)
+                calib_ll = log_loss(self.y_val, calib_probs)
+                print("  Platt calibration quality on validation set:")
+                print(f"    Log-loss — Before: {base_ll:.4f}  After: {calib_ll:.4f}  (Δ {calib_ll - base_ll:+.4f})")
+                print(f"    Brier    — Before: {base_brier:.4f}  After: {calib_brier:.4f}  (Δ {calib_brier - base_brier:+.4f})")
 
         if verbose:
             end_time = time.time()
         
-        # Evaluate
-        train_pred = self.model.predict(X_train)
-        val_pred = self.model.predict(X_val)
+        # Train and validation predictions (with optional SAM weighting)
+        try:
+            if kwargs['sam_weighting'] and 'alpha' in kwargs:
+
+                def compute_sam_weights(query_spectra, reference_spectra):
+                    """
+                    Compute Spectral Angle Mapper (SAM) similarity weights between query and reference spectra.
+                    
+                    Args:
+                        query_spectra: numpy array of shape (n_query, n_features)
+                        reference_spectra: numpy array of shape (n_reference, n_features)
+                        
+                    Returns:
+                        sam_weights: numpy array of shape (n_query, n_reference) containing SAM-based weights
+                    """
+                    # Normalize spectra
+                    query_norm = query_spectra / (np.linalg.norm(query_spectra, axis=1, keepdims=True) + 1e-10)  # Add small value to avoid division by zero
+                    ref_norm = reference_spectra / (np.linalg.norm(reference_spectra, axis=1, keepdims=True) + 1e-10)
+                    
+                    # Compute cosine similarity via dot product
+                    similarity = np.dot(query_norm, ref_norm.T)
+                    
+                    # Clip to valid range and compute spectral angle
+                    cos_sim_matrix = np.clip(similarity, -1, 1)
+                    thetas = np.arccos(cos_sim_matrix)
+                    
+                    # Convert angles to weights (smaller angle = higher weight)
+                    # Normalized to [0, 1] where 1 is perfect match
+                    sam_weights = 1 - (thetas / np.pi)
+                    
+                    return sam_weights
+
+                # If SAM weights are provided, apply them to the validation predictions
+                self.alpha = kwargs['alpha']
+                self.reference_libray_array, label_array = self.dataset.get_reference()
+                aligned_val_weights = compute_sam_weights(self.X_val, self.reference_libray_array)
+                aligned_train_weights = compute_sam_weights(self.X_train, self.reference_libray_array)
+
+                # Get base predictions and probabilities
+                val_probs = self.active_model.predict_proba(self.X_val)
+                aligned_weights = aligned_val_weights[:, self.model.classes_]  # Align SAM weights with model's class order
+                weighted_val_probs = val_probs * (1 + self.alpha * aligned_weights)  # Simple weighting scheme
+                val_pred = self.model.classes_[np.argmax(weighted_val_probs, axis=1)]
+
+                train_prob = self.active_model.predict_proba(self.X_train)
+                aligned_train_weights = aligned_train_weights[:, self.model.classes_]  # Align SAM weights with model's class order
+                weighted_train_probs = train_prob * (1 + self.alpha * aligned_train_weights)
+                train_pred = self.model.classes_[np.argmax(weighted_train_probs, axis=1)]
+            else:
+                self.reference_libray_array = None  # No SAM weighting used
+                # No SAM weighting, just use base predictions
+                train_pred = self.active_model.predict(self.X_train)
+                val_pred = self.active_model.predict(self.X_val)
         
-        train_acc = accuracy_score(y_train, train_pred)
-        val_acc = accuracy_score(y_val, val_pred)
-        
-        if verbose:
-            print("\n" + "=" * 80)
-            print("TRAINING COMPLETE")
-            print("=" * 80)     
-            print(f"Training time: {end_time - start_time:.2f} seconds")
-            print(f"Training Accuracy: {train_acc:.4f}")
-            print(f"Validation Accuracy: {val_acc:.4f}")
-        
-        return {
-            'train_accuracy': train_acc,
-            'val_accuracy': val_acc,
-            'train_predictions': train_pred,
-            'val_predictions': val_pred
-        }
+            train_acc = accuracy_score(self.y_train, train_pred)
+            val_acc = accuracy_score(self.y_val, val_pred)
+
+            train_score = f1_score(self.y_train, train_pred, average='weighted')
+            val_score = f1_score(self.y_val, val_pred, average='weighted')
+            
+            if verbose:
+                print(f"Training completed in {end_time - start_time:.2f} seconds")
+                print(f"Training Accuracy: {train_acc:.4f}")
+                print(f"Validation Accuracy: {val_acc:.4f}")
+            
+            return {
+                'train_accuracy': train_acc,
+                'val_accuracy': val_acc,
+                'train_score': train_score,
+                'val_score': val_score,
+                'train_predictions': train_pred,
+                'val_predictions': val_pred,
+                'train_f1': train_score,
+                'val_f1': val_score,
+                'platt_calibrated': self.calibrated_model is not None,
+            }
+        except Exception as e:
+            print(f"Error during training: {e}")
     
-    def train_pytorch(self, dataset, train_ratio=0.7, val_ratio=0.15, 
+    def train_pytorch(self, train_ratio=0.7, val_ratio=0.15, 
                      batch_size=32, epochs=10, lr=0.001, device='cpu', verbose=True):
         """
         Train PyTorch model using synthetic dataset.
@@ -185,7 +248,6 @@ class HSI_Trainer:
         -------
         dict : Training history
         """
-        from hsi_labeled_dataset import create_dataloaders
         
         if verbose:
             print("=" * 80)
@@ -194,7 +256,7 @@ class HSI_Trainer:
         
         # Create dataloaders
         train_loader, val_loader, _ = create_dataloaders(
-            dataset, batch_size=batch_size, 
+            self.dataset, batch_size=batch_size, 
             train_ratio=train_ratio, val_ratio=val_ratio
         )
         
@@ -272,7 +334,7 @@ class HSI_Trainer:
         
         return self.history
     
-    def train(self, dataset, **kwargs):
+    def train(self, **kwargs):
         """
         Unified training interface - automatically dispatches to correct method.
         
@@ -288,11 +350,11 @@ class HSI_Trainer:
         Training results
         """
         if self.model_type == 'sklearn':
-            return self.train_sklearn(dataset, **kwargs)
+            return self.train_sklearn(**kwargs)
         else:
-            return self.train_pytorch(dataset, **kwargs)
+            return self.train_pytorch(**kwargs)
     
-    def evaluate(self, dataset, batch_size=32, device='cpu'):
+    def evaluate(self, batch_size=32, device='cpu'):
         """
         Evaluate model on dataset.
         
@@ -311,32 +373,36 @@ class HSI_Trainer:
         """
         if self.model_type == 'sklearn':
             # Generate test data
-            X_test = []
-            y_test = []
-            for i in range(len(dataset)):
-                spec, label = dataset[i]
-                X_test.append(spec.numpy())
-                y_test.append(label)
-            X_test = np.array(X_test)
-            y_test = np.array(y_test)
-            
-            y_pred = self.model.predict(X_test)
-            acc = accuracy_score(y_test, y_pred)
-            
+            X_test, y_test = self.X_test, self.y_test
+            test_pred = self.active_model.predict(X_test)
+
+            if self.reference_libray_array is not None:
+                # If SAM weights were used during training, apply them to test predictions
+                test_probs = self.active_model.predict_proba(X_test)
+                aligned_test_weights = compute_sam_weights(X_test, self.reference_libray_array)[:, self.model.classes_]
+                weighted_test_probs = test_probs * (1 + self.alpha * aligned_test_weights)  
+                test_pred = self.model.classes_[np.argmax(weighted_test_probs, axis=1)]
+            else:
+                test_pred = self.active_model.predict(X_test)
+
+            acc = accuracy_score(y_test, test_pred)
+            score = f1_score(y_test, test_pred, average='weighted')
+
             return {
                 'accuracy': acc,
-                'predictions': y_pred,
+                'score': score,
+                'predictions': test_pred,
                 'true_labels': y_test,
-                'confusion_matrix': confusion_matrix(y_test, y_pred),
-                'classification_report': classification_report(y_test, y_pred)
+                'confusion_matrix': confusion_matrix(y_test, test_pred),
+                'classification_report': classification_report(y_test, test_pred)
             }
+
         else:
             # PyTorch evaluation
-            if not isinstance(dataset, DataLoader):
-                from hsi_labeled_dataset import create_dataloaders
-                _, _, test_loader = create_dataloaders(dataset, batch_size=batch_size)
+            if not isinstance(self.dataset, DataLoader):
+                _, _, test_loader = create_dataloaders(self.dataset, batch_size=batch_size)
             else:
-                test_loader = dataset
+                test_loader = self.dataset
             
             self.model.eval()
             self.model = self.model.to(device)
@@ -356,9 +422,10 @@ class HSI_Trainer:
             all_preds = np.array(all_preds)
             all_labels = np.array(all_labels)
             acc = accuracy_score(all_labels, all_preds)
-            
+            score = f1_score(all_labels, all_preds, average='weighted')
             return {
                 'accuracy': acc,
+                'score': score,
                 'predictions': all_preds,
                 'true_labels': all_labels,
                 'confusion_matrix': confusion_matrix(all_labels, all_preds),
@@ -444,7 +511,12 @@ class HSI_Trainer:
         
         if self.model_type == 'sklearn':
             joblib.dump(self.model, filepath)
-            print(f"Sklearn model saved to: {filepath}")
+            print(f"Base sklearn model saved to: {filepath}")
+            if self.calibrated_model is not None:
+                platt_path = filepath.replace('.joblib', '_platt.joblib')
+                joblib.dump(self.calibrated_model, platt_path)
+                print(f"Platt-calibrated model saved to: {platt_path}")
+                print(f"  → Set model_path='{platt_path}' in classify.py to use calibrated probabilities.")
         else:
             torch.save({
                 'model_state_dict': self.model.state_dict(),
@@ -564,3 +636,5 @@ def train_neural_network(dataset, model, epochs=10, lr=0.001, batch_size=32, dev
     trainer.train(dataset, epochs=epochs, lr=lr, batch_size=batch_size, device=device, **kwargs)
     
     return trainer
+
+

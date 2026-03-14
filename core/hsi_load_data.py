@@ -436,7 +436,7 @@ if __name__ == '__main__':
             'wavenumber_start': 2700,
             'wavenumber_end': 3100,
             'num_samples': 61,
-            'shift': 2,
+            'shift': 0,
             'molecule_output': 'lipid_subtype_wn_61_test',
             'params_output': 'srs_params_61',
             'exclude_molecules': None

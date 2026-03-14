@@ -14,6 +14,7 @@ import os
 import sys
 import numpy as np
 import tifffile
+import glob
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 core_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'core'))
@@ -127,7 +128,9 @@ def add_background_to_image(image, background, bg_scale_factor=1.0):
     # Reshape background to broadcast across spatial dimensions
     # From (channels,) to (channels, 1, 1)
     bg_reshaped = background[:, np.newaxis, np.newaxis]
-    
+
+
+
     print(f"Background range: [{np.min(background):.4f}, {np.max(background):.4f}]")
     print(f"Background scale factor: {bg_scale_factor}")
     
@@ -163,6 +166,8 @@ def process_directory(input_dir, params_file, output_dir, bg_scale_factor=1.0, f
     params = np.load(params_file)
     
     background = params['background']
+    background = background / np.max(background)  # Normalize background to [0, 1]
+
     bg_scale_vec = params['bg_scale_vec']
     ratio_scale_vec = params['ratio_scale_vec']
     ch_start = int(params['ch_start'])
@@ -177,7 +182,8 @@ def process_directory(input_dir, params_file, output_dir, bg_scale_factor=1.0, f
     os.makedirs(output_dir, exist_ok=True)
     
     # Get list of .tif files
-    file_list = [f for f in os.listdir(input_dir) if f.endswith('.tif') or f.endswith('.tiff')]
+    # file_list = [f for f in os.listdir(input_dir) if f.endswith('.tif') or f.endswith('.tiff')]
+    file_list = glob.glob(os.path.join(input_dir, '*.tif')) + glob.glob(os.path.join(input_dir, '*.tiff'))
     
     if not file_list:
         print(f"No .tif files found in {input_dir}")
@@ -202,41 +208,50 @@ def process_directory(input_dir, params_file, output_dir, bg_scale_factor=1.0, f
             
             # Flip image (match coordinate convention from hsi_load_data.py)
             image = np.flip(image, axis=0)
+            image_max = np.mean(np.max(image,0)) - np.median(image[:ch_start, :, :])
+            # image_max = (np.max(image[:, :, :]) - np.median(image[:ch_start, :, :]))   # Avoid division by zero
+            print(f"\nImage max mean intensity: {image_max:.4f}")
+            noise = np.std(image[:ch_start, :, :])
 
+            bg_scale = 0.5 * image_max  # Scale background to half of the average max pixel intensity
+
+            image_with_bg = add_background_to_image(image, background, bg_scale_factor=bg_scale)
 
 
             
-            # Normalize image (visualize only for first valid image)
-            show_viz = visualize and processed_count == 0
-            normalized_image, _ = normalize_hyperspectral_image(image, ch_start, visualize=show_viz)
-            noise = np.std(normalized_image[:ch_start, :, :])
-            print(f"Image noise level (standard deviation of silent region): {noise:.4f}")
+            # # Normalize image (visualize only for first valid image)
+            # show_viz = visualize and processed_count == 0
+            # # normalized_image, _ = normalize_hyperspectral_image(image, ch_start, visualize=show_viz)
 
-            snr_scale = max(np.random.choice(ratio_scale_vec) * noise, 
-                       2* noise)
-            print(f"SNR scale factor: {snr_scale:.4f}")
-            
-            normalized_image *= snr_scale
 
-            # Recalculate max_mean after scaling
-            mean_per_pixel = np.mean(normalized_image, axis=0)  # Shape: (height, width)
-            max_mean = np.max(mean_per_pixel)
+            # noise = np.std(normalized_image[:ch_start, :, :])
+            # print(f"Image noise level (standard deviation of silent region): {noise:.4f}")
+
+            # snr_scale = max(np.random.choice(ratio_scale_vec) * noise, 
+            #            2* noise)
+            # print(f"SNR scale factor: {snr_scale:.4f}")
+            
+            # normalized_image *= snr_scale
+
+            # # Recalculate max_mean after scaling
+            # mean_per_pixel = np.mean(normalized_image, axis=0)  # Shape: (height, width)
+            # max_mean = np.max(mean_per_pixel)
 
             
-            # Background scale factor is 0.5 (half of normalized range)
-            bg_scale = np.random.choice(bg_scale_vec) * snr_scale * max_mean
+            # # Background scale factor is 0.5 (half of normalized range)
+            # bg_scale = np.random.choice(bg_scale_vec) * snr_scale * max_mean
             
-            # Add background
-            image_with_bg = add_background_to_image(normalized_image, background, bg_scale)
+            # # Add background
+            # image_with_bg = add_background_to_image(normalized_image, background, bg_scale)
             
             # Normalize again to ensure values are within expected range
-            normalized_image, max_mean = normalize_hyperspectral_image(image_with_bg, ch_start, visualize=show_viz)
+            # normalized_image, max_mean = normalize_hyperspectral_image(image_with_bg, ch_start, visualize=show_viz)
 
             # Flip back before saving
             image_with_bg = np.flip(image_with_bg, axis=0)
             
             # Save processed image
-            name_without_ext = os.path.splitext(filename)[0]
+            name_without_ext = os.path.splitext(os.path.basename(filename))[0]
             output_filename = f"{name_without_ext}{file_suffix}.tif"
             output_path = os.path.join(output_dir, output_filename)
             
@@ -257,7 +272,7 @@ def process_directory(input_dir, params_file, output_dir, bg_scale_factor=1.0, f
 
 def main():
 
-    image_dir = r"/Volumes/ADATA SE880/ADATA Backup/Lipid Reference Library/HSI_data"
+    image_dir = r"D:\ADATA Backup\Lipid Reference Library\HSI_data"
     parent_dir = os.path.dirname(image_dir)
     output_dir = os.path.join(parent_dir, "processed")
 

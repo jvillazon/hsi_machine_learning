@@ -1,5 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib.colors import LinearSegmentedColormap
 import pandas as pd
 import tifffile
 from glob import glob
@@ -9,6 +11,16 @@ from statsmodels.stats.multicomp import pairwise_tukeyhsd
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
 import scipy.ndimage as ndi
+
+# Colormap extracted from bubble plot SVG (blue → grey → red diverging)
+_SVG_BUBBLE_CMAP_COLORS = [
+    '#273478', '#3d50b7', '#7483d5', '#b2b8de',
+    '#d3d3d3', '#d3d3d3',
+    '#e4a9b7', '#e36381', '#c52b50', '#811a33',
+]
+SVG_BUBBLE_CMAP = LinearSegmentedColormap.from_list(
+    'svg_bubble', _SVG_BUBBLE_CMAP_COLORS, N=256
+)
 
 class HSI_Visualizer:
     # Default color palette - colorblind-friendly
@@ -603,8 +615,8 @@ class HSI_Visualizer:
         plt.tight_layout()
         plt.show()
 
-    def apply_rf_masking(self, prediction_csv_path=None, ratio_tiff_path=None, mask_list_path=None, results_per_unit=None, 
-                         stats=None, regions=None, img_name=None, sample_name=None, classes_to_ignore=None):
+    def apply_rf_masking(self, prediction_csv_path=None, ratio_tiff_path=None, mask_list_path=None, prefix='CODEX', results_per_unit=None, 
+                        regions=None, img_name=None, sample_name=None, classes_to_ignore=None):
         """
         Apply masks and quantify predictions or ratios for each instance.
         
@@ -612,6 +624,8 @@ class HSI_Visualizer:
             prediction_csv_path: Path to prediction CSV file (for prediction quantification)
             ratio_tiff_path: Path to ratio TIFF file (for ratio quantification)
             mask_list_path: Path to folder containing mask TIFF files
+            prefix: Prefix for mask filenames (default 'CODEX')
+            results_per_unit: Dictionary to store results per unit (optional, will be created if None)
             stats: Dictionary of image statistics
             regions: List of region names for classification
             img_name: Image name (without extension)
@@ -677,7 +691,7 @@ class HSI_Visualizer:
             
             # Extract unit name from mask filename (e.g., "CODEX-Glom_cortex-mask.tif" -> "Glom_cortex")
             mask_basename = os.path.basename(mask_file)
-            unit_name = mask_basename.replace('CODEX-', '').replace('-mask.tif', '')
+            unit_name = mask_basename.replace(f'{prefix}-', '').replace('-mask.tif', '')
             
             # Check shape compatibility
             if is_prediction_mode:
@@ -733,7 +747,7 @@ class HSI_Visualizer:
                     
                     # Count occurrences of each class
                     unique_classes, counts = np.unique(predictions, return_counts=True)
-                    class_counts = dict(zip(unique_classes, counts))
+                    class_counts = {key.strip(): value for key, value in dict(zip(unique_classes, counts)).items()}
                     
                     # Remove ignored classes
                     for cls in classes_to_ignore:
@@ -783,8 +797,6 @@ class HSI_Visualizer:
                         else:
                             results_per_unit[unit_name].append(ratio_entry)
                     # If no non-zero ratios, skip this instance entirely
-
-        
         return results_per_unit
     
     def mask_tiff_by_classes(self, tiff_path, csv_path, classes_to_mask, mask_value=0):
@@ -1135,15 +1147,29 @@ class HSI_Visualizer:
         # Get unique molecules/ratio types
         unique_groups = df[grouping_col].unique()
         
+        # Remove trailing spaces from unique_groups
+        unique_groups = [group.strip() for group in unique_groups]
+
         # Sort by display_name_map order if provided, otherwise alphabetically
         if display_name_map:
-            # Create ordered list: first items in display_name_map order, then remaining alphabetically
+            # Remove trailing spaces from display_name_map keys
+            display_name_map = {k.strip(): v for k, v in display_name_map.items()}
             ordered_groups = [k for k in display_name_map.keys() if k in unique_groups]
             remaining = sorted([g for g in unique_groups if g not in display_name_map.keys()])
             sorted_groups = ordered_groups + remaining
+
         else:
             sorted_groups = sorted(unique_groups)
-        
+
+        # Debug: Print group names before and after display name mapping
+        print("Unique groups before mapping:", unique_groups)
+
+        # Remove trailing spaces from unique_groups
+        unique_groups = [group.strip() for group in unique_groups]
+
+        # Debug: Print group names after stripping spaces
+        print("Unique groups after stripping spaces:", unique_groups)
+
         anova_results = {}
         significant_molecules = []  # Track which molecules have significance
          
@@ -1219,10 +1245,12 @@ class HSI_Visualizer:
                     # We need to create unit-region combinations for analysis
                     
                     # Create a combined Unit_Region column for grouping
-                    group_data_clean['Unit_Region'] = group_data_clean.apply(
-                        lambda row: f"{row['Unit']}_{row['Region']}" if pd.notna(row.get('Region')) else row['Unit'],
-                        axis=1
-                    )
+                    def make_unit_region(row):
+                        region = row.get('Region')
+                        if pd.isna(region) or region in [None, '', 'Other', 'O']:
+                            return str(row['Unit'])
+                        return f"{row['Unit']}_{region}"
+                    group_data_clean['Unit_Region'] = group_data_clean.apply(make_unit_region, axis=1)
                     
                     unit_regions = group_data_clean['Unit_Region'].unique()
                     unit_info = {}  # {unit_region: {'base': base_unit, 'region': region}}
@@ -1537,10 +1565,12 @@ class HSI_Visualizer:
         fig, ax = plt.subplots(figsize=figsize)
         
         # Create a combined Unit_Region for plotting
-        data['Unit_Region'] = data.apply(
-            lambda row: f"{row['Unit']}_{row['Region']}" if pd.notna(row.get('Region')) else row['Unit'],
-            axis=1
-        )
+        def make_unit_region(row):
+            region = row.get('Region')
+            if pd.isna(region) or region in [None, '', 'Other', 'O']:
+                return str(row['Unit'])
+            return f"{row['Unit']}_{region}"
+        data['Unit_Region'] = data.apply(make_unit_region, axis=1)
         
         # Group units by base unit and region
         unit_regions = {}  # {unit_region: region}
@@ -1640,7 +1670,14 @@ class HSI_Visualizer:
         
         # Set x-ticks and labels to strictly follow sorted_units (ordered_columns)
         ax.set_xticks(positions)
-        ax.set_xticklabels(sorted_units, rotation=45, ha='center', fontsize=4)
+        def format_xtick_label(unit_region):
+            if '_' in unit_region:
+                unit, region = unit_region.rsplit('_', 1)
+                if region in ['Other', 'O', '', None]:
+                    return unit
+                return f"{unit} ({region[0]})"
+            return unit_region
+        ax.set_xticklabels([format_xtick_label(u) for u in sorted_units], rotation=45, ha='center', fontsize=4)
         ax.set_xlabel('Unit (Region)', fontweight='bold', fontsize=14)
         ax.set_ylabel(f'{value_col.replace("_", " ")} (mean ± SEM)', fontweight='bold', fontsize=14)
         
@@ -1739,10 +1776,12 @@ class HSI_Visualizer:
         for group_value in molecules_list:
             group_data = df[df[grouping_col] == group_value].copy()
             if len(group_data) > 0:
-                group_data['Unit_Region'] = group_data.apply(
-                    lambda row: f"{row['Unit']}_{row['Region']}" if pd.notna(row.get('Region')) else row['Unit'],
-                    axis=1
-                )
+                def make_unit_region(row):
+                    region = row.get('Region')
+                    if pd.isna(region) or region in [None, '', 'Other', 'O']:
+                        return str(row['Unit'])
+                    return f"{row['Unit']}_{region}"
+                group_data['Unit_Region'] = group_data.apply(make_unit_region, axis=1)
                 all_unit_regions.update(group_data['Unit_Region'].unique())
         
         # Determine which units have multiple regions vs single region (calculate once, use throughout)
@@ -1784,10 +1823,12 @@ class HSI_Visualizer:
                 continue
             
             # Create Unit_Region column
-            group_data['Unit_Region'] = group_data.apply(
-                lambda row: f"{row['Unit']}_{row['Region']}" if pd.notna(row.get('Region')) else row['Unit'],
-                axis=1
-            )
+            def make_unit_region(row):
+                region = row.get('Region')
+                if pd.isna(region) or region in [None, '', 'Other', 'O']:
+                    return str(row['Unit'])
+                return f"{row['Unit']}_{region}"
+            group_data['Unit_Region'] = group_data.apply(make_unit_region, axis=1)
             
             # Group units by base unit and region
             unit_regions = {}
@@ -2067,14 +2108,14 @@ class HSI_Visualizer:
                     # First region uses base color
                     first_row_elements.append(Patch(facecolor=base_color_map[unit], 
                                                 edgecolor='none', 
-                                                label=f'{display_unit} ({region_abbrev})',
+                                                label=(f'{display_unit}' if region_abbrev in ['O', 'Other', '', None] else f'{display_unit} ({region_abbrev})'),
                                                 alpha=0.85))
                 else:
                     # Second region uses lighter color
                     lighter_color = self._create_lighter_shade(base_color_map[unit])
                     first_row_elements.append(Patch(facecolor=lighter_color, 
                                                 edgecolor='none', 
-                                                label=f'{display_unit} ({region_abbrev})',
+                                                label=(f'{display_unit}' if region_abbrev in ['O', 'Other', '', None] else f'{display_unit} ({region_abbrev})'),
                                                 alpha=0.85))
         
         # Add units with only one region to second row (include region abbreviation)
@@ -2093,13 +2134,13 @@ class HSI_Visualizer:
                 if all_dataset_regions and region_name == all_dataset_regions[0]:
                     second_row_elements.append(Patch(facecolor=base_color_map[unit], 
                                                 edgecolor='none', 
-                                                label=f'{display_unit} ({region_abbrev})',
+                                                label=(f'{display_unit}' if region_abbrev in ['O', 'Other', '', None] else f'{display_unit} ({region_abbrev})'),
                                                 alpha=0.85))
                 else:
                     lighter_color = self._create_lighter_shade(base_color_map[unit])
                     second_row_elements.append(Patch(facecolor=lighter_color, 
                                                 edgecolor='none', 
-                                                label=f'{display_unit} ({region_abbrev})',
+                                                label=(f'{display_unit}' if region_abbrev in ['O', 'Other', '', None] else f'{display_unit} ({region_abbrev})'),
                                                 alpha=0.85))
         
         # Calculate total entries and items per row
@@ -2137,10 +2178,11 @@ class HSI_Visualizer:
         # Combine both rows
         legend_elements = first_row + second_row
         
-        # Create legend with ncols columns (forces two rows)
-        fig.legend(handles=legend_elements, loc='lower center', ncol=ncols, 
-                  bbox_to_anchor=(0.5, -0.02), fontsize=13, frameon=True, 
-                  fancybox=True, shadow=False, columnspacing=1.0, handletextpad=0.5)
+        # Only create legend if there are elements and ncols > 0
+        if ncols > 0 and legend_elements:
+            fig.legend(handles=legend_elements, loc='lower center', ncol=ncols, 
+                      bbox_to_anchor=(0.5, -0.02), fontsize=13, frameon=True, 
+                      fancybox=True, shadow=False, columnspacing=1.0, handletextpad=0.5)
         
         plt.tight_layout(rect=[0, 0.12, 1, 1])
         
@@ -2157,7 +2199,8 @@ class HSI_Visualizer:
 
     def generate_region_heatmaps(self, df, value_col, grouping_col, output_dir=None,
                                   data_type='percentage', figsize=(8, 6), 
-                                  show_plots=True, cmap='RdBu_r', vmin=-2, vmax=2, display_name_map=None, unit_display_map=None):
+                                  show_plots=True, cmap='RdBu_r', vmin=-2, vmax=2, display_name_map=None, unit_display_map=None,
+                                  units_to_display=None):
         """
         Generate z-score normalized heatmaps showing variability across regions.
         
@@ -2176,6 +2219,7 @@ class HSI_Visualizer:
             show_plots: Whether to display plots interactively
             cmap: Colormap to use for heatmap
             vmin, vmax: Min and max values for colormap scale
+            units_to_display: Optional list of unit names to include; all others are excluded.
             
         Returns:
             heatmap_data: Dictionary with heatmap matrices for each molecule/ratio type
@@ -2184,7 +2228,11 @@ class HSI_Visualizer:
         if output_dir is None:
             output_dir = 'region_heatmaps_normalized'
         os.makedirs(output_dir, exist_ok=True)
-        
+
+        # Filter to selected units if specified
+        if units_to_display is not None:
+            df = df[df['Unit'].isin(units_to_display)].copy()
+
         # Check if Region column exists
         if 'Region' not in df.columns:
             print("Warning: Region column not found in DataFrame. Cannot generate heatmaps.")
@@ -2239,10 +2287,17 @@ class HSI_Visualizer:
             
             # Create pivot table for heatmap: Units as rows, Regions as columns
             try:
-                heatmap_matrix = agg_data.pivot(index='Unit', columns='Region', values='z_score')
+               # heatmap_matrix = agg_data.pivot(index='Unit', columns='Region', values='z_score')
+
+                # Filter top 10 (or fewer) z-score magnitude values
+                n_top = np.min(20, df[grouping_col].nunique())
+                top_regions = agg_data.nlargest(n_top, 'z_score', keep='all')[grouping_col].unique() 
+                filtered_agg_data = agg_data[agg_data[grouping_col].isin(top_regions)]  
+                
+                heatmap_matrix = filtered_agg_data.pivot(index='Unit', columns='Region', values='z_score')  
                 
                 # Fill missing unit-region combinations with -3 to show as extremely low
-                heatmap_matrix = heatmap_matrix.fillna(-3)
+                heatmap_matrix = heatmap_matrix.fillna(0)
                 
                 # Store the data
                 heatmap_data[group_value] = {
@@ -2281,16 +2336,37 @@ class HSI_Visualizer:
                            fontweight='bold', fontsize=16, pad=20)
                 
                 # Rotate labels and replace underscores with spaces
-                x_labels = [label.get_text().replace('_', ' ') for label in ax.get_xticklabels()]
+                def format_heatmap_xtick(label):
+                    txt = label.get_text().replace('_', ' ')
+                    if ' (' in txt:
+                        unit, region = txt.split(' (', 1)
+                        region = region.rstrip(')')
+                        if region in ['O', 'Other', '', None]:
+                            return unit
+                        return f"{unit} ({region[0]})"
+                    return txt
+                x_labels = [format_heatmap_xtick(label) for label in ax.get_xticklabels()]
                 ax.set_xticklabels(x_labels, rotation=0, ha='center', fontsize=12)
                 # Apply unit_display_map to y-axis labels (units)
                 y_labels = []
                 for label in ax.get_yticklabels():
                     original_name = label.get_text()
-                    if unit_display_map and original_name in unit_display_map:
-                        y_labels.append(unit_display_map[original_name])
+                    # Remove (O) or (Other) from y-tick labels if present
+                    if ' (' in original_name:
+                        unit, region = original_name.split(' (', 1)
+                        region = region.rstrip(')')
+                        if region in ['O', 'Other', '', None]:
+                            formatted = unit
+                        else:
+                            formatted = f"{unit} ({region[0]})"
+                        if unit_display_map and unit in unit_display_map:
+                            formatted = unit_display_map[unit]
+                        y_labels.append(formatted)
                     else:
-                        y_labels.append(original_name.replace('_', ' '))
+                        if unit_display_map and original_name in unit_display_map:
+                            y_labels.append(unit_display_map[original_name])
+                        else:
+                            y_labels.append(original_name.replace('_', ' '))
                 ax.set_yticklabels(y_labels, rotation=0, fontsize=12)
                 
                 # Style the axes with light gray borders to match separator lines
@@ -2371,7 +2447,7 @@ class HSI_Visualizer:
                         all_data.append({
                             'Unit': unit,
                             'Region': region,
-                            'Unit_Region': f"{unit}_{region}",
+                            'Unit_Region': (str(unit) if region in ['Other', 'O', '', None] else f"{unit}_{region}"),
                             item_col: molecule,
                             item_display_col: display_name,
                             'Z_Score': z_score,
@@ -2434,7 +2510,8 @@ class HSI_Visualizer:
 
     def generate_raw_ratio_heatmap(self, df, value_col='Mean_Ratio', grouping_col='Ratio_Type', 
                                     output_dir=None, figsize=(8, 6), show_plots=True, 
-                                    cmap='RdBu_r', vmin=None, vmax=None, display_name_map=None, unit_display_map=None, unit_order=None):
+                                    cmap='RdBu_r', vmin=None, vmax=None, display_name_map=None, unit_display_map=None, unit_order=None,
+                                    units_to_display=None):
         """
         Generate a non-normalized heatmap showing raw mean ratio values across units and regions.
         
@@ -2462,14 +2539,19 @@ class HSI_Visualizer:
         unit_order : list, optional
             Custom order for units on x-axis. Should be a list of unit names.
             If None, uses default ordering (units with both regions first, then single-region units)
+        units_to_display : list, optional
+            List of unit names to include; all others are excluded.
             
         Returns:
         --------
         dict : Dictionary with heatmap matrix and statistics
         """
         os.makedirs(output_dir, exist_ok=True)
-        
-        # Check if Region column exists
+
+        # Filter to selected units if specified
+        if units_to_display is not None:
+            df = df[df['Unit'].isin(units_to_display)].copy()
+
         # Check if Region column exists
         has_region = 'Region' in df.columns and df['Region'].notna().any()
         
@@ -2477,7 +2559,12 @@ class HSI_Visualizer:
             # Calculate mean for each Unit-Region-Group combination
             agg_data = df.groupby(['Unit', 'Region', grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
             # Create a combined column label for Unit-Region using standardized delimiter
-            agg_data['Unit_Region'] = agg_data['Unit'] + ' (' + agg_data['Region'] + ')'
+            def make_unit_region_label(row):
+                region = row['Region']
+                if pd.isna(region) or region in [None, '', 'Other', 'O']:
+                    return str(row['Unit'])
+                return f"{row['Unit']} ({region})"
+            agg_data['Unit_Region'] = agg_data.apply(make_unit_region_label, axis=1)
         else:
             # Calculate mean for each Unit-Group combination (no regions)
             agg_data = df.groupby(['Unit', grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
@@ -2493,57 +2580,57 @@ class HSI_Visualizer:
         
         # Create pivot table for heatmap: Ratio types as rows, Unit_Region as columns
         try:
-            heatmap_matrix = agg_data.pivot(index=grouping_col, columns='Unit_Region', values='mean')
+            heatmap_matrix = agg_data.pivot(index='Unit_Region', columns=grouping_col, values='mean')
             
-            # Sort rows by display_name_map order if provided, otherwise alphabetically
+            # Sort columns by display_name_map order if provided, otherwise alphabetically
             if display_name_map:
-                # Get current index (molecule/ratio names)
-                current_index = heatmap_matrix.index.tolist()
+                # Get current columns (molecule/ratio names)
+                current_columns = heatmap_matrix.columns.tolist()
                 # Create ordered list: first items in display_name_map order, then remaining alphabetically
-                ordered_index = [k for k in display_name_map.keys() if k in current_index]
-                remaining_index = sorted([g for g in current_index if g not in display_name_map.keys()])
-                new_index = ordered_index + remaining_index
-                heatmap_matrix = heatmap_matrix.reindex(new_index)
+                ordered_columns = [k for k in display_name_map.keys() if k in current_columns]
+                remaining_columns = sorted([g for g in current_columns if g not in display_name_map.keys()])
+                new_columns = ordered_columns + remaining_columns
+                heatmap_matrix = heatmap_matrix[new_columns]
             else:
-                # Sort rows alphabetically
-                heatmap_matrix = heatmap_matrix.sort_index()
+                # Sort columns alphabetically
+                heatmap_matrix = heatmap_matrix.sort_index(axis=1)
             
-            # Sort columns based on unit_order if provided, otherwise use default ordering
+            # Sort rows based on unit_order if provided, otherwise use default ordering
             if unit_order is not None:
                 # Custom ordering based on provided unit_order list
-                all_columns = heatmap_matrix.columns.tolist()
-                ordered_columns = []
+                all_rows = heatmap_matrix.index.tolist()
+                ordered_rows = []
                 for unit in unit_order:
-                    # Add all columns that start with this unit name
-                    matching_cols = [col for col in all_columns if col.startswith(unit + ' (') or col == unit]
-                    ordered_columns.extend(sorted(matching_cols))
-                # Add any remaining columns not in unit_order
-                remaining_cols = [col for col in all_columns if col not in ordered_columns]
-                ordered_columns.extend(sorted(remaining_cols))
-                heatmap_matrix = heatmap_matrix[ordered_columns]
+                    # Add all rows that start with this unit name
+                    matching_rows = [row for row in all_rows if row.startswith(unit + ' (') or row == unit]
+                    ordered_rows.extend(sorted(matching_rows))
+                # Add any remaining rows not in unit_order
+                remaining_rows = [row for row in all_rows if row not in ordered_rows]
+                ordered_rows.extend(sorted(remaining_rows))
+                heatmap_matrix = heatmap_matrix.reindex(ordered_rows)
             elif has_region:
                 # Default ordering: units with both regions first, then single-region units
-                all_columns = heatmap_matrix.columns.tolist()
+                all_rows = heatmap_matrix.index.tolist()
                 # Identify which units have both regions
-                unit_region_map = {}  # {base_unit: [list of unit_region columns]}
-                for col in all_columns:
-                    if ' (' in col:
-                        base_unit = col.split(' (')[0]
+                unit_region_map = {}  # {base_unit: [list of unit_region rows]}
+                for row in all_rows:
+                    if ' (' in row:
+                        base_unit = row.split(' (')[0]
                         if base_unit not in unit_region_map:
-                            unit_region_map[base_unit] = [col]
+                            unit_region_map[base_unit] = [row]
                         else:
-                            unit_region_map[base_unit].append(col)
+                            unit_region_map[base_unit].append(row)
                     else:
-                        if col not in unit_region_map:
-                            unit_region_map[col] = [col]
-                ordered_columns = []
-                for base_unit, cols in unit_region_map.items():
-                    if len(cols) > 1:
-                        ordered_columns.extend(sorted(cols))
-                for base_unit, cols in unit_region_map.items():
-                    if len(cols) == 1:
-                        ordered_columns.extend(cols)
-                heatmap_matrix = heatmap_matrix[ordered_columns]
+                        if row not in unit_region_map:
+                            unit_region_map[row] = [row]
+                ordered_rows = []
+                for base_unit, rows in unit_region_map.items():
+                    if len(rows) > 1:
+                        ordered_rows.extend(sorted(rows))
+                for base_unit, rows in unit_region_map.items():
+                    if len(rows) == 1:
+                        ordered_rows.extend(rows)
+                heatmap_matrix = heatmap_matrix.reindex(ordered_rows)
                 
             # Store the data (no overall stats since each group normalized independently)
             heatmap_data = {
@@ -2552,11 +2639,11 @@ class HSI_Visualizer:
             }
             
             # Calculate dynamic figure size based on matrix dimensions
-            n_rows = heatmap_matrix.shape[0]  # Number of molecules/ratios
-            n_cols = heatmap_matrix.shape[1]  # Number of unit-region combinations
-            # Scale: ~0.7 inches per column, ~0.35 inches per row, with min/max bounds for consistency
-            fig_width = max(6, min(10, 0.7 * n_cols + 2.5))  # +2.5 for labels/colorbar
-            fig_height = max(3, min(6, 0.35 * n_rows + 2))  # +2 for title/labels
+            n_rows = heatmap_matrix.shape[0]  # Number of unit-region combinations
+            n_cols = heatmap_matrix.shape[1]  # Number of molecules/ratios
+            # Scale: ~0.35 inches per row, ~0.7 inches per column, with min/max bounds for consistency
+            fig_width = max(6, 0.7 * n_cols + 2.5)  # +2.5 for labels/colorbar, removed max limit to show all molecules
+            fig_height = max(3, min(10, 0.35 * n_rows + 2))  # +2 for title/labels
             
             # Create heatmap visualization
             fig, ax = plt.subplots(figsize=(fig_width, fig_height))
@@ -2592,12 +2679,15 @@ class HSI_Visualizer:
                     # Extract unit name (before parenthesis)
                     if ' (' in label:
                         unit_part, region_part = label.split(' (', 1)
+                        region = region_part.rstrip(')')
                         # Apply unit display map
                         if unit_display_map and unit_part in unit_display_map:
                             unit_part = unit_display_map[unit_part]
-                        # Abbreviate region to first letter only
-                        region_abbrev = region_part.rstrip(')')[0] if region_part.rstrip(')') else region_part
-                        new_labels.append(f"{unit_part} ({region_abbrev})")
+                        # Omit region if 'O' or 'Other', else abbreviate
+                        if region in ['O', 'Other', '', None]:
+                            new_labels.append(f"{unit_part}")
+                        else:
+                            new_labels.append(f"{unit_part} ({region[0]})")
                     else:
                         # Apply unit display map to label without region
                         if unit_display_map and label in unit_display_map:
@@ -2618,19 +2708,19 @@ class HSI_Visualizer:
                 ax.set_xticklabels(x_labels, rotation=45, ha='center', fontsize=10)
                 ax.set_xlabel('Unit', fontweight='bold', fontsize=14)
             
-            ax.set_ylabel(grouping_col.replace("_", " "), fontweight='bold', fontsize=14)
+            ax.set_xlabel(grouping_col.replace("_", " "), fontweight='bold', fontsize=14)
             ax.set_title(f'Raw {grouping_col.replace("_", " ")} Values',
                        fontweight='bold', fontsize=16, pad=20)
             
-            # Apply display_name_map to y-axis labels
-            y_labels = []
-            for label in ax.get_yticklabels():
+            # Apply display_name_map to x-axis labels (now molecules are on x-axis)
+            x_labels = []
+            for label in ax.get_xticklabels():
                 original_name = label.get_text()
                 if display_name_map and original_name in display_name_map:
-                    y_labels.append(display_name_map[original_name])
+                    x_labels.append(display_name_map[original_name])
                 else:
-                    y_labels.append(original_name.replace('_', ' '))
-            ax.set_yticklabels(y_labels, rotation=0, fontsize=12)
+                    x_labels.append(original_name.replace('_', ' '))
+            ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=10)
             
             # Style the axes with light gray borders to match separator lines
             for spine in ax.spines.values():
@@ -2638,11 +2728,11 @@ class HSI_Visualizer:
                 spine.set_linewidth(1.4)
 
             plt.tight_layout()
-
+            
             # Save figure
             output_path = os.path.join(output_dir, 'heatmap_raw_ratios.svg')
             plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
-
+            
             if show_plots:
                 plt.show()
             else:
@@ -2656,7 +2746,8 @@ class HSI_Visualizer:
 
 
     def generate_unit_heatmaps(self, df, value_col, grouping_col, output_dir, data_type='percentage',
-                               figsize=(8, 6), show_plots=False, cmap='RdBu_r', vmin=-2, vmax=2, display_name_map=None, unit_display_map=None, unit_order=None):
+                               figsize=(8, 6), show_plots=False, cmap=None, vmin=-2, vmax=2, display_name_map=None, unit_display_map=None, unit_order=None,
+                               units_to_display=None, top_n=20, groups_to_display=None):
         """
         Generate heatmaps showing each molecule across units (aggregating across regions).
         
@@ -2679,13 +2770,21 @@ class HSI_Visualizer:
             Figure size (width, height)
         show_plots : bool
             Whether to display plots interactively
-        cmap : str
-            Colormap for heatmap
+        cmap : str or Colormap
+            Colormap for heatmap (default: SVG_BUBBLE_CMAP)
         vmin, vmax : float
             Min and max values for colormap normalization
         unit_order : list, optional
             Custom order for units on x-axis. Should be a list of unit names.
             If None, uses default ordering (units with both regions first, then single-region units)
+        units_to_display : list, optional
+            List of unit names to include; all others are excluded.
+        top_n : int, optional
+            Maximum number of top molecules to display (by z-score magnitude) when
+            grouping_col is 'Molecule'. Default is 20. Ignored if groups_to_display is set.
+        groups_to_display : list, optional
+            Explicit list of molecule or ratio names to include. When provided, overrides
+            top_n filtering and shows only these specific entries.
             
         Returns:
         --------
@@ -2693,8 +2792,16 @@ class HSI_Visualizer:
         """
         os.makedirs(output_dir, exist_ok=True)
         
+        if cmap is None:
+            cmap = SVG_BUBBLE_CMAP
+
+        # Filter to selected units if specified
+        if units_to_display is not None:
+            df = df[df['Unit'].isin(units_to_display)].copy()
+
         # Get unique molecules/ratio types and units
         unique_groups = df[grouping_col].unique()
+        unique_groups = [group.strip() for group in unique_groups]
         unique_units = df['Unit'].unique()
         
         if len(unique_groups) < 2 or len(unique_units) < 2:
@@ -2737,60 +2844,77 @@ class HSI_Visualizer:
         
         # Create pivot table for heatmap: Groups as rows, Unit_Region as columns
         try:
-            heatmap_matrix = agg_data.pivot(index=grouping_col, columns='Unit_Region', values='z_score')
-            
-            # Fill missing unit-region combinations with -3 to show as extremely low
-            heatmap_matrix = heatmap_matrix.fillna(-3)
-            
-            # Sort rows by display_name_map order if provided, otherwise alphabetically
-            if display_name_map:
-                # Get current index (molecule/ratio names)
-                current_index = heatmap_matrix.index.tolist()
-                # Create ordered list: first items in display_name_map order, then remaining alphabetically
-                ordered_index = [k for k in display_name_map.keys() if k in current_index]
-                remaining_index = sorted([g for g in current_index if g not in display_name_map.keys()])
-                new_index = ordered_index + remaining_index
-                heatmap_matrix = heatmap_matrix.reindex(new_index)
+            #heatmap_matrix = agg_data.pivot(index=grouping_col, columns='Unit_Region', values='z_score')
+            if groups_to_display is not None:
+                filtered_agg_data = agg_data[agg_data[grouping_col].isin(groups_to_display)]
+                filtered_agg_data = filtered_agg_data.groupby([grouping_col, 'Unit_Region'], as_index=False)['z_score'].mean()
+                heatmap_matrix = filtered_agg_data.pivot(index='Unit_Region', columns=grouping_col, values='z_score')
+            elif grouping_col == 'Molecule':
+            # Filter top N (or fewer) z-score magnitude values
+                n_top = np.minimum(top_n, df[grouping_col].nunique())
+                top_molecules = agg_data.iloc[agg_data['z_score'].abs().nlargest(n_top, keep='all').index][grouping_col].unique() 
+                filtered_agg_data = agg_data[agg_data[grouping_col].isin(top_molecules)]  
+                filtered_agg_data = filtered_agg_data.groupby([grouping_col, 'Unit_Region'], as_index=False)['z_score'].mean()
+                
+                heatmap_matrix = filtered_agg_data.pivot(index='Unit_Region', columns=grouping_col, values='z_score')
             else:
-                # Sort rows alphabetically
-                heatmap_matrix = heatmap_matrix.sort_index()
+                heatmap_matrix = agg_data.pivot(index='Unit_Region', columns=grouping_col, values='z_score')
+
+            # Fill missing unit-region combinations with 0 to show as neutral (since these are z-scores)
+            heatmap_matrix = heatmap_matrix.fillna(-3)
+
             
-            # Sort columns based on unit_order if provided, otherwise use default ordering
+            # Sort columns by display_name_map order if provided, otherwise alphabetically
+            if display_name_map:
+                # Get current columns (molecule/ratio names)
+                current_columns = heatmap_matrix.columns.tolist()
+                # Create ordered list: first items in display_name_map order, then remaining alphabetically
+                ordered_columns = [k for k in display_name_map.keys() if k in current_columns]
+                remaining_columns = sorted([g for g in current_columns if g not in display_name_map.keys()])
+                new_columns = ordered_columns + remaining_columns
+                heatmap_matrix = heatmap_matrix[new_columns]
+
+                
+            else:
+                # Sort columns alphabetically
+                heatmap_matrix = heatmap_matrix.sort_index(axis=1)
+            
+            # Sort rows based on unit_order if provided, otherwise use default ordering
             if unit_order is not None:
                 # Custom ordering based on provided unit_order list
-                all_columns = heatmap_matrix.columns.tolist()
-                ordered_columns = []
+                all_rows = heatmap_matrix.index.tolist()
+                ordered_rows = []
                 for unit in unit_order:
-                    # Add all columns that start with this unit name
-                    matching_cols = [col for col in all_columns if col.startswith(unit + ' (') or col == unit]
-                    ordered_columns.extend(sorted(matching_cols))
-                # Add any remaining columns not in unit_order
-                remaining_cols = [col for col in all_columns if col not in ordered_columns]
-                ordered_columns.extend(sorted(remaining_cols))
-                heatmap_matrix = heatmap_matrix[ordered_columns]
+                    # Add all rows that start with this unit name
+                    matching_rows = [row for row in all_rows if row.startswith(unit + ' (') or row == unit]
+                    ordered_rows.extend(sorted(matching_rows))
+                # Add any remaining rows not in unit_order
+                remaining_rows = [row for row in all_rows if row not in ordered_rows]
+                ordered_rows.extend(sorted(remaining_rows))
+                heatmap_matrix = heatmap_matrix.reindex(ordered_rows)
             elif has_region:
                 # Default ordering: units with both regions first, then single-region units
-                all_columns = heatmap_matrix.columns.tolist()
+                all_rows = heatmap_matrix.index.tolist()
                 # Identify which units have both regions
-                unit_region_map = {}  # {base_unit: [list of unit_region columns]}
-                for col in all_columns:
-                    if ' (' in col:
-                        base_unit = col.split(' (')[0]
+                unit_region_map = {}  # {base_unit: [list of unit_region rows]}
+                for row in all_rows:
+                    if ' (' in row:
+                        base_unit = row.split(' (')[0]
                         if base_unit not in unit_region_map:
-                            unit_region_map[base_unit] = [col]
+                            unit_region_map[base_unit] = [row]
                         else:
-                            unit_region_map[base_unit].append(col)
+                            unit_region_map[base_unit].append(row)
                     else:
-                        if col not in unit_region_map:
-                            unit_region_map[col] = [col]
-                ordered_columns = []
-                for base_unit, cols in unit_region_map.items():
-                    if len(cols) > 1:
-                        ordered_columns.extend(sorted(cols))
-                for base_unit, cols in unit_region_map.items():
-                    if len(cols) == 1:
-                        ordered_columns.extend(cols)
-                heatmap_matrix = heatmap_matrix[ordered_columns]
+                        if row not in unit_region_map:
+                            unit_region_map[row] = [row]
+                ordered_rows = []
+                for base_unit, rows in unit_region_map.items():
+                    if len(rows) > 1:
+                        ordered_rows.extend(sorted(rows))
+                for base_unit, rows in unit_region_map.items():
+                    if len(rows) == 1:
+                        ordered_rows.extend(rows)
+                heatmap_matrix = heatmap_matrix.reindex(ordered_rows)
             
             # Store the data (no overall stats since each group normalized independently)
             heatmap_data = {
@@ -2799,11 +2923,11 @@ class HSI_Visualizer:
             }
             
             # Calculate dynamic figure size based on matrix dimensions
-            n_rows = heatmap_matrix.shape[0]  # Number of molecules/ratios
-            n_cols = heatmap_matrix.shape[1]  # Number of unit-region combinations
-            # Scale: ~0.7 inches per column, ~0.35 inches per row, with min/max bounds for consistency
-            fig_width = max(6, min(10, 0.7 * n_cols + 2.5))  # +2.5 for labels/colorbar
-            fig_height = max(3, min(6, 0.35 * n_rows + 2))  # +2 for title/labels
+            n_rows = heatmap_matrix.shape[0]  # Number of unit-region combinations
+            n_cols = heatmap_matrix.shape[1]  # Number of molecules/ratios
+            # Scale: ~0.35 inches per row, ~0.7 inches per column, with min/max bounds for consistency
+            fig_width = max(3, 0.7 * n_cols + 2.5)  # +2.5 for labels/colorbar, removed max limit to show all molecules
+            fig_height = max(3, min(10, 0.35 * n_rows + 2))  # +2 for title/labels
             
             # Create heatmap visualization
             fig, ax = plt.subplots(figsize=(fig_width, fig_height))
@@ -2816,23 +2940,23 @@ class HSI_Visualizer:
             
             # Add visual separators between different units if showing regions
             if has_region:
-                col_names = heatmap_matrix.columns.tolist()
+                row_names = heatmap_matrix.index.tolist()
                 unit_changes = []
                 prev_unit = None
-                for idx, col_name in enumerate(col_names):
+                for idx, row_name in enumerate(row_names):
                     # Extract unit name (before the parenthesis)
-                    current_unit = col_name.split(' (')[0] if ' (' in col_name else col_name
+                    current_unit = row_name.split(' (')[0] if ' (' in row_name else row_name
                     if prev_unit is not None and current_unit != prev_unit:
                         unit_changes.append(idx)
                     prev_unit = current_unit
-                # Draw vertical lines at unit boundaries
+                # Draw horizontal lines at unit boundaries (since units are now on rows)
                 for boundary in unit_changes:
-                    ax.axvline(x=boundary, color='gray', linewidth=1.4, zorder=10)
+                    ax.axhline(y=boundary, color='gray', linewidth=1.4, zorder=10)
             
             # Formatting
             if has_region:
-                # Update x-tick labels to use standardized format and apply unit_display_map
-                current_labels = [label.get_text() for label in ax.get_xticklabels()]
+                # Update y-tick labels to use standardized format and apply unit_display_map
+                current_labels = [label.get_text() for label in ax.get_yticklabels()]
                 new_labels = []
                 for label in current_labels:
                     # Extract unit name (before parenthesis)
@@ -2843,28 +2967,31 @@ class HSI_Visualizer:
                             unit_part = unit_display_map[unit_part]
                         # Abbreviate region to first letter only
                         region_abbrev = region_part.rstrip(')')[0] if region_part.rstrip(')') else region_part
-                        new_labels.append(f"{unit_part} ({region_abbrev})")
+                        if region_abbrev in ['O', 'Other', '', None]:
+                            new_labels.append(f"{unit_part}")
+                        else:
+                            new_labels.append(f"{unit_part} ({region_abbrev})")
                     else:
                         # Apply unit display map to label without region
                         if unit_display_map and label in unit_display_map:
                             new_labels.append(unit_display_map[label])
                         else:
                             new_labels.append(label.replace('_', ' '))
-                ax.set_xticklabels(new_labels, rotation=45, ha='center', fontsize=10)
-                ax.set_xlabel('Unit (Region)', fontweight='bold', fontsize=14)
+                ax.set_yticklabels(new_labels, rotation=0, ha='right', fontsize=10)
+                ax.set_ylabel('Unit (Region)', fontweight='bold', fontsize=14)
             else:
-                # Apply unit_display_map to x-axis labels (without regions)
-                x_labels = []
-                for label in ax.get_xticklabels():
+                # Apply unit_display_map to y-axis labels (without regions)
+                y_labels = []
+                for label in ax.get_yticklabels():
                     original_name = label.get_text()
                     if unit_display_map and original_name in unit_display_map:
-                        x_labels.append(unit_display_map[original_name])
+                        y_labels.append(unit_display_map[original_name])
                     else:
-                        x_labels.append(original_name.replace('_', ' '))
-                ax.set_xticklabels(x_labels, rotation=45, ha='center', fontsize=10)
-                ax.set_xlabel('Unit', fontweight='bold', fontsize=14)
+                        y_labels.append(original_name.replace('_', ' '))
+                ax.set_yticklabels(y_labels, rotation=0, ha='right', fontsize=10)
+                ax.set_ylabel('Unit', fontweight='bold', fontsize=14)
             
-            ax.set_ylabel(grouping_col.replace("_", " "), fontweight='bold', fontsize=14)
+            ax.set_xlabel(grouping_col.replace("_", " "), fontweight='bold', fontsize=14)
             # Update title based on data type
             if data_type == 'percentage':
                 ax.set_title('Normalized Molecule Percentage',
@@ -2873,15 +3000,19 @@ class HSI_Visualizer:
                 ax.set_title('Normalized Ratio',
                            fontweight='bold', fontsize=16, pad=20)
             
-            # Apply display_name_map to y-axis labels
-            y_labels = []
-            for label in ax.get_yticklabels():
+            # Apply display_name_map to x-axis labels (now molecules are on x-axis)
+            x_labels = []
+            for label in ax.get_xticklabels():
                 original_name = label.get_text()
+                print(f"Debug - Processing molecule: '{original_name}'")
                 if display_name_map and original_name in display_name_map:
-                    y_labels.append(display_name_map[original_name])
+                    mapped_name = display_name_map[original_name]
+                    print(f"Debug - Found in display_name_map: '{original_name}' -> '{mapped_name}'")
+                    x_labels.append(mapped_name)
                 else:
-                    y_labels.append(original_name.replace('_', ' '))
-            ax.set_yticklabels(y_labels, rotation=0, fontsize=12)
+                    # Always add label even if not in display_name_map
+                    x_labels.append(original_name.replace('_', ' '))
+            ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=10)
             
             # Style the axes with light gray borders to match separator lines
             for spine in ax.spines.values():
@@ -2907,311 +3038,280 @@ class HSI_Visualizer:
             print(f"Error creating unit-aggregated heatmap: {str(e)}")
             return {}
 
-    def generate_region_bubble_charts(self, df, value_col, grouping_col, output_dir=None,
-                                       data_type='percentage', figsize=(10, 6), 
-                                       show_plots=True, display_name_map=None, unit_display_map=None):
-        """
-        Generate bubble charts showing variability across regions.
-        
-        Creates separate bubble charts for each molecule/ratio type, where x-axis shows regions,
-        y-axis shows units, and bubble size/color represent z-score normalized values.
-        
-        Args:
-            df: DataFrame with columns [Unit, {Molecule or Ratio_Type}, {Percentage or Mean_Ratio}, Region, ...]
-            value_col: Name of the value column ('Percentage' or 'Mean_Ratio')
-            grouping_col: Name of the grouping column ('Molecule' or 'Ratio_Type')
-            output_dir: Directory to save plots (if None, uses current directory)
-            data_type: Type of data ('percentage' or 'ratio') for labeling
-            figsize: Figure size for plots (width, height)
-            show_plots: Whether to display plots interactively
-            display_name_map: Optional mapping for display names
-            unit_display_map: Optional mapping for unit abbreviations
-            
-        Returns:
-            bubble_data: Dictionary with bubble chart data for each molecule/ratio type
-        """
-        # Create output directory if needed
-        if output_dir is None:
-            output_dir = 'region_bubble_charts_normalized'
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Check if Region column exists
-        if 'Region' not in df.columns:
-            print("Warning: Region column not found in DataFrame. Cannot generate bubble charts.")
-            return {}
-        
-        # Get unique molecules/ratio types
-        unique_groups = df[grouping_col].unique()
-        
-        # Sort by display_name_map order if provided, otherwise alphabetically
-        if display_name_map:
-            ordered_groups = [k for k in display_name_map.keys() if k in unique_groups]
-            remaining = sorted([g for g in unique_groups if g not in display_name_map.keys()])
-            sorted_groups = ordered_groups + remaining
-        else:
-            sorted_groups = sorted(unique_groups)
-        
-        bubble_data = {}
-        
-        for group_value in sorted_groups:
-            # Filter data for this molecule/ratio type
-            group_data = df[df[grouping_col] == group_value].copy()
-            
-            # Skip if insufficient data
-            if len(group_data) < 2:
-                continue
-            
-            # Remove NaN and infinite values
-            group_data = group_data.replace([np.inf, -np.inf], np.nan)
-            group_data = group_data.dropna(subset=[value_col])
-            
-            if len(group_data) < 2:
-                continue
-            
-            # Calculate mean for each Unit-Region combination
-            agg_data = group_data.groupby(['Unit', 'Region'])[value_col].agg(['mean', 'std', 'count']).reset_index()
-            
-            # Skip if not enough data
-            if len(agg_data) < 2:
-                continue
-            
-            # Calculate z-scores normalized to this molecule's mean
-            molecule_mean = agg_data['mean'].mean()
-            molecule_std = agg_data['mean'].std()
-            
-            if molecule_std == 0:
-                print(f"Warning: {group_value} has zero variance, skipping...")
-                continue
-            
-            agg_data['z_score'] = (agg_data['mean'] - molecule_mean) / molecule_std
-            
-            # Store the data
-            bubble_data[group_value] = {
-                'data': agg_data,
-                'molecule_mean': molecule_mean,
-                'molecule_std': molecule_std
-            }
-            
-            # Create bubble chart
-            fig, ax = plt.subplots(figsize=figsize)
-            
-            # Get unique regions and units
-            regions = sorted(agg_data['Region'].unique())
-            units = sorted(agg_data['Unit'].unique())
-            
-            # Create position mappings
-            region_pos = {r: i for i, r in enumerate(regions)}
-            unit_pos = {u: i for i, u in enumerate(units)}
-            
-            # Plot bubbles
-            for _, row in agg_data.iterrows():
-                x = region_pos[row['Region']]
-                y = unit_pos[row['Unit']]
-                z = row['z_score']
-                
-                # Bubble size proportional to absolute z-score
-                size = np.abs(z) * 200 + 50  # Scale factor for visibility
-                
-                # Color based on sign of z-score
-                color = '#d62728' if z > 0 else '#1f77b4'  # Red for positive, blue for negative
-                
-                ax.scatter(x, y, s=size, c=color, alpha=0.6, edgecolors='black', linewidth=1)
-            
-            # Set axis labels and ticks
-            ax.set_xticks(range(len(regions)))
-            ax.set_yticks(range(len(units)))
-            
-            # Apply display names
-            region_labels = [r.replace('_', ' ') for r in regions]
-            ax.set_xticklabels(region_labels, rotation=0, ha='center', fontsize=12)
-            
-            unit_labels = []
-            for u in units:
-                if unit_display_map and u in unit_display_map:
-                    unit_labels.append(unit_display_map[u])
-                else:
-                    unit_labels.append(u.replace('_', ' '))
-            ax.set_yticklabels(unit_labels, rotation=0, fontsize=12)
-            
-            # Labels and title
-            ax.set_xlabel('Region', fontweight='bold', fontsize=14)
-            ax.set_ylabel('Unit', fontweight='bold', fontsize=14)
-            display_name = self._apply_display_name(group_value, display_name_map)
-            ax.set_title(f'{display_name.replace("_", " ")}',
-                       fontweight='bold', fontsize=16, pad=20)
-            
-            # Add legend
-            from matplotlib.lines import Line2D
-            legend_elements = [
-                Line2D([0], [0], marker='o', color='w', markerfacecolor='#d62728', 
-                      markersize=10, alpha=0.6, label='Above Mean', markeredgecolor='black'),
-                Line2D([0], [0], marker='o', color='w', markerfacecolor='#1f77b4', 
-                      markersize=10, alpha=0.6, label='Below Mean', markeredgecolor='black')
-            ]
-            ax.legend(handles=legend_elements, loc='upper right', frameon=True, fontsize=10)
-            
-            # Grid
-            ax.grid(True, alpha=0.3, linestyle='--')
-            ax.set_axisbelow(True)
-            
-            plt.tight_layout()
-            
-            # Save figure
-            safe_name = group_value.replace('/', '_').replace(' ', '_')
-            output_path = os.path.join(output_dir, f"bubble_chart_{safe_name}.svg")
-            plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
-            
-            if show_plots:
-                plt.show()
-            else:
-                plt.close()
-        
-        print(f"\nGenerated {len(bubble_data)} region bubble charts in {output_dir}")
-        return bubble_data
-
     def generate_unit_bubble_charts(self, df, value_col, grouping_col, output_dir, data_type='percentage',
-                                     show_plots=True, display_name_map=None, unit_display_map=None):
+                                   show_plots=False, cmap=None, vmin=-2, vmax=2,
+                                   display_name_map=None, unit_display_map=None, unit_order=None,
+                                   units_to_display=None, top_n=20, groups_to_display=None):
         """
-        Generate unit-aggregated bubble charts (aggregating across regions).
-        
-        Creates a single bubble chart showing all molecules/ratios, where x-axis shows units,
-        y-axis shows molecules/ratios, and bubble size/color represent z-score normalized values.
-        
-        Args:
-            df: DataFrame with columns [Unit, {Molecule or Ratio_Type}, {Percentage or Mean_Ratio}, ...]
-            value_col: Name of the value column
-            grouping_col: Name of the grouping column
-            output_dir: Directory to save plots
-            data_type: Type of data ('percentage' or 'ratio')
-            show_plots: Whether to display plots interactively
-            display_name_map: Optional mapping for display names
-            unit_display_map: Optional mapping for unit abbreviations
-            
-        Returns:
-            bubble_data: Dictionary with bubble chart data
+        Generate a bubble chart showing each molecule across units (aggregating across regions).
+
+        Mirrors generate_unit_heatmaps but renders bubbles instead of filled cells:
+          - Bubble size encodes the magnitude of the z-score (|z_score|)
+          - Bubble color encodes the sign/magnitude via the chosen colormap
+          - Black figure/axes background
+          - White text for all labels and ticks
+          - X-axis tick labels (molecules/ratios) are placed above the plot
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+        value_col : str
+        grouping_col : str
+        output_dir : str
+        data_type : str
+        show_plots : bool
+        cmap : str
+        vmin, vmax : float
+        display_name_map : dict, optional
+        unit_display_map : dict, optional
+        unit_order : list, optional
+        units_to_display : list, optional
+            List of unit names to include; all others are excluded.
+        top_n : int, optional
+            Maximum number of top molecules to display (by z-score magnitude) when
+            grouping_col is 'Molecule'. Default is 20. Ignored if groups_to_display is set.
+        groups_to_display : list, optional
+            Explicit list of molecule or ratio names to include. When provided, overrides
+            top_n filtering and shows only these specific entries.
+
+        Returns
+        -------
+        dict : {'matrix': heatmap_matrix, 'raw_data': agg_data}
         """
+        import matplotlib.colors as mcolors
+
         os.makedirs(output_dir, exist_ok=True)
-        
+
+        if cmap is None:
+            cmap = SVG_BUBBLE_CMAP
+
+        # Filter to selected units if specified
+        if units_to_display is not None:
+            df = df[df['Unit'].isin(units_to_display)].copy()
+
+        unique_groups = df[grouping_col].unique()
+        unique_groups = [g.strip() for g in unique_groups]
+        unique_units = df['Unit'].unique()
+
+        if len(unique_groups) < 2 or len(unique_units) < 2:
+            print(f"Insufficient data for unit bubble chart: {len(unique_groups)} groups, {len(unique_units)} units")
+            return {}
+
+        has_region = 'Region' in df.columns and df['Region'].notna().any()
+
+        if has_region:
+            agg_data = df.groupby(['Unit', 'Region', grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
+            agg_data['Unit_Region'] = agg_data['Unit'] + ' (' + agg_data['Region'] + ')'
+        else:
+            agg_data = df.groupby(['Unit', grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
+            agg_data['Unit_Region'] = agg_data['Unit']
+
+        agg_data = agg_data.replace([np.inf, -np.inf], np.nan)
+        agg_data = agg_data.dropna(subset=['mean'])
+
+        if len(agg_data) < 2:
+            print("Insufficient data after removing NaN/inf values")
+            return {}
+
+        def normalize_group(group):
+            group_mean = group['mean'].mean()
+            group_std = group['mean'].std()
+            if group_std == 0:
+                group['z_score'] = 0
+            else:
+                group['z_score'] = (group['mean'] - group_mean) / group_std
+            return group
+
+        agg_data = agg_data.groupby(grouping_col, group_keys=False).apply(normalize_group)
+
         try:
-            # Remove NaN and infinite values
-            clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[value_col])
-            
-            if len(clean_df) < 2:
-                print("Insufficient data for unit-aggregated bubble chart")
-                return {}
-            
-            # Aggregate across regions (if Region column exists)
-            if 'Region' in clean_df.columns:
-                agg_data = clean_df.groupby(['Unit', grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
+            # --- same filtering/pivoting logic as generate_unit_heatmaps ---
+            if groups_to_display is not None:
+                filtered_agg_data = agg_data[agg_data[grouping_col].isin(groups_to_display)]
+                filtered_agg_data = filtered_agg_data.groupby([grouping_col, 'Unit_Region'], as_index=False)['z_score'].mean()
+                heatmap_matrix = filtered_agg_data.pivot(index='Unit_Region', columns=grouping_col, values='z_score')
+            elif grouping_col == 'Molecule':
+                n_top = np.minimum(top_n, df[grouping_col].nunique())
+                top_molecules = agg_data.iloc[agg_data['z_score'].abs().nlargest(n_top, keep='all').index][grouping_col].unique()
+                filtered_agg_data = agg_data[agg_data[grouping_col].isin(top_molecules)]
+                filtered_agg_data = filtered_agg_data.groupby([grouping_col, 'Unit_Region'], as_index=False)['z_score'].mean()
+                heatmap_matrix = filtered_agg_data.pivot(index='Unit_Region', columns=grouping_col, values='z_score')
             else:
-                agg_data = clean_df.groupby(['Unit', grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
-            
-            # Calculate global z-scores (normalized across all units and molecules)
-            global_mean = agg_data['mean'].mean()
-            global_std = agg_data['mean'].std()
-            
-            if global_std == 0:
-                print("Warning: Zero variance in data, cannot generate bubble chart")
-                return {}
-            
-            agg_data['z_score'] = (agg_data['mean'] - global_mean) / global_std
-            
-            # Create bubble chart
-            fig, ax = plt.subplots(figsize=(12, 8))
-            
-            # Get unique units and molecules
-            units = sorted(agg_data['Unit'].unique())
-            molecules = sorted(agg_data[grouping_col].unique())
-            
-            # Apply display name ordering if provided
+                heatmap_matrix = agg_data.pivot(index='Unit_Region', columns=grouping_col, values='z_score')
+
+            heatmap_matrix = heatmap_matrix.fillna(0)
+
+            # Sort columns
             if display_name_map:
-                ordered_molecules = [k for k in display_name_map.keys() if k in molecules]
-                remaining = sorted([m for m in molecules if m not in display_name_map.keys()])
-                molecules = ordered_molecules + remaining
-            
-            # Create position mappings
-            unit_pos = {u: i for i, u in enumerate(units)}
-            molecule_pos = {m: i for i, m in enumerate(molecules)}
-            
-            # Plot bubbles
-            for _, row in agg_data.iterrows():
-                x = unit_pos[row['Unit']]
-                y = molecule_pos[row[grouping_col]]
-                z = row['z_score']
-                
-                # Bubble size proportional to absolute z-score
-                size = np.abs(z) * 200 + 50
-                
-                # Color based on sign of z-score
-                color = '#d62728' if z > 0 else '#1f77b4'
-                
-                ax.scatter(x, y, s=size, c=color, alpha=0.6, edgecolors='black', linewidth=1)
-            
-            # Set axis labels and ticks
-            ax.set_xticks(range(len(units)))
-            ax.set_yticks(range(len(molecules)))
-            
-            # Apply display names
-            unit_labels = []
-            for u in units:
-                if unit_display_map and u in unit_display_map:
-                    unit_labels.append(unit_display_map[u])
-                else:
-                    unit_labels.append(u.replace('_', ' '))
-            ax.set_xticklabels(unit_labels, rotation=45, ha='right', fontsize=10)
-            
-            molecule_labels = []
-            for m in molecules:
-                if display_name_map and m in display_name_map:
-                    molecule_labels.append(display_name_map[m])
-                else:
-                    molecule_labels.append(m.replace('_', ' '))
-            ax.set_yticklabels(molecule_labels, rotation=0, fontsize=12)
-            
-            # Labels and title
-            ax.set_xlabel('Unit', fontweight='bold', fontsize=14)
-            ax.set_ylabel(grouping_col.replace("_", " "), fontweight='bold', fontsize=14)
-            
-            if data_type == 'percentage':
-                ax.set_title('Normalized Percentage', fontweight='bold', fontsize=16, pad=20)
+                current_columns = heatmap_matrix.columns.tolist()
+                ordered_columns = [k for k in display_name_map.keys() if k in current_columns]
+                remaining_columns = sorted([g for g in current_columns if g not in display_name_map.keys()])
+                heatmap_matrix = heatmap_matrix[ordered_columns + remaining_columns]
             else:
-                ax.set_title('Normalized Ratio', fontweight='bold', fontsize=16, pad=20)
-            
-            # Add legend
-            from matplotlib.lines import Line2D
-            legend_elements = [
-                Line2D([0], [0], marker='o', color='w', markerfacecolor='#d62728', 
-                      markersize=10, alpha=0.6, label='Above Mean', markeredgecolor='black'),
-                Line2D([0], [0], marker='o', color='w', markerfacecolor='#1f77b4', 
-                      markersize=10, alpha=0.6, label='Below Mean', markeredgecolor='black')
-            ]
-            ax.legend(handles=legend_elements, loc='upper right', frameon=True, fontsize=10)
-            
-            # Grid
-            ax.grid(True, alpha=0.3, linestyle='--')
+                heatmap_matrix = heatmap_matrix.sort_index(axis=1)
+
+            # Sort rows
+            if unit_order is not None:
+                all_rows = heatmap_matrix.index.tolist()
+                ordered_rows = []
+                for unit in unit_order:
+                    matching_rows = [r for r in all_rows if r.startswith(unit + ' (') or r == unit]
+                    ordered_rows.extend(sorted(matching_rows))
+                remaining_rows = [r for r in all_rows if r not in ordered_rows]
+                ordered_rows.extend(sorted(remaining_rows))
+                heatmap_matrix = heatmap_matrix.reindex(ordered_rows)
+            elif has_region:
+                all_rows = heatmap_matrix.index.tolist()
+                unit_region_map = {}
+                for row in all_rows:
+                    if ' (' in row:
+                        base_unit = row.split(' (')[0]
+                        unit_region_map.setdefault(base_unit, []).append(row)
+                    else:
+                        unit_region_map.setdefault(row, [row])
+                ordered_rows = []
+                for base_unit, rows in unit_region_map.items():
+                    if len(rows) > 1:
+                        ordered_rows.extend(sorted(rows))
+                for base_unit, rows in unit_region_map.items():
+                    if len(rows) == 1:
+                        ordered_rows.extend(rows)
+                heatmap_matrix = heatmap_matrix.reindex(ordered_rows)
+
+            # Build display labels for columns (x-axis / molecules)
+            col_labels = []
+            for col in heatmap_matrix.columns:
+                if display_name_map and col in display_name_map:
+                    col_labels.append(display_name_map[col])
+                else:
+                    col_labels.append(col.replace('_', ' '))
+
+            # Build display labels for rows (y-axis / units)
+            row_labels = []
+            for row in heatmap_matrix.index:
+                if has_region and ' (' in row:
+                    unit_part, region_part = row.split(' (', 1)
+                    if unit_display_map and unit_part in unit_display_map:
+                        unit_part = unit_display_map[unit_part]
+                    region_abbrev = region_part.rstrip(')')[0] if region_part.rstrip(')') else region_part
+                    if region_abbrev in ['O', 'Other', '', None]:
+                        row_labels.append(f"{unit_part}")
+                    else:
+                        row_labels.append(f"{unit_part} ({region_abbrev})")
+                else:
+                    if unit_display_map and row in unit_display_map:
+                        row_labels.append(unit_display_map[row])
+                    else:
+                        row_labels.append(row.replace('_', ' '))
+
+            bubble_data = {'matrix': heatmap_matrix, 'raw_data': agg_data}
+
+            # --- Figure sizing ---
+            n_rows = heatmap_matrix.shape[0]
+            n_cols = heatmap_matrix.shape[1]
+            spacing = 0.65  # <1 brings bubbles closer together
+            fig_width = max(6, 0.7 * n_cols * spacing + 2.5)
+            fig_height = max(3, min(10, 0.35 * n_rows * spacing + 2.5))
+
+            # --- White background figure ---
+            fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+            fig.patch.set_facecolor('white')
+            ax.set_facecolor('white')
+
+            # --- Build scatter coordinates ---
+            col_index = {col: i * spacing for i, col in enumerate(heatmap_matrix.columns)}
+            row_index = {row: i * spacing for i, row in enumerate(heatmap_matrix.index)}
+
+            xs, ys, sizes, color_vals = [], [], [], []
+            all_z = heatmap_matrix.values.flatten()
+            max_abs_z = max(np.abs(all_z).max(), 0.1)
+            max_bubble_size = 450
+            min_bubble_size = 10
+
+            for row_name in heatmap_matrix.index:
+                for col_name in heatmap_matrix.columns:
+                    z = heatmap_matrix.loc[row_name, col_name]
+                    xs.append(col_index[col_name])
+                    ys.append(row_index[row_name])
+                    size = min_bubble_size + (abs(z) / max_abs_z) ** 1.6 * max_bubble_size
+                    sizes.append(size)
+                    color_vals.append(z)
+
+            norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+            sc = ax.scatter(xs, ys, s=sizes, c=color_vals, cmap=cmap, norm=norm,
+                            edgecolors='none', zorder=3)
+
+            # --- Colorbar ---
+            cbar = fig.colorbar(sc, ax=ax, shrink=0.8, pad=0.02)
+            cbar.set_label('Z-score (normalized to mean)', color='black', fontsize=10)
+            cbar.ax.yaxis.set_tick_params(color='black', labelcolor='black')
+            plt.setp(cbar.ax.yaxis.get_ticklabels(), color='black')
+            cbar.outline.set_edgecolor('black')
+
+            # --- Horizontal separator lines between different base units ---
+            if has_region:
+                prev_unit_name = None
+                for ridx, row_name in enumerate(heatmap_matrix.index.tolist()):
+                    current_unit = row_name.split(' (')[0] if ' (' in row_name else row_name
+                    if prev_unit_name is not None and current_unit != prev_unit_name:
+                        ax.axhline(y=ridx * spacing - spacing * 0.5, color='#aaaaaa', linewidth=1.0, zorder=2)
+                    prev_unit_name = current_unit
+
+            # --- Subtle grid ---
+            ax.set_xticks([i * spacing for i in range(n_cols)])
+            ax.set_yticks([i * spacing for i in range(n_rows)])
+            ax.grid(True, color='#dddddd', linewidth=0.5, zorder=1)
             ax.set_axisbelow(True)
-            
+
+            # --- X-tick labels above the plot ---
+            ax.xaxis.set_label_position('top')
+            ax.xaxis.tick_top()
+            ax.set_xticklabels(col_labels, rotation=45, ha='left', fontsize=10, color='black')
+
+            # --- Y-tick labels ---
+            ax.set_yticklabels(row_labels, rotation=0, ha='right', fontsize=10, color='black')
+
+            # --- Axis labels ---
+            ylabel = 'Unit (Region)' if has_region else 'Unit'
+            ax.set_ylabel(ylabel, fontweight='bold', fontsize=14, color='black')
+
+            # --- Title ---
+            title = 'Normalized Molecule Percentage' if data_type == 'percentage' else 'Normalized Ratio'
+            ax.set_title(title, fontweight='bold', fontsize=16, pad=20, color='black')
+
+            # --- Tick colors ---
+            ax.tick_params(colors='black', which='both')
+
+            # --- Spine colors ---
+            for spine in ax.spines.values():
+                spine.set_edgecolor('#cccccc')
+
+            # --- Axis limits ---
+            ax.set_xlim(-spacing * 0.5, (n_cols - 1) * spacing + spacing * 0.5)
+            ax.set_ylim(-spacing * 0.5, (n_rows - 1) * spacing + spacing * 0.5)
+
             plt.tight_layout()
-            
-            # Save figure
-            output_path = os.path.join(output_dir, f"bubble_chart_unit_aggregated_{data_type}.svg")
-            plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
-            
+
+            output_path = os.path.join(output_dir, f"bubble_unit_aggregated_{data_type}.svg")
+            plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+
             if show_plots:
                 plt.show()
             else:
                 plt.close()
-            
+
             print(f"\nGenerated unit-aggregated bubble chart in {output_dir}")
-            return {'data': agg_data, 'global_mean': global_mean, 'global_std': global_std}
-                
+            return bubble_data
+
         except Exception as e:
             print(f"Error creating unit-aggregated bubble chart: {str(e)}")
             return {}
 
+
+
     def generate_raw_ratio_bubble_chart(self, df, value_col='Mean_Ratio', grouping_col='Ratio_Type', 
                                         output_dir=None, show_plots=True, display_name_map=None, 
-                                        unit_display_map=None):
+                                        unit_display_map=None, units_to_display=None):
         """
         Generate raw (non-normalized) ratio bubble chart.
         
@@ -3226,6 +3326,7 @@ class HSI_Visualizer:
             show_plots: Whether to display plots interactively
             display_name_map: Optional mapping for display names
             unit_display_map: Optional mapping for unit abbreviations
+            units_to_display: Optional list of unit names to include; all others are excluded.
             
         Returns:
             bubble_data: Dictionary with bubble chart data
@@ -3235,6 +3336,10 @@ class HSI_Visualizer:
         os.makedirs(output_dir, exist_ok=True)
         
         try:
+            # Filter to selected units if specified
+            if units_to_display is not None:
+                df = df[df['Unit'].isin(units_to_display)].copy()
+
             # Remove NaN and infinite values
             clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[value_col])
             
@@ -3374,7 +3479,7 @@ class HSI_Visualizer:
         srs_path = srs_params_path if srs_params_path.endswith('.npz') else srs_params_path + '.npz'
         srs_data = np.load(srs_path)
         background = srs_data['background']
-        ch_start_val = int(srs_data['ch_start'])
+
 
         # Build wavenumber axis
         wavenumbers = np.linspace(self.wavenumber_start, self.wavenumber_end, self.num_samples)
@@ -3424,8 +3529,7 @@ class HSI_Visualizer:
             image_spectra = image.reshape(image.shape[0], -1).T  # (n_pixels, n_channels)
             image_spectra = np.flip(image_spectra, axis=1).astype(np.float32)
             stats = dataset.image_stats[img_path]
-            height = stats['height']
-            width = stats['width']
+
 
             # Flatten predictions to match pixel ordering
             pred_flat = pred_matrix.flatten()  # length = height * width
@@ -3466,7 +3570,7 @@ class HSI_Visualizer:
                 print(f"  Skipping '{cls_name}': only {n_spectra} spectrum(a)")
                 continue
 
-            # Apply spectral_standardization to all spectra at once, then compute mean/std
+            # Apply spectral_standardization to in batches to avoid memory issues
             try:
                 all_standardized = spectral_standardization(
                     all_spectra,
@@ -3501,6 +3605,18 @@ class HSI_Visualizer:
                 else:
                     ref_spectrum = ref_raw
 
+                # Min-max normalize standardized mean to [0, 1] for fair comparison
+                mean_min = np.min(standardized_mean)
+                mean_max = np.max(standardized_mean)
+                if mean_max - mean_min > 1e-8:
+                    standardized_mean = (standardized_mean - mean_min) / (mean_max - mean_min)
+                    standardized_std = standardized_std / (mean_max - mean_min)  # scale std accordingly
+                else:
+                    standardized_mean = standardized_mean
+                    standardized_std = standardized_std
+            else:
+                print(f"  Note: no reference spectrum found for '{cls_name}'")
+
             # --- Plot ---
             fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -3526,11 +3642,11 @@ class HSI_Visualizer:
             if display_name_map and cls_name in display_name_map:
                 display_name = display_name_map[cls_name]
 
-            ax.set_title(display_name, fontsize=14, fontweight='bold')
-            ax.set_xlabel('Wavenumber (cm⁻¹)', fontsize=11)
-            ax.set_ylabel('Intensity (a.u.)', fontsize=11)
-            ax.legend(fontsize=9, frameon=True, edgecolor='0.8')
-            ax.tick_params(labelsize=9)
+            ax.set_title(display_name, fontsize=20, fontweight='bold')
+            ax.set_xlabel('Wavenumber (cm⁻¹)', fontsize=16)
+            ax.set_ylabel('Intensity (a.u.)', fontsize=16)
+            ax.legend(fontsize=12, frameon=True, edgecolor='0.8')
+            ax.tick_params(labelsize=16)
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)
             fig.tight_layout()

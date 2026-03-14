@@ -18,3 +18,7 @@
 !/.gitignore
 /__pycache__/
 *.pyc
+/clustering/results
+/clustering/debug*
+/task_specific/
+/unprocessed_data/

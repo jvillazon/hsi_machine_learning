@@ -168,6 +168,14 @@ class HSI_Labeled_Dataset(Dataset):
                    self.background * bg_amplitude + 
                    noise)
         
+        # Shift spectrum  to simulate Raman shift
+        shift_range = self.n_wavenumbers * 0.05  # Shift up to ±5% of the spectrum length
+        shift_int = int(round(shift_range))
+
+        # Roll the spectrum along the last dimension
+        spectrum = torch.roll(spectrum, shifts=shift_int, dims=-1)
+
+        
         # Apply normalization
         if self.normalize_per_molecule:
             # Normalize by the pre-computed max for this molecule class
@@ -267,6 +275,27 @@ class HSI_Labeled_Dataset(Dataset):
         print("\nDataset visualization saved to: dataset_visualization.png")
         plt.show()
 
+    def get_reference(self):
+        """
+        Create an array of each molecule's reference spectrum (the clean molecule spectrum without noise or background).
+        
+        Returns
+        -------
+        reference_spectra : numpy array of shape (n_samples, n_channels)
+            The reference spectra for each sample in the dataset
+        labels : numpy array of shape (n_samples,)
+            The corresponding labels for each sample in the dataset
+        """
+        reference_spectra = []
+        labels = []
+
+        
+        for i, molecule_name in enumerate(self.molecule_names):
+            spectrum = self.mol_spectra[i]
+            reference_spectra.append(spectrum.numpy())
+            labels.append(molecule_name)
+        
+        return np.array(reference_spectra), np.array(labels)
 
 # Dataloader for torch model
 def create_dataloaders(dataset, batch_size=32, train_ratio=0.7, val_ratio=0.15, seed=42):

@@ -18,7 +18,7 @@ def macro_idx(wavenumber, num_samp, wavenum_1=2700, wavenum_2=3100):
     idx = int(((wavenumber - wavenum_1) / (wavenum_2 - wavenum_1)) * num_samp)
     return idx
 
-def spectral_standardization(data, wavenum_1=2700, wavenum_2=3100, num_samp=61, background=None):
+def spectral_standardization(data, wavenum_1=2700, wavenum_2=3100, num_samp=61, background=None, plot_example=False):
     ch_start = int((2800 - wavenum_1) / (wavenum_2 - wavenum_1) * num_samp)
     if background is None:
         raise ValueError("background cannot be None. Load from srs_params_path.")
@@ -30,14 +30,14 @@ def spectral_standardization(data, wavenum_1=2700, wavenum_2=3100, num_samp=61, 
     background_arr = np.outer(spectra_magnitude, background)
 
     spectra_standard = temp-background_arr
-
-    index = np.random.randint(0, spectra_standard.shape[0], size=1)
-    plt.plot(temp[index[0]])
-    plt.plot(background_arr[index[0]])
-    plt.plot(spectra_standard[index[0]])
-    plt.title('Spectral Standardization Example')
-    plt.legend(['Original Spectrum', 'Background Estimate', 'Standardized Spectrum'])
-    plt.show()
+    if plot_example:
+        index = np.random.randint(0, spectra_standard.shape[0], size=1)
+        plt.plot(temp[index[0]])
+        plt.plot(background_arr[index[0]])
+        plt.plot(spectra_standard[index[0]])
+        plt.title('Spectral Standardization Example')
+        plt.legend(['Original Spectrum', 'Background Estimate', 'Standardized Spectrum'])
+        plt.show()
 
     spectra_max_idx = np.argmax(np.mean(spectra_standard,axis=0))
     spectra_norm = normalize(spectra_standard, max_val=np.mean(spectra_standard[:,spectra_max_idx])+3*np.std(spectra_standard[:,spectra_max_idx]),min_val=0)
