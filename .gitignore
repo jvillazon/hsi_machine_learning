@@ -22,3 +22,6 @@
 /clustering/debug*
 /task_specific/
 /unprocessed_data/
+/sk_classifier/models
+/sk_classifier/debug*
+/*/debug*
