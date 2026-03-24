@@ -19,7 +19,7 @@ from core.hsi_labeled_dataset import HSI_Labeled_Dataset
 
 def main():
     # Define processing options
-    perform_RF_classification = False # Set to True to run classifier inference   
+    perform_RF_classification = True # Set to True to run classifier inference   
 
     # Define dataset parameters
     base_directory = r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\data"
@@ -61,7 +61,8 @@ def main():
         noise_multiplier=0.5
     )
     # Initialize Random Forest classifier
-    classifier = HSI_Classifier(dataset, model_path=model_path, output_base=None, visualizer=visualizer, labeled_dataset=labeled_dataset)
+    output_base = r"D:\integrated_pipeline\HSI_data\CODEX_FTUcells_outputs\rf_best_model_outputs"
+    classifier = HSI_Classifier(dataset, model_path=model_path, output_base=output_base, visualizer=visualizer, labeled_dataset=labeled_dataset)
 
 
     # Initialize variables that may be used across conditional blocks
@@ -103,7 +104,7 @@ def main():
         )
 
     # (Optional) Define masking and quantification options
-    perform_masking = False # Set to True to enable both FTU masking and ratio masking
+    perform_masking = True # Set to True to enable both FTU masking and ratio masking
     display_plots = True # Set to True to display statistical significance plots
    
     # Define regions to identify in masked units
@@ -168,44 +169,46 @@ def main():
         "mc": "MC",
     }
 
-    display_units= ['POD', 'PT', 'TAL', 'PC', 'DCT']
-    molecules_to_display = [
-        '16:0 Cardiolipin',
-        "DOPC", 
-        "DOPE", 
-        "PC Mix", 
-        "PE Mix", 
-        'Sphingosine', 
-        'Cholesterol (ovine)', 
-        '18:1 Cholesterol Ester',
-        'TAG 16:0',
-        'TAG Mix',
+    # display_units= ['POD', 'PT', 'TAL', 'PC', 'DCT']
+    display_units = None
+    # molecules_to_display = [
+    #     '16:0 Cardiolipin',
+    #     "DOPC", 
+    #     "DOPE", 
+    #     "PC Mix", 
+    #     "PE Mix", 
+    #     'Sphingosine', 
+    #     'Cholesterol (ovine)', 
+    #     '18:1 Cholesterol Ester',
+    #     'TAG 16:0',
+    #     'TAG Mix',
 
-        'Cer 18:1-18:0',
-        'Cer 18:1-18:1',
-        'Cer 18:1-24:0',
-        'Cer 18:1-24:1',
+    #     'Cer 18:1-18:0',
+    #     'Cer 18:1-18:1',
+    #     'Cer 18:1-24:0',
+    #     'Cer 18:1-24:1',
 
-        # Carnitine
-        'C8 L-Carnitine',
+    #     # Carnitine
+    #     'C8 L-Carnitine',
 
         
-        # Fatty Acids
-        'Stearic Acid',
-        'Palmitic Acid',
-        'Docosahexaenoic Acid',
-        'Tetracosapentaenoic Acid',
+    #     # Fatty Acids
+    #     'Stearic Acid',
+    #     'Palmitic Acid',
+    #     'Docosahexaenoic Acid',
+    #     'Tetracosapentaenoic Acid',
           
-          ]  # e.g. ['CH2 sym stretch', 'CH3 sym stretch']; None falls back to top_n]
+    #       ]  # e.g. ['CH2 sym stretch', 'CH3 sym stretch']; None falls back to top_n]
+    molecules_to_display = None
     ratios_to_display = None     # e.g. ['CH2/CH3']; None shows all ratio types
 
     output_csv = os.path.join(classifier.output_base, 'masked_predictions_percentages.csv')
     output_ratio_csv = os.path.join(classifier.output_base, 'masked_ratio_means.csv')
 
-    mask_type = 'Xenium_cells_masks'
+    mask_type = 'CODEX_FTUcells_masks'
     if perform_masking:
         # Apply masking if enabled
-        mask_prefix = 'Xenium'  # Update with actual prefix used in mask filenames
+        mask_prefix = mask_type.split("_")[0]  
         print("\nProcessing masks and quantifying results...")
         
         predictions_per_unit = {}
@@ -415,113 +418,103 @@ def main():
 
 
 
-        # unit_colors = {
-        #     "Cluster 1":	"#e8260c",
-        #     "Cluster 2":	"#0a8416",
-        #     "Cluster 3":	"#10c922",
-        #     "Cluster 4":	"#35ee48",
-        #     "Cluster 5":	"#7af487",
-        #     "Cluster 6":	"#8b5403",
-        #     "Cluster 7":	"#fbc573",
-        #     "Cluster 8":	"#870763",
-        #     "Cluster 9":	"#f20cb1",
-        #     "Cluster 10":	"#f777d3",
-        #     "Cluster 11":	"#ebd409",
-        #     "Cluster 12":	"#073a87",
-        #     "Cluster 13":	"#094cb2",
-        #     "Cluster 14":	"#0b5fdc",
-        #     "Cluster 15":	"#2275f3",
-        #     "Cluster 16":	"#4c90f5",
-        #     "Cluster 17":	"#77aaf7",
-        #     "Cluster 18":	"#088686",
-        #     "Cluster 19":	"#0dcccc",
-        #     "Cluster 20":	"#32f1f1",
-        #     "Cluster 21":	"#78f6f6",
-        #     "Cluster 22":	"#5c0b8d",
-        #     "Cluster 23":	"#8210c9",
-        #     "Cluster 24":	"#a42ced",
-        #     "Cluster 25":	"#be68f2",
-        #     "Cluster 26":	"#7a711e",
-        # }
-
         unit_colors = {
-            "POD": "#e8260c",
-            "PT": "#0a8416",
-            "TAL": "#EE2DB7",
-            "DCT": "#ebd409",
-            "PC": "#245bad",
+            "Cluster 1":	"#e8260c",
+            "Cluster 2":	"#0a8416",
+            "Cluster 3":	"#10c922",
+            "Cluster 4":	"#35ee48",
+            "Cluster 5":	"#7af487",
+            "Cluster 6":	"#8b5403",
+            "Cluster 7":	"#fbc573",
+            "Cluster 8":	"#870763",
+            "Cluster 9":	"#f20cb1",
+            "Cluster 10":	"#f777d3",
+            "Cluster 11":	"#ebd409",
+            "Cluster 12":	"#073a87",
+            "Cluster 13":	"#094cb2",
+            "Cluster 14":	"#0b5fdc",
+            "Cluster 15":	"#2275f3",
+            "Cluster 16":	"#4c90f5",
+            "Cluster 17":	"#77aaf7",
+            "Cluster 18":	"#088686",
+            "Cluster 19":	"#0dcccc",
+            "Cluster 20":	"#32f1f1",
+            "Cluster 21":	"#78f6f6",
+            "Cluster 22":	"#5c0b8d",
+            "Cluster 23":	"#8210c9",
+            "Cluster 24":	"#a42ced",
+            "Cluster 25":	"#be68f2",
+            "Cluster 26":	"#7a711e",
         }
+
+        # unit_colors = {
+        #     "POD": "#e8260c",
+        #     "PT": "#0a8416",
+        #     "TAL": "#EE2DB7",
+        #     "DCT": "#ebd409",
+        #     "PC": "#245bad",
+        # }
         
         # Map full unit names (in data) to abbreviated display names (for plots)
-        # unit_display_names = {
-        #     'Glomeruli': 'Glomeruli',
-        #     'Proximal Tubule': 'Proximal Tubule',
-        #     'Distal Tubule': 'Distal Tubule',
-        #     'Thick Ascending Limb': 'Thick Ascending Limb',
-        #     'Distal Nephron': 'Collecting Duct',
-        #     'Thin Descending Limb': 'Thin Descending Limb',
-        #     'Vasculature': 'Vasculature'
-        # }
-
-        # unit_display_names = {
-        #     'Cluster 1': "Glomeruli | Podo, CD31",
-        #     'Cluster 2':	"PT | LRP2",
-        #     'Cluster 3':	"PT | LRP2, AQP1, CD90",
-        #     'Cluster 4':	"PT | LRP2, CD90",
-        #     'Cluster 5':	"PT | LRP2, PROM1/VCAM1+",
-        #     'Cluster 6':	"TDL | AQP1, Cyto8",
-        #     'Cluster 7':	"TDL | AQP1, Cyto8",
-        #     'Cluster 8':	"TAL | NaK/UMOD+",
-        #     'Cluster 9':	"TAL | UMOD+",
-        #     'Cluster 10':	"TAL | UMOD+",
-        #     'Cluster 11':	"DCT | SLC12a3",
-        #     'Cluster 12':	"CD | Cyto8",
-        #     'Cluster 13':	"CD | Cyto8+",
-        #     'Cluster 14':	"CD | Cyto8+",
-        #     'Cluster 15':	"CD | Cyto8, Bcat",
-        #     'Cluster 16':	"CD | Cyto8, Bcat, Ecad",
-        #     'Cluster 17':	"CD | Cyto8, Ecad",
-        #     'Cluster 18':	"Endothelium | CD31, Podocalyxin",
-        #     'Cluster 19':	"Endothelium | CD31, Podocalyxin ",
-        #     'Cluster 20':	"Pericytes | CD90+, CD31 low",
-        #     'Cluster 21':	"VSMCs | aSMA",
-        #     'Cluster 22':	"Immune  | CD20 +",
-        #     'Cluster 23':	"Immune - MP | CD45, CD206",
-        #     'Cluster 24':	"Immune - T | CD3, CD4",
-        #     'Cluster 25':	"Immune - T | CD3, CD8",
-        #     'Cluster 26':	"Interstitial cells | IGFBP7",
-        # }
+        unit_display_names = {
+            'Glomeruli': 'Glomeruli',
+            'Proximal Tubule': 'Proximal Tubule',
+            'Distal Tubule': 'Distal Tubule',
+            'Thick Ascending Limb': 'Thick Ascending Limb',
+            'Distal Nephron': 'Collecting Duct',
+            'Thin Descending Limb': 'Thin Descending Limb',
+            'Vasculature': 'Vasculature'
+        }
 
         unit_display_names = {
-            "POD": "POD",
-            "PT": "PT",
-            "TAL": "TAL",
-            "DCT": "DCT",
-            "PC": "CD",
+            'Cluster 1': "Glomeruli | Podo, CD31",
+            'Cluster 2':	"PT | LRP2",
+            'Cluster 3':	"PT | LRP2, AQP1, CD90",
+            'Cluster 4':	"PT | LRP2, CD90",
+            'Cluster 5':	"PT | LRP2, PROM1/VCAM1+",
+            'Cluster 6':	"TDL | AQP1, Cyto8",
+            'Cluster 7':	"TDL | AQP1, Cyto8",
+            'Cluster 8':	"TAL | NaK/UMOD+",
+            'Cluster 9':	"TAL | UMOD+",
+            'Cluster 10':	"TAL | UMOD+",
+            'Cluster 11':	"DCT | SLC12a3",
+            'Cluster 12':	"CD | Cyto8",
+            'Cluster 13':	"CD | Cyto8+",
+            'Cluster 14':	"CD | Cyto8+",
+            'Cluster 15':	"CD | Cyto8, Bcat",
+            'Cluster 16':	"CD | Cyto8, Bcat, Ecad",
+            'Cluster 17':	"CD | Cyto8, Ecad",
+            'Cluster 18':	"Endothelium | CD31, Podocalyxin",
+            'Cluster 19':	"Endothelium | CD31, Podocalyxin ",
+            'Cluster 20':	"Pericytes | CD90+, CD31 low",
+            'Cluster 21':	"VSMCs | aSMA",
+            'Cluster 22':	"Immune  | CD20 +",
+            'Cluster 23':	"Immune - MP | CD45, CD206",
+            'Cluster 24':	"Immune - T | CD3, CD4",
+            'Cluster 25':	"Immune - T | CD3, CD8",
+            'Cluster 26':	"Interstitial cells | IGFBP7",
         }
+
+        # unit_display_names = {
+        #     "POD": "POD",
+        #     "PT": "PT",
+        #     "TAL": "TAL",
+        #     "DCT": "DCT",
+        #     "PC": "CD",
+        # }
 
         
         # Define custom order for units in heatmaps (x-axis)
         # Modify this list to change the order units appear in heatmaps
-        # bubble_unit_order = [
-        #     'Vasculature',
-        #     'Thin Descending Limb',
-        #     'Thick Ascending Limb',
-        #     'Proximal Tubule',
-        #     'Glomeruli',
-        #     'Distal Tubule',
-        #     'Distal Nephron',
-        # ]
-        # # Alternative order (if you want to group by nephron segments)
-        # heatmap_unit_order = [
-        #     'Distal Nephron',
-        #     'Distal Tubule',
-        #     'Glomeruli',
-        #     'Proximal Tubule',
-        #     'Thick Ascending Limb',
-        #     'Thin Descending Limb',
-        #     'Vasculature',
-        # ]
+        bubble_unit_order = [
+            'Vasculature',
+            'Thin Descending Limb',
+            'Thick Ascending Limb',
+            'Proximal Tubule',
+            'Glomeruli',
+            'Distal Tubule',
+            'Distal Nephron',
+        ]
 
 
         bubble_unit_order = [
@@ -552,7 +545,7 @@ def main():
             'Cluster 25',
             'Cluster 26'
         ]
-        heatmap_unit_order = bubble_unit_order  # Use same order for heatmaps and bubble plots
+        heatmap_unit_order = bubble_unit_order.reverse() # Use same order for heatmaps and bubble plots
 
         # Create plots directory
         plots_directory = os.path.join(os.path.dirname(base_directory), f'rf_{mask_type}_plots')
@@ -655,7 +648,8 @@ def main():
                 display_name_map=display_names,
                 units_to_display=display_units,
                 unit_display_map=unit_display_names,
-                unit_order=bubble_unit_order
+                unit_order=bubble_unit_order,
+                cmap = 'RdBu_r'
             )
 
             ratios_unit_buble_dir = os.path.join(plots_directory, 'bubble_plots_unit_ratios')
@@ -669,7 +663,8 @@ def main():
                 display_name_map=display_names,
                 units_to_display=display_units,
                 unit_display_map=unit_display_names,
-                unit_order=bubble_unit_order
+                unit_order=bubble_unit_order,
+                cmap = 'RdBu_r'
             )
 
             # ----------------------------------------------------------------
@@ -732,7 +727,8 @@ def main():
                         display_name_map=display_names,
                         units_to_display=display_units,
                         unit_display_map=unit_display_names,
-                        unit_order=bubble_unit_order
+                        unit_order=bubble_unit_order,
+                        cmap = 'RdBu_r'
                     )
 
         else:

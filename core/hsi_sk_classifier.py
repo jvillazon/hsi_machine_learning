@@ -192,6 +192,8 @@ class HSI_Classifier:
             except Exception:
                 parent_dir = os.path.abspath(os.path.join(os.getcwd()))
             self.output_base = os.path.join(parent_dir, f'{os.path.basename(model_path).split(".")[0]}_outputs')
+        else:
+            self.output_base = output_base
 
 
     def predict(self, generate_shap=True, shap_n_samples=500, shap_background=100, alpha=None):

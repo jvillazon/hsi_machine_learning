@@ -2056,7 +2056,7 @@ class HSI_Visualizer:
             
             # Set title using helper function
             display_name = self._apply_display_name(group_value, display_name_map)
-            ax.set_title(display_name.replace("_", " "), fontweight='bold', fontsize=14)
+            ax.set_title(display_name.replace("_", " "), fontweight='bold', fontsize=16)
             
             # Remove x-axis tick labels
             ax.set_xticklabels([])
@@ -2064,12 +2064,12 @@ class HSI_Visualizer:
             
             # Set y-axis label
             if idx % ncols == 0:  # Only leftmost column
-                ax.set_ylabel(f'{value_col.replace("_", " ")}', fontweight='bold', fontsize=12)
+                ax.set_ylabel(f'{value_col.replace("_", " ")}', fontweight='bold', fontsize=14)
             
             # Add grid
             ax.grid(True, alpha=0.2, axis='y', linestyle='--', linewidth=0.5, color='gray')
             ax.set_axisbelow(True)
-            ax.tick_params(axis='y', labelsize=10)
+            ax.tick_params(axis='y', labelsize=12)
             
             # Set background
             ax.set_facecolor('#f8f8f8')
@@ -2582,6 +2582,9 @@ class HSI_Visualizer:
         try:
             heatmap_matrix = agg_data.pivot(index='Unit_Region', columns=grouping_col, values='mean')
             
+            # Mask 0 values to NaN so they render as black
+            heatmap_matrix = heatmap_matrix.mask(heatmap_matrix == 0, np.nan)
+            
             # Sort columns by display_name_map order if provided, otherwise alphabetically
             if display_name_map:
                 # Get current columns (molecule/ratio names)
@@ -2647,6 +2650,7 @@ class HSI_Visualizer:
             
             # Create heatmap visualization
             fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+            ax.set_facecolor('black')
             
             # Create heatmap with journal-quality styling
             # Using RdBu_r with center at 0.5 for ratio data (blue=0, white=0.5, red=1)
@@ -2731,7 +2735,7 @@ class HSI_Visualizer:
             
             # Save figure
             output_path = os.path.join(output_dir, 'heatmap_raw_ratios.svg')
-            plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
             
             if show_plots:
                 plt.show()
@@ -2860,8 +2864,12 @@ class HSI_Visualizer:
             else:
                 heatmap_matrix = agg_data.pivot(index='Unit_Region', columns=grouping_col, values='z_score')
 
-            # Fill missing unit-region combinations with 0 to show as neutral (since these are z-scores)
-            heatmap_matrix = heatmap_matrix.fillna(-3)
+            # Get mean matrix to mask 0 or NaN values
+            mean_matrix = agg_data.pivot(index='Unit_Region', columns=grouping_col, values='mean')
+            mean_matrix = mean_matrix.reindex(index=heatmap_matrix.index, columns=heatmap_matrix.columns)
+            
+            # Mask missing or 0 mean values to be NaN
+            heatmap_matrix = heatmap_matrix.mask((mean_matrix == 0) | mean_matrix.isna(), np.nan)
 
             
             # Sort columns by display_name_map order if provided, otherwise alphabetically
@@ -2931,6 +2939,7 @@ class HSI_Visualizer:
             
             # Create heatmap visualization
             fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+            ax.set_facecolor('black')
             
             # Create heatmap with journal-quality styling
             sns.heatmap(heatmap_matrix, annot=False, cmap=cmap, 
@@ -2977,8 +2986,8 @@ class HSI_Visualizer:
                             new_labels.append(unit_display_map[label])
                         else:
                             new_labels.append(label.replace('_', ' '))
-                ax.set_yticklabels(new_labels, rotation=0, ha='right', fontsize=10)
-                ax.set_ylabel('Unit (Region)', fontweight='bold', fontsize=14)
+                ax.set_yticklabels(new_labels, rotation=0, ha='right', fontsize=14)
+                ax.set_ylabel('Unit (Region)', fontweight='bold', fontsize=16)
             else:
                 # Apply unit_display_map to y-axis labels (without regions)
                 y_labels = []
@@ -2988,31 +2997,29 @@ class HSI_Visualizer:
                         y_labels.append(unit_display_map[original_name])
                     else:
                         y_labels.append(original_name.replace('_', ' '))
-                ax.set_yticklabels(y_labels, rotation=0, ha='right', fontsize=10)
-                ax.set_ylabel('Unit', fontweight='bold', fontsize=14)
+                ax.set_yticklabels(y_labels, rotation=0, ha='right', fontsize=14)
+                ax.set_ylabel('Unit', fontweight='bold', fontsize=16)
             
-            ax.set_xlabel(grouping_col.replace("_", " "), fontweight='bold', fontsize=14)
+            ax.set_xlabel(grouping_col.replace("_", " "), fontweight='bold', fontsize=16)
             # Update title based on data type
             if data_type == 'percentage':
                 ax.set_title('Normalized Molecule Percentage',
-                           fontweight='bold', fontsize=16, pad=20)
+                           fontweight='bold', fontsize=18, pad=20)
             else:
                 ax.set_title('Normalized Ratio',
-                           fontweight='bold', fontsize=16, pad=20)
+                           fontweight='bold', fontsize=18, pad=20)
             
             # Apply display_name_map to x-axis labels (now molecules are on x-axis)
             x_labels = []
             for label in ax.get_xticklabels():
                 original_name = label.get_text()
-                print(f"Debug - Processing molecule: '{original_name}'")
                 if display_name_map and original_name in display_name_map:
                     mapped_name = display_name_map[original_name]
-                    print(f"Debug - Found in display_name_map: '{original_name}' -> '{mapped_name}'")
                     x_labels.append(mapped_name)
                 else:
                     # Always add label even if not in display_name_map
                     x_labels.append(original_name.replace('_', ' '))
-            ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=10)
+            ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=14)
             
             # Style the axes with light gray borders to match separator lines
             for spine in ax.spines.values():
@@ -3024,7 +3031,7 @@ class HSI_Visualizer:
             # Save figure
             output_path = os.path.join(output_dir, 
                                       f"heatmap_unit_aggregated_{data_type}.svg")
-            plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
             
             if show_plots:
                 plt.show()
@@ -3098,7 +3105,7 @@ class HSI_Visualizer:
             return {}
 
         has_region = 'Region' in df.columns and df['Region'].notna().any()
-
+        
         if has_region:
             agg_data = df.groupby(['Unit', 'Region', grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
             agg_data['Unit_Region'] = agg_data['Unit'] + ' (' + agg_data['Region'] + ')'
@@ -3223,28 +3230,69 @@ class HSI_Visualizer:
             row_index = {row: i * spacing for i, row in enumerate(heatmap_matrix.index)}
 
             xs, ys, sizes, color_vals = [], [], [], []
+            xs_black, ys_black, sizes_black = [], [], []
             all_z = heatmap_matrix.values.flatten()
             max_abs_z = max(np.abs(all_z).max(), 0.1)
-            max_bubble_size = 450
+            max_bubble_size = 250
             min_bubble_size = 10
+
+            # Get std matrix corresponding to heatmap_matrix
+            std_matrix = agg_data.drop_duplicates(subset=['Unit_Region', grouping_col]).pivot(index='Unit_Region', columns=grouping_col, values='std')
+            std_matrix = std_matrix.reindex(index=heatmap_matrix.index, columns=heatmap_matrix.columns)
+            
+            # Get mean matrix to check if value is 0 or nan
+            mean_matrix = agg_data.drop_duplicates(subset=['Unit_Region', grouping_col]).pivot(index='Unit_Region', columns=grouping_col, values='mean')
+            mean_matrix = mean_matrix.reindex(index=heatmap_matrix.index, columns=heatmap_matrix.columns)
+            
+            all_std = std_matrix.values.flatten()
+            all_std_clean = all_std[~np.isnan(all_std)]
+            max_std = max(all_std_clean.max(), 1e-6) if len(all_std_clean) > 0 else 1e-6
+            min_std = all_std_clean.min() if len(all_std_clean) > 0 else 0
+            
+            # Fill missing with max_std so they get the smallest bubble
+            std_matrix = std_matrix.fillna(max_std)
 
             for row_name in heatmap_matrix.index:
                 for col_name in heatmap_matrix.columns:
                     z = heatmap_matrix.loc[row_name, col_name]
-                    xs.append(col_index[col_name])
-                    ys.append(row_index[row_name])
-                    size = min_bubble_size + (abs(z) / max_abs_z) ** 1.6 * max_bubble_size
-                    sizes.append(size)
-                    color_vals.append(z)
+                    std_val = std_matrix.loc[row_name, col_name]
+                    mean_val = mean_matrix.loc[row_name, col_name]
+                    
+                    x_val = col_index[col_name]
+                    y_val = row_index[row_name]
+                    
+                    # Bigger std -> smaller bubble
+                    # If the value is 0 or nan, force smallest bubble and color black
+                    if pd.isna(mean_val) or mean_val == 0:
+                        xs_black.append(x_val)
+                        ys_black.append(y_val)
+                        sizes_black.append(min_bubble_size)
+                    else:
+                        normalized_std = (std_val - min_std) / max(max_std - min_std, 1e-6)
+                        size = min_bubble_size + (1 - normalized_std) * max_bubble_size
+                        xs.append(x_val)
+                        ys.append(y_val)
+                        sizes.append(size)
+                        color_vals.append(z)
 
             norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
-            sc = ax.scatter(xs, ys, s=sizes, c=color_vals, cmap=cmap, norm=norm,
-                            edgecolors='none', zorder=3)
+            # Plot normal colored bubbles
+            if xs:
+                sc = ax.scatter(xs, ys, s=sizes, c=color_vals, cmap=cmap, norm=norm,
+                                edgecolors='none', zorder=3)
+            else:
+                # Dummy scatter for colorbar if no normal data
+                sc = ax.scatter([0], [0], s=[0], c=[0], cmap=cmap, norm=norm)
+                
+            # Plot black bubbles for NaN/0
+            if xs_black:
+                ax.scatter(xs_black, ys_black, s=sizes_black, c='black',
+                           edgecolors='none', zorder=3)
 
             # --- Colorbar ---
             cbar = fig.colorbar(sc, ax=ax, shrink=0.8, pad=0.02)
-            cbar.set_label('Z-score (normalized to mean)', color='black', fontsize=10)
-            cbar.ax.yaxis.set_tick_params(color='black', labelcolor='black')
+            cbar.set_label('Z-score (normalized to mean)', color='black', fontsize=14)
+            cbar.ax.yaxis.set_tick_params(color='black', labelcolor='black', labelsize=12)
             plt.setp(cbar.ax.yaxis.get_ticklabels(), color='black')
             cbar.outline.set_edgecolor('black')
 
@@ -3266,18 +3314,18 @@ class HSI_Visualizer:
             # --- X-tick labels above the plot ---
             ax.xaxis.set_label_position('top')
             ax.xaxis.tick_top()
-            ax.set_xticklabels(col_labels, rotation=45, ha='left', fontsize=10, color='black')
+            ax.set_xticklabels(col_labels, rotation=45, ha='left', fontsize=14, color='black')
 
             # --- Y-tick labels ---
-            ax.set_yticklabels(row_labels, rotation=0, ha='right', fontsize=10, color='black')
+            ax.set_yticklabels(row_labels, rotation=0, ha='right', fontsize=14, color='black')
 
             # --- Axis labels ---
             ylabel = 'Unit (Region)' if has_region else 'Unit'
-            ax.set_ylabel(ylabel, fontweight='bold', fontsize=14, color='black')
+            ax.set_ylabel(ylabel, fontweight='bold', fontsize=16, color='black')
 
             # --- Title ---
             title = 'Normalized Molecule Percentage' if data_type == 'percentage' else 'Normalized Ratio'
-            ax.set_title(title, fontweight='bold', fontsize=16, pad=20, color='black')
+            ax.set_title(title, fontweight='bold', fontsize=18, pad=20, color='black')
 
             # --- Tick colors ---
             ax.tick_params(colors='black', which='both')
@@ -3374,20 +3422,29 @@ class HSI_Visualizer:
             global_mean = agg_data['mean'].mean()
             global_max = agg_data['mean'].max()
             
+            all_std_clean = agg_data['std'].dropna()
+            max_std = all_std_clean.max() if not all_std_clean.empty else 1e-6
+            min_std = all_std_clean.min() if not all_std_clean.empty else 0
+            max_std = max(max_std, 1e-6)
+            
             # Plot bubbles
             for _, row in agg_data.iterrows():
                 x = unit_pos[row['Unit']]
                 y = ratio_pos[row[grouping_col]]
                 value = row['mean']
+                std_val = row['std']
                 
-                # Bubble size proportional to raw value (normalized to max)
-                if global_max > 0:
-                    size = (value / global_max) * 500 + 50
+                # Bubble size proportional to std (bigger std -> smaller bubble)
+                if pd.isna(std_val) or pd.isna(value) or value == 0:
+                    size = 50
                 else:
-                    size = 100
+                    normalized_std = (std_val - min_std) / max(max_std - min_std, 1e-6)
+                    size = 50 + (1 - normalized_std) * 250
                 
                 # Color gradient based on value relative to mean
-                if value > global_mean:
+                if pd.isna(value) or value == 0:
+                    color = 'black'
+                elif value > global_mean:
                     color = '#d62728'  # Red for above mean
                 else:
                     color = '#1f77b4'  # Blue for below mean
@@ -3405,7 +3462,7 @@ class HSI_Visualizer:
                     unit_labels.append(unit_display_map[u])
                 else:
                     unit_labels.append(u.replace('_', ' '))
-            ax.set_xticklabels(unit_labels, rotation=45, ha='right', fontsize=10)
+            ax.set_xticklabels(unit_labels, rotation=45, ha='right', fontsize=14)
             
             ratio_labels = []
             for r in ratios:
@@ -3413,12 +3470,12 @@ class HSI_Visualizer:
                     ratio_labels.append(display_name_map[r])
                 else:
                     ratio_labels.append(r.replace('_', ' '))
-            ax.set_yticklabels(ratio_labels, rotation=0, fontsize=12)
+            ax.set_yticklabels(ratio_labels, rotation=0, fontsize=14)
             
             # Labels and title
-            ax.set_xlabel('Unit', fontweight='bold', fontsize=14)
-            ax.set_ylabel('Ratio Type', fontweight='bold', fontsize=14)
-            ax.set_title('Raw Ratio Values', fontweight='bold', fontsize=16, pad=20)
+            ax.set_xlabel('Unit', fontweight='bold', fontsize=16)
+            ax.set_ylabel('Ratio Type', fontweight='bold', fontsize=16)
+            ax.set_title('Raw Ratio Values', fontweight='bold', fontsize=18, pad=20)
             
             # Add legend
             from matplotlib.lines import Line2D
@@ -3428,7 +3485,7 @@ class HSI_Visualizer:
                 Line2D([0], [0], marker='o', color='w', markerfacecolor='#1f77b4', 
                       markersize=10, alpha=0.6, label='Below Mean', markeredgecolor='black')
             ]
-            ax.legend(handles=legend_elements, loc='upper right', frameon=True, fontsize=10)
+            ax.legend(handles=legend_elements, loc='upper right', frameon=True, fontsize=12)
             
             # Grid
             ax.grid(True, alpha=0.3, linestyle='--')
@@ -3438,7 +3495,7 @@ class HSI_Visualizer:
             
             # Save figure
             output_path = os.path.join(output_dir, "bubble_chart_raw_ratios.svg")
-            plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
             
             if show_plots:
                 plt.show()

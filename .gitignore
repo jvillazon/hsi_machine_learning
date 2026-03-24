@@ -20,8 +20,11 @@
 *.pyc
 /clustering/results
 /clustering/debug*
+/clustering/standardized*
+/clustering/*output*
 /task_specific/
 /unprocessed_data/
 /sk_classifier/models
 /sk_classifier/debug*
 /*/debug*
+/data_investigation/
