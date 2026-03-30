@@ -15,21 +15,49 @@ from core.hsi_unlabeled_dataset import HSI_Unlabeled_Dataset
 from core.hsi_visualizer import HSI_Visualizer
 from core.hsi_sk_classifier import HSI_Classifier
 from core.hsi_labeled_dataset import HSI_Labeled_Dataset
+from config_loader import load_config, apply_config, list_available_profiles, print_config_info
 
 
 def main():
-    # Define processing options
-    perform_RF_classification = True # Set to True to run classifier inference   
+    # ========================================================================
+    # CONFIGURATION PROFILE SELECTION
+    # ========================================================================
+    # Available profiles: 'kidney_clusters' (default), 'kidney_nephron'
+    # Change this to switch between different configurations
+    PROFILE = 'kidney_ftu'  # Update with desired profile name (without .json extension)
+    
+    # Print available profiles on first run
+    print(f"Available configuration profiles:")
+    for profile in list_available_profiles():
+        print(f"  - {profile}")
+    
+    # Load configuration from selected profile
+    print(f"\nLoading configuration from profile: {PROFILE}")
+    config = load_config(PROFILE)
+    print_config_info(PROFILE)
+    
+    # Apply configuration - unpack all settings
+    (perform_RF_classification, perform_masking, display_plots,
+     mask_type, regions, display_units, molecules_to_display, ratios_to_display,
+     display_names, unit_colors, unit_display_names, heatmap_unit_order,
+     selected_molecules, selected_ratios) = apply_config(config)
+    
+    # Derive bubble_unit_order as reverse of heatmap order
+    bubble_unit_order = heatmap_unit_order[::-1]
+    
+    # ========================================================================
+    # DATASET INITIALIZATION (independent of profile)
+    # ========================================================================
 
-    # Define dataset parameters
-    base_directory = r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\data"
+    # Define dataset parameters (these could also be moved to the config if desired)
+    base_directory = r"D:\integrated_pipeline\HSI_data\data"
+    wn_1 = 2700  # Starting wavenumber (inclusive)
+    wn_2 = 3100  # Ending wavenumber (inclusive)
     num_samp = 61
-    wn_1 = 2700
-    wn_2 = 3100
-    ch_start = int((2800 - wn_1) / (wn_2 - wn_1) * num_samp)
+    ch_start = int(((wn_2 - 2800)/(wn_2 - wn_1)) * num_samp)  # Calculate channel index corresponding to end of cell silent region (2800 cm^-1)
 
     # Define model name
-    chosen_model_name = 'rf_best_model'  # Update with correct model name
+    chosen_model_name = 'rf_n150_md40_mss2_msl9_a9_best_model_platt'  # Update with correct model name
     model_path = f'sk_classifier/models/{chosen_model_name}.joblib'
 
     # Create visualizer
@@ -39,6 +67,7 @@ def main():
         wavenumber_end=wn_2,
         num_samples=num_samp
     )
+    plots_directory = os.path.join(os.path.dirname(base_directory), f'{chosen_model_name}_{mask_type}_plots')
 
     # Create dataset with specified wavenumber range
     dataset = HSI_Unlabeled_Dataset(
@@ -61,9 +90,8 @@ def main():
         noise_multiplier=0.5
     )
     # Initialize Random Forest classifier
-    output_base = r"D:\integrated_pipeline\HSI_data\CODEX_FTUcells_outputs\rf_best_model_outputs"
+    output_base = os.path.join(os.path.dirname(base_directory), f"{chosen_model_name}_outputs")
     classifier = HSI_Classifier(dataset, model_path=model_path, output_base=output_base, visualizer=visualizer, labeled_dataset=labeled_dataset)
-
 
     # Initialize variables that may be used across conditional blocks
     percentages_df = None
@@ -73,16 +101,7 @@ def main():
         if os.path.exists(model_path):
             # Run inference
             print("\nRunning RandomForest inference on dataset...")
-            timing_stats = classifier.predict(alpha=2.77)  # Adjust alpha as needed for spectral weighting
-            
-            # print("\nRandomForest Inference Results:")
-            # print(f"Total predictions: {len(predictions)}")
-            # print(f"Number of classes: {probabilities.shape[1]}")
-            
-            # # Show example predictions
-            # print("\nShowing sample predictions...")
-            # visualizer.show_random_predictions(dataset, predictions, probabilities,
-            #                                 num_images=1, spectra_per_image=3, exclude_classes=['No Match'])
+            timing_stats = classifier.predict(alpha=10, generate_shap=True)  # Adjust alpha as needed for spectral weighting
         else:
             print(f"No model found at {model_path}")
             # Just show some sample spectra without predictions
@@ -91,121 +110,13 @@ def main():
                 spectra, img_idx = dataset[idx]
                 visualizer.visualize_spectrum(spectra, img_idx=img_idx)
 
-    
-        # Generate spectral comparison
-        spectra_comparison_dir = os.path.join(os.path.dirname(base_directory), 'spectra_comparison')
-        os.makedirs(spectra_comparison_dir, exist_ok=True)
-        visualizer.generate_class_spectra_comparison_plots(
-            dataset=dataset,
-            prediction_dir=classifier.output_base,
-            output_dir=spectra_comparison_dir,
-            srs_params_path='params_dataset/srs_params_61.npz',
-            classes_to_exclude=['No Match']
-        )
+    # Make mask directory to save .csv outputs from masked quantification
+    masked_output_dir = os.path.join(os.path.dirname(base_directory), f"{mask_type}_output_csv")
+    os.makedirs(masked_output_dir, exist_ok=True)
 
-    # (Optional) Define masking and quantification options
-    perform_masking = True # Set to True to enable both FTU masking and ratio masking
-    display_plots = True # Set to True to display statistical significance plots
-   
-    # Define regions to identify in masked units
-    regions = ['Cortex', 'Medulla']
-   
-    # Define unit name mappings (abbreviated -> full name)
-    # unit_mappings = {
-    #     'glom': 'Glomeruli',
-    #     'proxtub': 'Proximal Tubule',
-    #     'disttub': 'Distal Tubule',
-    #     'tal': 'Thick Ascending Limb',
-    #     'distneph': 'Distal Nephron',
-    #     'tdl': 'Thin Descending Limb',
-    #     'vasc': 'Vasculature'
-    # }
+    output_csv = os.path.join(masked_output_dir, 'masked_predictions_percentages.csv')
+    output_ratio_csv = os.path.join(masked_output_dir, 'masked_ratio_means.csv')
 
-    unit_mappings = {
-        "altpt": "altPT",
-        "altdtl": "altDTL",
-        "pt": "PT",
-        "dtl": "DTL",
-        "ec": "EC",
-        "tal": "TAL",
-        "unassigned": "Unassigned",
-        "alttal": "altTAL",
-        "low_quality": "Low Quality",
-        "pc": "PC",
-        "ic": "IC",
-        "pod": "POD",
-        "pec": "PEC",
-        "lymphoid": "Lymphoid",
-        "myeloid": "Myeloid",
-        "t": "T",
-        "atl": "ATL",
-        "dct": "DCT",
-        "altatl": "altATL",
-        "vsm,p": "VSM/P",
-        "fib": "FIB",
-        "cnt": "CNT",
-        "altcnt": "altCNT",
-        "altic": "altIC",
-        "mon": "MON",
-        "dc": "DC",
-        "inffib": "infFIB",
-        "sc,neu": "SC/NEU",
-        "momac": "moMAC",
-        "altdct": "altDCT",
-        "myof": "MYOF",
-        "pvfib": "pvFIB",
-        "resmac": "resMAC",
-        "afib": "aFIB",
-        "momac,inf": "moMAC-INF",
-        "md": "MD",
-        "nk": "NK",
-        "n": "N",
-        "mast": "MAST",
-        "ren": "REN",
-        "ec,gc": "EC-GC",
-        "neu": "NEU",
-        "altpod": "altPOD",
-        "b": "B",
-        "mc": "MC",
-    }
-
-    # display_units= ['POD', 'PT', 'TAL', 'PC', 'DCT']
-    display_units = None
-    # molecules_to_display = [
-    #     '16:0 Cardiolipin',
-    #     "DOPC", 
-    #     "DOPE", 
-    #     "PC Mix", 
-    #     "PE Mix", 
-    #     'Sphingosine', 
-    #     'Cholesterol (ovine)', 
-    #     '18:1 Cholesterol Ester',
-    #     'TAG 16:0',
-    #     'TAG Mix',
-
-    #     'Cer 18:1-18:0',
-    #     'Cer 18:1-18:1',
-    #     'Cer 18:1-24:0',
-    #     'Cer 18:1-24:1',
-
-    #     # Carnitine
-    #     'C8 L-Carnitine',
-
-        
-    #     # Fatty Acids
-    #     'Stearic Acid',
-    #     'Palmitic Acid',
-    #     'Docosahexaenoic Acid',
-    #     'Tetracosapentaenoic Acid',
-          
-    #       ]  # e.g. ['CH2 sym stretch', 'CH3 sym stretch']; None falls back to top_n]
-    molecules_to_display = None
-    ratios_to_display = None     # e.g. ['CH2/CH3']; None shows all ratio types
-
-    output_csv = os.path.join(classifier.output_base, 'masked_predictions_percentages.csv')
-    output_ratio_csv = os.path.join(classifier.output_base, 'masked_ratio_means.csv')
-
-    mask_type = 'CODEX_FTUcells_masks'
     if perform_masking:
         # Apply masking if enabled
         mask_prefix = mask_type.split("_")[0]  
@@ -251,7 +162,8 @@ def main():
                         regions=regions,
                         img_name=img_name_no_ext,
                         sample_name=sample_name,
-                        prefix=mask_prefix
+                        prefix=mask_prefix,
+                        group_subclasses=True
                     )
                     
                     # Merge results into predictions_per_unit
@@ -290,7 +202,9 @@ def main():
         
         # Calculate percentages
         if predictions_per_unit:
-            percentages_df = visualizer.quantify_unit_class_percentages_nested(predictions_per_unit, unit_mappings=unit_mappings)
+            # Note: unit_mappings is not used in the current config system
+            # To implement unit mappings, add them to your config JSON file
+            percentages_df = visualizer.quantify_unit_class_percentages_nested(predictions_per_unit, unit_mappings=None)
         
             # Display summary
             print("\nPercentages DataFrame (first 10 rows):")
@@ -304,7 +218,9 @@ def main():
         
         # Calculate mean ratios
         if ratios_per_unit:
-            ratios_df = visualizer.quantify_unit_ratio_means_nested(ratios_per_unit, unit_mappings=unit_mappings)
+            # Note: unit_mappings is not used in the current config system
+            # To implement unit mappings, add them to your config JSON file
+            ratios_df = visualizer.quantify_unit_ratio_means_nested(ratios_per_unit, unit_mappings=None)
             
             # Display summary
             print("\nMean Ratios DataFrame (first 10 rows):")
@@ -333,224 +249,6 @@ def main():
 
     # Display statistical significance plots if enabled
     if display_plots:
-        # Define display names for plots (optional - maps original names to display names)
-        display_names = {
-            # Glycerophospholipids 
-            '16:0 Cardiolipin': 'CL(16:0)',
-            'PC Mix': 'PC Mix',
-            'PE Mix': 'PE Mix',
-            'PS Mix': 'PS Mix',
-            'PI Mix': 'PI Mix',
-            'PG Mix': 'PG Mix',
-            '18:0 Lyso PA': 'PA(18:0/0:0)',
-            '18:1 LPA': 'PA(18:1/0:0)',
-            'DOPC': 'PC(18:1/18:1)',
-            'DOPE': 'PE(18:1/18:1)',
-            'DSPC': 'PC(18:0/18:0)',
-            '16:0 CDP DG' : 'CDP-DG(16:0)',
-
-
-            
-            # Sterols
-            'Cholesterol (ovine)': 'Chol',
-            '18:1 Cholesterol Ester': 'CE(18:1)',
-            
-            # Glycerolipids
-            'TAG Mix': 'TG Mix',
-            'TAG 16:0': 'TG(16:0)',
-            'TAG 18:1': 'TG(18:1)',
-            'DAG 16:0': 'DG(16:0)',
-            'DAG 18:0 and 24:0 ': 'DG(18:0/24:0)',
-            
-            # Sphingolipids
-            'Sphingosine': 'SM',
-
-            # Ceramides
-            'Cer 18:1-12:0': 'Cer(d18:1/12:0)',
-            'Cer 18:1-18:0': 'Cer(d18:1/18:0)',
-            'Cer 18:1-18:1': 'Cer(d18:1/18:1)',
-            'Cer 18:1-22:0': 'Cer(d18:1/22:0)',
-            'Cer 18:1-24:0': 'Cer(d18:1/24:0)',
-            'Cer 18:1-24:1': 'Cer(d18:1/24:1)',
-            'Cer 18:0-14:0': 'dhCer(d18:0/14:0)',
-            'Cer 18:1-24:1(15Z)': 'dhCer(d18:0/24:1)',
-            'Cer m18:1-16:0': 'doxCer(m18:1/16:0)',
-            'Cer m18:1-24:1': 'doxCer(m18:1/24:1)',
-            "Glucosylceramide (Gaucher's Spleen)": 'GlcCer',
-
-            # Carnitine
-            'C8 L-Carnitine': 'CAR(8:0)',
-            'C12 Carnitine': 'CAR(12:0)',
-            'C16 Carnitine': 'CAR(16:0)',
-            'C18 Carnitine (d9-cis)': 'CAR(18:0)',
-            
-            # Fatty Acids
-            'Stearic Acid': 'SA',
-            'Palmitic Acid': 'PA',
-            'Docosahexaenoic Acid': 'DHA',
-            'Tetracosapentaenoic Acid': 'TPA',
-
-            # Add more mappings as needed for your specific molecules
-
-            # Non-lipids
-            "Glucose": 'Glc',
-            "Lactate": 'Lac',
-
-
-            # Ratio Types
-            'Lipid_to_Protein': 'Lipid/Protein',
-            'Lipid_Unsaturation': 'Lipid Unsat',
-            'Redox': 'ORR',
-        }
-        
-        # Optional: Define custom colors for specific units (hex color codes)
-        # These colors will be used for box plots - professional journal-quality palette
-        # Adjusted Paul Tol's vibrant scheme with requested color shifts
-        # unit_colors = {
-        #     'Glomeruli': '#EC1411',        # Red (shifted from orange)
-        #     'Distal Nephron': '#CCBB22',   # Yellow
-        #     'Distal Tubule': '#EE3377',    # Magenta
-        #     'Proximal Tubule': '#00A43D',  # Green (shifted from teal)
-        #     'Thick Ascending Limb': '#339FEE',  # Cyan
-        #     'Thin Descending Limb': '#002BAA',   # Blue
-        #     'Vasculature': '#EE7733'            # Orange (shifted from purple)
-        # }
-
-
-
-        unit_colors = {
-            "Cluster 1":	"#e8260c",
-            "Cluster 2":	"#0a8416",
-            "Cluster 3":	"#10c922",
-            "Cluster 4":	"#35ee48",
-            "Cluster 5":	"#7af487",
-            "Cluster 6":	"#8b5403",
-            "Cluster 7":	"#fbc573",
-            "Cluster 8":	"#870763",
-            "Cluster 9":	"#f20cb1",
-            "Cluster 10":	"#f777d3",
-            "Cluster 11":	"#ebd409",
-            "Cluster 12":	"#073a87",
-            "Cluster 13":	"#094cb2",
-            "Cluster 14":	"#0b5fdc",
-            "Cluster 15":	"#2275f3",
-            "Cluster 16":	"#4c90f5",
-            "Cluster 17":	"#77aaf7",
-            "Cluster 18":	"#088686",
-            "Cluster 19":	"#0dcccc",
-            "Cluster 20":	"#32f1f1",
-            "Cluster 21":	"#78f6f6",
-            "Cluster 22":	"#5c0b8d",
-            "Cluster 23":	"#8210c9",
-            "Cluster 24":	"#a42ced",
-            "Cluster 25":	"#be68f2",
-            "Cluster 26":	"#7a711e",
-        }
-
-        # unit_colors = {
-        #     "POD": "#e8260c",
-        #     "PT": "#0a8416",
-        #     "TAL": "#EE2DB7",
-        #     "DCT": "#ebd409",
-        #     "PC": "#245bad",
-        # }
-        
-        # Map full unit names (in data) to abbreviated display names (for plots)
-        unit_display_names = {
-            'Glomeruli': 'Glomeruli',
-            'Proximal Tubule': 'Proximal Tubule',
-            'Distal Tubule': 'Distal Tubule',
-            'Thick Ascending Limb': 'Thick Ascending Limb',
-            'Distal Nephron': 'Collecting Duct',
-            'Thin Descending Limb': 'Thin Descending Limb',
-            'Vasculature': 'Vasculature'
-        }
-
-        unit_display_names = {
-            'Cluster 1': "Glomeruli | Podo, CD31",
-            'Cluster 2':	"PT | LRP2",
-            'Cluster 3':	"PT | LRP2, AQP1, CD90",
-            'Cluster 4':	"PT | LRP2, CD90",
-            'Cluster 5':	"PT | LRP2, PROM1/VCAM1+",
-            'Cluster 6':	"TDL | AQP1, Cyto8",
-            'Cluster 7':	"TDL | AQP1, Cyto8",
-            'Cluster 8':	"TAL | NaK/UMOD+",
-            'Cluster 9':	"TAL | UMOD+",
-            'Cluster 10':	"TAL | UMOD+",
-            'Cluster 11':	"DCT | SLC12a3",
-            'Cluster 12':	"CD | Cyto8",
-            'Cluster 13':	"CD | Cyto8+",
-            'Cluster 14':	"CD | Cyto8+",
-            'Cluster 15':	"CD | Cyto8, Bcat",
-            'Cluster 16':	"CD | Cyto8, Bcat, Ecad",
-            'Cluster 17':	"CD | Cyto8, Ecad",
-            'Cluster 18':	"Endothelium | CD31, Podocalyxin",
-            'Cluster 19':	"Endothelium | CD31, Podocalyxin ",
-            'Cluster 20':	"Pericytes | CD90+, CD31 low",
-            'Cluster 21':	"VSMCs | aSMA",
-            'Cluster 22':	"Immune  | CD20 +",
-            'Cluster 23':	"Immune - MP | CD45, CD206",
-            'Cluster 24':	"Immune - T | CD3, CD4",
-            'Cluster 25':	"Immune - T | CD3, CD8",
-            'Cluster 26':	"Interstitial cells | IGFBP7",
-        }
-
-        # unit_display_names = {
-        #     "POD": "POD",
-        #     "PT": "PT",
-        #     "TAL": "TAL",
-        #     "DCT": "DCT",
-        #     "PC": "CD",
-        # }
-
-        
-        # Define custom order for units in heatmaps (x-axis)
-        # Modify this list to change the order units appear in heatmaps
-        bubble_unit_order = [
-            'Vasculature',
-            'Thin Descending Limb',
-            'Thick Ascending Limb',
-            'Proximal Tubule',
-            'Glomeruli',
-            'Distal Tubule',
-            'Distal Nephron',
-        ]
-
-
-        bubble_unit_order = [
-            'Cluster 1',
-            'Cluster 2', 
-            'Cluster 3',
-            'Cluster 4',
-            'Cluster 5',
-            'Cluster 6',
-            'Cluster 7',
-            'Cluster 8',
-            'Cluster 9',
-            'Cluster 10',
-            'Cluster 11',
-            'Cluster 12',
-            'Cluster 13',
-            'Cluster 14',
-            'Cluster 15',
-            'Cluster 16',
-            'Cluster 17',
-            'Cluster 18',
-            'Cluster 19',
-            'Cluster 20',
-            'Cluster 21',
-            'Cluster 22',
-            'Cluster 23',
-            'Cluster 24',
-            'Cluster 25',
-            'Cluster 26'
-        ]
-        heatmap_unit_order = bubble_unit_order.reverse() # Use same order for heatmaps and bubble plots
-
-        # Create plots directory
-        plots_directory = os.path.join(os.path.dirname(base_directory), f'rf_{mask_type}_plots')
-        os.makedirs(plots_directory, exist_ok=True)
-        print(f"\nPlots will be saved to: {plots_directory}")
         if  percentages_df is None:
             try:
                 percentages_df = pd.read_csv(output_csv)
@@ -602,9 +300,7 @@ def main():
         #     )
 
 
-            print("\n" + "="*80)
-            print("GENERATING HEATMAPS")
-            print("="*80)
+            print("\nGENERATING HEATMAPS")
             # Generate unit-aggregated heatmaps for percentages
             percentages_unit_heatmap_dir = os.path.join(plots_directory, 'heatmaps_unit_percentages')
             visualizer.generate_unit_heatmaps(
@@ -634,9 +330,8 @@ def main():
                 cmap = 'RdBu_r'  # Red-Blue colormap for ratios (adjust as needed)
             )
 
-            print("\n" + "="*80)
-            print("GENERATING BUBBLE PLOTS")
-            print("="*80)
+            print("\nGENERATING BUBBLE PLOTS")
+
             percentages_unit_buble_dir = os.path.join(plots_directory, 'bubble_plots_unit_percentages')
             visualizer.generate_unit_bubble_charts(
                 df=percentages_df,
@@ -649,6 +344,7 @@ def main():
                 units_to_display=display_units,
                 unit_display_map=unit_display_names,
                 unit_order=bubble_unit_order,
+                groups_to_display=molecules_to_display,
                 cmap = 'RdBu_r'
             )
 
@@ -664,6 +360,7 @@ def main():
                 units_to_display=display_units,
                 unit_display_map=unit_display_names,
                 unit_order=bubble_unit_order,
+                groups_to_display=ratios_to_display,
                 cmap = 'RdBu_r'
             )
 
@@ -672,9 +369,7 @@ def main():
             # Groups rows by the Sample_Name column (e.g. 'aki', 'ckd', 'ref')
             # and generates a top-10 heatmap + bubble chart for each group.
             # ----------------------------------------------------------------
-            print("\n" + "="*80)
-            print("GENERATING PER-SAMPLE HEATMAPS AND BUBBLE CHARTS")
-            print("="*80)
+            print("\nGENERATING PER-SAMPLE HEATMAPS AND BUBBLE CHARTS")
 
             for df_label, df_iter, val_col, grp_col, dtype in [
                 ('percentages', percentages_df, 'Percentage',  'Molecule',   'percentage'),
@@ -752,9 +447,7 @@ def main():
             print("\nSkipping heatmap generation for ratios: No data available")
 
         # Generate multi-panel box plots for selected molecules/ratios
-        print("\n" + "="*80)
-        print("GENERATING MULTI-PANEL BOX PLOTS")
-        print("="*80)
+        print("\nGENERATING MULTI-PANEL BOX PLOTS")
         
         if percentages_df is not None and not percentages_df.empty:
             # Define molecules to include in multi-panel figure

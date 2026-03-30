@@ -616,7 +616,7 @@ class HSI_Visualizer:
         plt.show()
 
     def apply_rf_masking(self, prediction_csv_path=None, ratio_tiff_path=None, mask_list_path=None, prefix='CODEX', results_per_unit=None, 
-                        regions=None, img_name=None, sample_name=None, classes_to_ignore=None):
+                        regions=None, img_name=None, sample_name=None, classes_to_ignore=None, group_subclasses=False):
         """
         Apply masks and quantify predictions or ratios for each instance.
         
@@ -631,6 +631,7 @@ class HSI_Visualizer:
             img_name: Image name (without extension)
             sample_name: Sample name
             classes_to_ignore: List of class names to ignore in quantification (default: ['Masked', 'Kidney Background', 'No Match'])
+            group_subclasses: If True, consolidates counts of subclasses into their overarching ' Mix' superclass
             
         Returns:
             Dictionary with quantified data per unit and instance
@@ -644,6 +645,7 @@ class HSI_Visualizer:
         # Set default classes to ignore if not provided
         if classes_to_ignore is None:
             classes_to_ignore = ['Masked', 'Kidney Background', 'No Match']
+        classes_to_ignore_set = {cls.strip() for cls in classes_to_ignore}
         
         # Determine mode
         is_prediction_mode = prediction_csv_path is not None
@@ -706,6 +708,8 @@ class HSI_Visualizer:
             
             # Label mask for instance segmentation
             labeled_mask, num_features = ndi.label(mask_img > 0)
+            if num_features == 0:
+                continue
             
             # Minimum instance size threshold (in pixels)
             min_instance_size = 250
@@ -721,12 +725,18 @@ class HSI_Visualizer:
                             region = region_name
                             break
             
-            # Process each instance
-            for label in range(1, labeled_mask.max() + 1):
-                instance_mask = labeled_mask == label
-                
+            # Process each connected component using local bounding boxes
+            # to avoid repeatedly allocating full-image masks.
+            object_slices = ndi.find_objects(labeled_mask)
+            for label, obj_slice in enumerate(object_slices, start=1):
+                if obj_slice is None:
+                    continue
+
+                local_labels = labeled_mask[obj_slice]
+                instance_mask = local_labels == label
+
                 # Check size before dilation
-                instance_size = np.sum(instance_mask)
+                instance_size = int(np.sum(instance_mask))
                 if instance_size < min_instance_size:
                     continue
                 
@@ -734,12 +744,12 @@ class HSI_Visualizer:
                 instance_mask = ndi.binary_dilation(instance_mask, iterations=1)
                 
                 # Check size after dilation
-                if np.sum(instance_mask) < min_instance_size:
+                if int(np.sum(instance_mask)) < min_instance_size:
                     continue
                 
                 if is_prediction_mode:
                     # Quantify predictions - extract class names at mask positions
-                    predictions = data_matrix[instance_mask]
+                    predictions = data_matrix[obj_slice][instance_mask]
                     
                     # Check if we have valid predictions
                     if len(predictions) == 0:
@@ -750,13 +760,37 @@ class HSI_Visualizer:
                     class_counts = {key.strip(): value for key, value in dict(zip(unique_classes, counts)).items()}
                     
                     # Remove ignored classes
-                    for cls in classes_to_ignore:
+                    for cls in classes_to_ignore_set:
                         if cls in class_counts:
                             del class_counts[cls]
+
+                    if group_subclasses:
+                        # Find mix classes available globally or fallback to present classes
+                        if hasattr(self, 'molecule_names') and self.molecule_names is not None:
+                            all_classes = self.molecule_names
+                        else:
+                            all_classes = list(class_counts.keys())
+                            
+                        mix_classes = [c.strip() for c in all_classes if isinstance(c, str) and "Mix" in c]
+                        
+                        for mix_class in mix_classes:
+                            superclass = mix_class.replace(" Mix", "") # e.g., "TAG" from "TAG Mix"
+                            
+                            # Find subclasses present in current predictions that map to this mix class
+                            subclasses = [c for c in class_counts.keys() if superclass in c and c != mix_class]
+                            
+                            if subclasses:
+                                combined_count = class_counts.get(mix_class, 0)
+                                for sub in subclasses:
+                                    combined_count += class_counts[sub]
+                                    del class_counts[sub]
+                                class_counts[mix_class] = combined_count
 
                     total = sum(class_counts.values())
                     if total > 0:
                         pct = {k: (v / total * 100.0) for k, v in class_counts.items()}
+                        
+                        hierarchies = {}
                     else:
                         pct = {k: 0.0 for k in class_counts.keys()}
                     
@@ -769,18 +803,15 @@ class HSI_Visualizer:
                         'region': region
                     }
                     
-                    if unit_name not in results_per_unit:
-                        results_per_unit[unit_name] = [data_entry]
-                    else:
-                        results_per_unit[unit_name].append(data_entry)
+                    results_per_unit.setdefault(unit_name, []).append(data_entry)
                 
                 else:
                     # Quantify ratios
-                    masked_ratio = data_img[instance_mask]
+                    masked_ratio = data_img[obj_slice][instance_mask]
                     
                     # Calculate mean ratio (excluding zeros)
                     non_zero_ratios = masked_ratio[masked_ratio > 0]
-                    if len(non_zero_ratios) > 0:
+                    if non_zero_ratios.size > 0:
                         mean_ratio = np.mean(non_zero_ratios)
                         
                         # Store ratio data
@@ -792,10 +823,7 @@ class HSI_Visualizer:
                             'region': region
                         }
                         
-                        if unit_name not in results_per_unit:
-                            results_per_unit[unit_name] = [ratio_entry]
-                        else:
-                            results_per_unit[unit_name].append(ratio_entry)
+                        results_per_unit.setdefault(unit_name, []).append(ratio_entry)
                     # If no non-zero ratios, skip this instance entirely
         return results_per_unit
     
@@ -836,15 +864,8 @@ class HSI_Visualizer:
         else:
             raise ValueError(f"Unsupported image dimensions: {image.ndim}. Expected 2 or 3.")
         
-        # Create a binary mask for pixels to be masked out
-        mask = np.zeros(pred_matrix.shape, dtype=bool)
-        
-        for class_name in classes_to_mask:
-            # Find pixels belonging to this class
-            class_mask = (pred_matrix == class_name)
-            
-            # Add to overall mask
-            mask = mask | class_mask
+        # Vectorized membership check is faster than repeated OR operations.
+        mask = np.isin(pred_matrix, classes_to_mask)
         
         # Apply mask to image
         # Create a copy to avoid modifying original
@@ -1709,7 +1730,7 @@ class HSI_Visualizer:
         safe_name = group_name.replace('/', '_').replace('\\', '_').replace(' ', '_')
         output_path = os.path.join(output_dir,
                                    f"anova_unit_{data_type}_{safe_name}.svg")
-        plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
+        plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=False)
         
         if show_plots:
             plt.show()
@@ -2188,7 +2209,7 @@ class HSI_Visualizer:
         
         # Save figure
         output_path = os.path.join(output_dir, f"multi_panel_{data_type}_boxplots.svg")
-        plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
+        plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=False)
         
         if show_plots:
             plt.show()
@@ -2296,8 +2317,9 @@ class HSI_Visualizer:
                 
                 heatmap_matrix = filtered_agg_data.pivot(index='Unit', columns='Region', values='z_score')  
                 
-                # Fill missing unit-region combinations with -3 to show as extremely low
-                heatmap_matrix = heatmap_matrix.fillna(0)
+                # Mask 0 or missing values so they render as black
+                raw_matrix = filtered_agg_data.pivot(index='Unit', columns='Region', values='mean')
+                heatmap_matrix = heatmap_matrix.mask((raw_matrix == 0) | raw_matrix.isna(), np.nan)
                 
                 # Store the data
                 heatmap_data[group_value] = {
@@ -2320,6 +2342,7 @@ class HSI_Visualizer:
                 
                 # Create heatmap visualization
                 fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+                ax.set_facecolor('black')
                 
                 # Create heatmap with journal-quality styling
                 sns.heatmap(heatmap_matrix, annot=False, cmap=cmap, 
@@ -2386,7 +2409,7 @@ class HSI_Visualizer:
                 safe_name = group_value.replace('/', '_').replace('\\', '_').replace(' ', '_')
                 output_path = os.path.join(output_dir, 
                                           f"heatmap_normalized_{data_type}_{safe_name}.svg")
-                plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=True)
+                plt.savefig(output_path, dpi=300, bbox_inches='tight', transparent=False)
                 
                 if show_plots:
                     plt.show()
@@ -2894,7 +2917,7 @@ class HSI_Visualizer:
                 ordered_rows = []
                 for unit in unit_order:
                     # Add all rows that start with this unit name
-                    matching_rows = [row for row in all_rows if row.startswith(unit + ' (') or row == unit]
+                    matching_rows = [row for row in all_rows if unit in row]  # Match base unit name before any region
                     ordered_rows.extend(sorted(matching_rows))
                 # Add any remaining rows not in unit_order
                 remaining_rows = [row for row in all_rows if row not in ordered_rows]
@@ -3213,14 +3236,14 @@ class HSI_Visualizer:
 
             bubble_data = {'matrix': heatmap_matrix, 'raw_data': agg_data}
 
-            # --- Figure sizing ---
+            # --- Figure sizing and spacing ---
             n_rows = heatmap_matrix.shape[0]
             n_cols = heatmap_matrix.shape[1]
-            spacing = 0.65  # <1 brings bubbles closer together
-            fig_width = max(6, 0.7 * n_cols * spacing + 2.5)
-            fig_height = max(3, min(10, 0.35 * n_rows * spacing + 2.5))
+            spacing = 0.5  # <1 brings bubbles closer together
+            # Use consistent sizing formula independent of spacing for uniform aspect ratio
+            fig_width = max(6, 0.7 * n_cols + 2.5)
+            fig_height = max(3, min(10, 0.35 * n_rows + 2.5))
 
-            # --- White background figure ---
             fig, ax = plt.subplots(figsize=(fig_width, fig_height))
             fig.patch.set_facecolor('white')
             ax.set_facecolor('white')
@@ -3234,42 +3257,72 @@ class HSI_Visualizer:
             all_z = heatmap_matrix.values.flatten()
             max_abs_z = max(np.abs(all_z).max(), 0.1)
             max_bubble_size = 250
-            min_bubble_size = 10
+            min_bubble_size = 50
 
-            # Get std matrix corresponding to heatmap_matrix
-            std_matrix = agg_data.drop_duplicates(subset=['Unit_Region', grouping_col]).pivot(index='Unit_Region', columns=grouping_col, values='std')
-            std_matrix = std_matrix.reindex(index=heatmap_matrix.index, columns=heatmap_matrix.columns)
-            
             # Get mean matrix to check if value is 0 or nan
             mean_matrix = agg_data.drop_duplicates(subset=['Unit_Region', grouping_col]).pivot(index='Unit_Region', columns=grouping_col, values='mean')
             mean_matrix = mean_matrix.reindex(index=heatmap_matrix.index, columns=heatmap_matrix.columns)
-            
-            all_std = std_matrix.values.flatten()
-            all_std_clean = all_std[~np.isnan(all_std)]
-            max_std = max(all_std_clean.max(), 1e-6) if len(all_std_clean) > 0 else 1e-6
-            min_std = all_std_clean.min() if len(all_std_clean) > 0 else 0
-            
-            # Fill missing with max_std so they get the smallest bubble
-            std_matrix = std_matrix.fillna(max_std)
 
+            # Size bubbles based on 1-vs-rest t-test significance
+            from scipy.stats import ttest_ind
+            
             for row_name in heatmap_matrix.index:
                 for col_name in heatmap_matrix.columns:
                     z = heatmap_matrix.loc[row_name, col_name]
-                    std_val = std_matrix.loc[row_name, col_name]
                     mean_val = mean_matrix.loc[row_name, col_name]
-                    
                     x_val = col_index[col_name]
                     y_val = row_index[row_name]
                     
-                    # Bigger std -> smaller bubble
                     # If the value is 0 or nan, force smallest bubble and color black
                     if pd.isna(mean_val) or mean_val == 0:
                         xs_black.append(x_val)
                         ys_black.append(y_val)
                         sizes_black.append(min_bubble_size)
                     else:
-                        normalized_std = (std_val - min_std) / max(max_std - min_std, 1e-6)
-                        size = min_bubble_size + (1 - normalized_std) * max_bubble_size
+                        # Get the corresponding agg_data row to extract Unit and Region
+                        matching_agg_rows = agg_data[(agg_data['Unit_Region'] == row_name) & 
+                                                      (agg_data[grouping_col] == col_name)]
+                        
+                        if len(matching_agg_rows) == 0:
+                            xs_black.append(x_val)
+                            ys_black.append(y_val)
+                            sizes_black.append(min_bubble_size)
+                            continue
+                        
+                        unit_name = matching_agg_rows.iloc[0]['Unit']
+                        region_name = matching_agg_rows.iloc[0]['Region'] if 'Region' in matching_agg_rows.columns else None
+                        
+                        # Get data for this specific unit_region + molecule
+                        if has_region and region_name is not None:
+                            this_data = df[(df['Unit'] == unit_name) & 
+                                          (df['Region'] == region_name) & 
+                                          (df[grouping_col] == col_name)][value_col].dropna().values
+                            other_data = df[(~((df['Unit'] == unit_name) & (df['Region'] == region_name))) & 
+                                           (df[grouping_col] == col_name)][value_col].dropna().values
+                        else:
+                            this_data = df[(df['Unit'] == unit_name) & 
+                                          (df[grouping_col] == col_name)][value_col].dropna().values
+                            other_data = df[(df['Unit'] != unit_name) & 
+                                           (df[grouping_col] == col_name)][value_col].dropna().values
+                        
+                        # Calculate p-value via t-test
+                        if len(this_data) >= 2 and len(other_data) >= 2:
+                            t_stat, p_val = ttest_ind(this_data, other_data, equal_var=False)
+                            if pd.isna(p_val):
+                                p_val = 1.0
+                        else:
+                            p_val = 1.0
+                        
+                        # Size based on significance
+                        if p_val >= 0.05:
+                            size = min_bubble_size
+                        elif p_val < 0.05 and p_val >= 0.01:
+                            size = 125
+                        elif p_val < 0.01 and p_val >= 0.001:
+                            size = 200
+                        elif p_val < 0.001:
+                            size = 250
+                        
                         xs.append(x_val)
                         ys.append(y_val)
                         sizes.append(size)
@@ -3338,7 +3391,31 @@ class HSI_Visualizer:
             ax.set_xlim(-spacing * 0.5, (n_cols - 1) * spacing + spacing * 0.5)
             ax.set_ylim(-spacing * 0.5, (n_rows - 1) * spacing + spacing * 0.5)
 
+
+            # --- Save significance legend as separate SVG ---
+            from matplotlib.lines import Line2D
+            significance_legend_elements = [
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=5,
+                label='p ≥ 0.05', markeredgecolor='black', linewidth=0.5),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=8,
+                label='p < 0.05', markeredgecolor='black', linewidth=0.5),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=10,
+                label='p < 0.01', markeredgecolor='black', linewidth=0.5),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=12,
+                label='p < 0.001', markeredgecolor='black', linewidth=0.5),
+            ]
+            legend_fig, legend_ax = plt.subplots(figsize=(2.5, 1.2))
+            legend = legend_ax.legend(handles=significance_legend_elements, loc='center', frameon=True, fontsize=11, title='Significance', title_fontsize=12, ncol=2)
+            legend.get_frame().set_facecolor('white')
+            legend.get_frame().set_alpha(0.95)
+            legend_ax.axis('off')
+            legend_svg_path = os.path.join(output_dir, f"bubble_significance_legend.svg")
+            legend_fig.savefig(legend_svg_path, dpi=300, bbox_inches='tight', facecolor='white')
+            plt.close(legend_fig)
+
             plt.tight_layout()
+
+            # plt.tight_layout()
 
             output_path = os.path.join(output_dir, f"bubble_unit_aggregated_{data_type}.svg")
             plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
@@ -3401,8 +3478,13 @@ class HSI_Visualizer:
             else:
                 agg_data = clean_df.groupby(['Unit', grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
             
-            # Create bubble chart
-            fig, ax = plt.subplots(figsize=(10, 6))
+            # --- Figure sizing ---
+            n_units = len(agg_data['Unit'].unique())
+            n_ratios = len(agg_data[grouping_col].unique())
+            # Use consistent sizing formula for uniform aspect ratio
+            fig_width = max(3, 0.7 * n_units + 2.5)
+            fig_height = max(3, min(10, 0.35 * n_ratios + 2.5))
+            fig, ax = plt.subplots(figsize=(fig_width, fig_height))
             
             # Get unique units and ratio types
             units = sorted(agg_data['Unit'].unique())
@@ -3422,34 +3504,59 @@ class HSI_Visualizer:
             global_mean = agg_data['mean'].mean()
             global_max = agg_data['mean'].max()
             
-            all_std_clean = agg_data['std'].dropna()
-            max_std = all_std_clean.max() if not all_std_clean.empty else 1e-6
-            min_std = all_std_clean.min() if not all_std_clean.empty else 0
-            max_std = max(max_std, 1e-6)
-            
             # Plot bubbles
+            from scipy.stats import ttest_ind
             for _, row in agg_data.iterrows():
-                x = unit_pos[row['Unit']]
-                y = ratio_pos[row[grouping_col]]
+                unit_name = row['Unit']
+                ratio_type = row[grouping_col]
+                x = unit_pos[unit_name]
+                y = ratio_pos[ratio_type]
                 value = row['mean']
-                std_val = row['std']
                 
-                # Bubble size proportional to std (bigger std -> smaller bubble)
-                if pd.isna(std_val) or pd.isna(value) or value == 0:
+                # Sizing by significance (1-vs-rest t-test)
+                if pd.isna(value) or value == 0:
                     size = 50
                 else:
-                    normalized_std = (std_val - min_std) / max(max_std - min_std, 1e-6)
-                    size = 50 + (1 - normalized_std) * 250
+                    unit_data = clean_df[(clean_df['Unit'] == unit_name) & (clean_df[grouping_col] == ratio_type)][value_col].dropna().values
+                    other_data = clean_df[(clean_df['Unit'] != unit_name) & (clean_df[grouping_col] == ratio_type)][value_col].dropna().values
+                    
+                    if len(unit_data) >= 2 and len(other_data) >= 2:
+                        t_stat, p_val = ttest_ind(unit_data, other_data, equal_var=False)
+                        if pd.isna(p_val):
+                            p_val = 1.0
+                    else:
+                        p_val = 1.0
+                        
+                    if p_val >= 0.05:
+                        size = 50  # Base size for non-significant
+                    if p_val < 0.05 and p_val >= 0.01:
+                        size = 125  # Medium size for p < 0.05
+                    elif p_val < 0.01 and p_val >= 0.001:
+                        size = 200  # Larger size for p < 0.01
+                    elif p_val < 0.001:
+                        size = 250  # Largest size for p < 0.001
+
+                    # else:
+                    #     p_val = max(p_val, 1e-10)
+                    #     p_score = -np.log10(p_val)
+                    #     min_score = -np.log10(0.05)
+                    #     max_score = 10.0
+                    #     normalized_score = min(max((p_score - min_score) / (max_score - min_score), 0), 1)
+                    #     # Size ranges from 100 to 450 based on significance
+                    #     size = 100 + (normalized_score * 350)
                 
                 # Color gradient based on value relative to mean
                 if pd.isna(value) or value == 0:
                     color = 'black'
+                    bubble_alpha = 1.0
                 elif value > global_mean:
                     color = '#d62728'  # Red for above mean
+                    bubble_alpha = 0.6
                 else:
                     color = '#1f77b4'  # Blue for below mean
+                    bubble_alpha = 0.6
                 
-                ax.scatter(x, y, s=size, c=color, alpha=0.6, edgecolors='black', linewidth=1)
+                ax.scatter(x, y, s=size, c=color, alpha=bubble_alpha, edgecolors='black', linewidth=1)
             
             # Set axis labels and ticks
             ax.set_xticks(range(len(units)))
@@ -3477,20 +3584,44 @@ class HSI_Visualizer:
             ax.set_ylabel('Ratio Type', fontweight='bold', fontsize=16)
             ax.set_title('Raw Ratio Values', fontweight='bold', fontsize=18, pad=20)
             
-            # Add legend
+            # Add legend for color (above/below mean)
             from matplotlib.lines import Line2D
             legend_elements = [
-                Line2D([0], [0], marker='o', color='w', markerfacecolor='#d62728', 
-                      markersize=10, alpha=0.6, label='Above Mean', markeredgecolor='black'),
-                Line2D([0], [0], marker='o', color='w', markerfacecolor='#1f77b4', 
-                      markersize=10, alpha=0.6, label='Below Mean', markeredgecolor='black')
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='#d62728', 
+                markersize=10, alpha=0.6, label='Above Mean', markeredgecolor='black'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='#1f77b4', 
+                markersize=10, alpha=0.6, label='Below Mean', markeredgecolor='black')
             ]
-            ax.legend(handles=legend_elements, loc='upper right', frameon=True, fontsize=12)
-            
+            legend1 = ax.legend(handles=legend_elements, loc='upper right', frameon=True, fontsize=12,
+                    title='Value Relative to Mean', title_fontsize=12)
+            legend1.get_frame().set_facecolor('white')
+            legend1.get_frame().set_alpha(0.95)
+
+
+            # --- Save significance legend as separate SVG ---
+            significance_legend_elements = [
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=5,
+                label='p ≥ 0.05', markeredgecolor='black', linewidth=0.5),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=8,
+                label='p < 0.05', markeredgecolor='black', linewidth=0.5),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=10,
+                label='p < 0.01', markeredgecolor='black', linewidth=0.5),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=12,
+                label='p < 0.001', markeredgecolor='black', linewidth=0.5),
+            ]
+            legend_fig, legend_ax = plt.subplots(figsize=(2.5, 1.2))
+            legend = legend_ax.legend(handles=significance_legend_elements, loc='center', frameon=True, fontsize=11, title='Significance', title_fontsize=12, ncol=2)
+            legend.get_frame().set_facecolor('white')
+            legend.get_frame().set_alpha(0.95)
+            legend_ax.axis('off')
+            legend_svg_path = os.path.join(output_dir, f"bubble_significance_legend.svg")
+            legend_fig.savefig(legend_svg_path, dpi=300, bbox_inches='tight', facecolor='white')
+            plt.close(legend_fig)
+
             # Grid
             ax.grid(True, alpha=0.3, linestyle='--')
             ax.set_axisbelow(True)
-            
+
             plt.tight_layout()
             
             # Save figure

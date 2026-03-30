@@ -196,7 +196,7 @@ class HSI_Classifier:
             self.output_base = output_base
 
 
-    def predict(self, generate_shap=True, shap_n_samples=500, shap_background=100, alpha=None):
+    def predict(self, generate_shap=True, shap_n_samples=500, shap_background=100, alpha=None, max_shift=10):
         """
         Perform classifier inference by processing each image individually.
         
@@ -221,6 +221,7 @@ class HSI_Classifier:
         predictions = []
         probabilities = []
         self.alpha = alpha
+        self.max_shift = max_shift  
 
         if generate_shap:
             shap_global_results = []
@@ -252,24 +253,26 @@ class HSI_Classifier:
 
             # Visualize image spectra
             def predict_chunk(chunk):
+                # Only call predict_proba to avoid double inference overhead
                 probs = self.model.predict_proba(chunk)
-                preds = self.model.predict(chunk)
+                # Derive predictions from probabilities instead of calling predict() separately
+                preds = self.model.classes_[np.argmax(probs, axis=1)]
                 return preds, probs
             
             # Split data into chunks for parallel processing
-            chunk_size = 100000  # Adjust based on memory
+            # Reduced from 100k to handle memory constraints with threading overhead
+            chunk_size = 25000  # Smaller chunks to reduce memory per thread
             n_chunks = int(np.ceil(len(image_spectra) / chunk_size))
             chunks = np.array_split(image_spectra, n_chunks)
             
-            # Process chunks in parallel with progress bar
-            with tqdm(total=n_chunks, desc="Processing chunks in parallel") as pbar:
-                def update_progress(*a):
+            # Process chunks sequentially to avoid memory overhead from parallel threads
+            # Use threading only if memory becomes available; for now sequential is more stable
+            results = []
+            with tqdm(total=n_chunks, desc="Processing chunks") as pbar:
+                for chunk in chunks:
+                    result = predict_chunk(chunk)
+                    results.append(result)
                     pbar.update(1)
-                    return None
-                    
-                results = Parallel(n_jobs=-1, backend="threading")(
-                    delayed(predict_chunk)(chunk) for chunk in chunks
-                )
             
             # Combine results
             img_preds = np.concatenate([r[0] for r in results])
@@ -297,8 +300,8 @@ class HSI_Classifier:
                     background_samples=shap_background,
                     n_samples=shap_n_samples,
                     approximate=True,
-                    shap_batch_size=1000,
-                    n_jobs=-1
+                    shap_batch_size=500,  # Reduced from 1000 for memory efficiency
+                    n_jobs=1  # Sequential processing to avoid threading overhead
                 )
                 shap_global_results.append(shap_results)
 
@@ -456,6 +459,16 @@ class HSI_Classifier:
         weighted_probs = np.zeros_like(img_probs)
         chunk_size = 100000  # Adjust based on memory
         n_chunks = int(np.ceil(n_pixels / chunk_size))
+        
+        def compute_sam_weights(query_spectra, reference_spectra):
+            q_n = query_spectra / (np.linalg.norm(query_spectra, axis=1, keepdims=True) + 1e-10)
+            r_n = reference_spectra / (np.linalg.norm(reference_spectra, axis=1, keepdims=True) + 1e-10)
+            
+            similarity = np.dot(q_n, r_n.T)
+            cos_sim_matrix = np.clip(similarity, -1, 1)
+            thetas = np.arccos(cos_sim_matrix)
+            sam_weights = 1 - (thetas / np.pi)
+            return sam_weights
 
         for i in tqdm(range(n_chunks), desc="Standardize, SAM, and weight in chunks"):
             start_idx = i * chunk_size
@@ -480,7 +493,7 @@ class HSI_Classifier:
             # Apply weights to probabilities
             weighted_prob_chunk = np.zeros_like(prob_chunk)
             for j in range(prob_chunk.shape[1]):
-                weighted_prob_chunk[:, j] = prob_chunk[:, j] * self.alpha * aligned_sam_weights_chunk[:, j % aligned_sam_weights_chunk.shape[1]]
+                weighted_prob_chunk[:, j] = prob_chunk[:, j] * (1 + self.alpha * aligned_sam_weights_chunk[:, j % aligned_sam_weights_chunk.shape[1]])
             weighted_probs[start_idx:end_idx] = weighted_prob_chunk
         weighted_probs = np.nan_to_num(weighted_probs, nan=0.0)
         return weighted_probs

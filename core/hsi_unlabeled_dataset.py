@@ -29,7 +29,17 @@ class HSI_Unlabeled_Dataset(Dataset):
         self.wavenumber_start = wavenumber_start
         self.wavenumber_end = wavenumber_end
         self.num_samples = num_samples
-        self.img_list = glob.glob(os.path.join(img_dir, '*.tif'))
+        # Find image files with both .tif and .tiff extensions.
+        # On case-insensitive file systems (e.g., Windows), multiple glob
+        # patterns can match the same file path, so deduplicate by normalized path.
+        discovered_paths = []
+        for ext in ['*.tif', '*.tiff', '*.TIF', '*.TIFF']:
+            discovered_paths.extend(glob.glob(os.path.join(img_dir, ext)))
+
+        unique_paths = {}
+        for path in discovered_paths:
+            unique_paths[os.path.normcase(os.path.normpath(path))] = path
+        self.img_list = sorted(unique_paths.values())
         self.ch_start = ch_start
         self.image_normalization = image_normalization
         self.min_max_normalization = min_max_normalization

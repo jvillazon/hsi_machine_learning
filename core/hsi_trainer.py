@@ -141,52 +141,41 @@ class HSI_Trainer:
         if verbose:
             end_time = time.time()
         
-        # Train and validation predictions (with optional SAM weighting)
+        # Train and validation predictions (with optional Windowed SAM weighting)
         try:
-            if kwargs['sam_weighting'] and 'alpha' in kwargs:
+            if kwargs.get('sam_weighting') and 'alpha' in kwargs:
 
                 def compute_sam_weights(query_spectra, reference_spectra):
                     """
                     Compute Spectral Angle Mapper (SAM) similarity weights between query and reference spectra.
-                    
-                    Args:
-                        query_spectra: numpy array of shape (n_query, n_features)
-                        reference_spectra: numpy array of shape (n_reference, n_features)
-                        
-                    Returns:
-                        sam_weights: numpy array of shape (n_query, n_reference) containing SAM-based weights
-                    """
+                    """ 
                     # Normalize spectra
                     query_norm = query_spectra / (np.linalg.norm(query_spectra, axis=1, keepdims=True) + 1e-10)  # Add small value to avoid division by zero
                     ref_norm = reference_spectra / (np.linalg.norm(reference_spectra, axis=1, keepdims=True) + 1e-10)
                     
                     # Compute cosine similarity via dot product
                     similarity = np.dot(query_norm, ref_norm.T)
-                    
-                    # Clip to valid range and compute spectral angle
                     cos_sim_matrix = np.clip(similarity, -1, 1)
                     thetas = np.arccos(cos_sim_matrix)
                     
-                    # Convert angles to weights (smaller angle = higher weight)
-                    # Normalized to [0, 1] where 1 is perfect match
                     sam_weights = 1 - (thetas / np.pi)
-                    
                     return sam_weights
 
                 # If SAM weights are provided, apply them to the validation predictions
                 self.alpha = kwargs['alpha']
                 self.reference_libray_array, label_array = self.dataset.get_reference()
+                
                 aligned_val_weights = compute_sam_weights(self.X_val, self.reference_libray_array)
                 aligned_train_weights = compute_sam_weights(self.X_train, self.reference_libray_array)
 
                 # Get base predictions and probabilities
                 val_probs = self.active_model.predict_proba(self.X_val)
-                aligned_weights = aligned_val_weights[:, self.model.classes_]  # Align SAM weights with model's class order
+                aligned_weights = aligned_val_weights[:, self.model.classes_]  # Align weights with model's class order
                 weighted_val_probs = val_probs * (1 + self.alpha * aligned_weights)  # Simple weighting scheme
                 val_pred = self.model.classes_[np.argmax(weighted_val_probs, axis=1)]
 
                 train_prob = self.active_model.predict_proba(self.X_train)
-                aligned_train_weights = aligned_train_weights[:, self.model.classes_]  # Align SAM weights with model's class order
+                aligned_train_weights = aligned_train_weights[:, self.model.classes_]  # Align weights with model's class order
                 weighted_train_probs = train_prob * (1 + self.alpha * aligned_train_weights)
                 train_pred = self.model.classes_[np.argmax(weighted_train_probs, axis=1)]
             else:
@@ -377,9 +366,19 @@ class HSI_Trainer:
             test_pred = self.active_model.predict(X_test)
 
             if self.reference_libray_array is not None:
-                # If SAM weights were used during training, apply them to test predictions
+                # If weights were used during training, apply them to test predictions
                 test_probs = self.active_model.predict_proba(X_test)
-                aligned_test_weights = compute_sam_weights(X_test, self.reference_libray_array)[:, self.model.classes_]
+                def temp_compute_sam(query_spectra, reference_spectra):
+                    q_n = query_spectra / (np.linalg.norm(query_spectra, axis=1, keepdims=True) + 1e-10)
+                    r_n = reference_spectra / (np.linalg.norm(reference_spectra, axis=1, keepdims=True) + 1e-10)
+                    
+                    similarity = np.dot(q_n, r_n.T)
+                    cos_sim_matrix = np.clip(similarity, -1, 1)
+                    thetas = np.arccos(cos_sim_matrix)
+                    sam_weights = 1 - (thetas / np.pi)
+                    return sam_weights
+
+                aligned_test_weights = temp_compute_sam(X_test, self.reference_libray_array)[:, self.model.classes_]
                 weighted_test_probs = test_probs * (1 + self.alpha * aligned_test_weights)  
                 test_pred = self.model.classes_[np.argmax(weighted_test_probs, axis=1)]
             else:

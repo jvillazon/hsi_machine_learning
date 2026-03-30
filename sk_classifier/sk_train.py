@@ -35,19 +35,19 @@ def main():
         'Random Forest': {
             'model_class': RandomForestClassifier,
             'parameters': {
-                'n_estimators': 123,
-                'min_samples_leaf': 3,
-                'min_samples_split': 7,
-                'max_depth': 30
+                'n_estimators': 150,
+                'min_samples_leaf': 9,
+                'min_samples_split': 2,
+                'max_depth': 40
             },
         },
-        'SVM': {
-            'model_class': SVC,
-            'parameters': {
-                'C': 1.0,
-                'kernel': 'rbf',
-            }
-        }
+        # 'SVM': {
+        #     'model_class': SVC,
+        #     'parameters': {
+        #         'C': 1.0,
+        #         'kernel': 'rbf',
+        #     }
+        # }
     }
 
     def create_model(model_name, config):
@@ -59,7 +59,7 @@ def main():
     # Train baseline RF for comparison
     rf_model = create_model('Random Forest', model_configurations['Random Forest'])
     rf_trainer = HSI_Trainer(model=rf_model, dataset=dataset, model_type='sklearn')
-    rf_results = rf_trainer.train_sklearn_classifier(train_ratio=0.7, val_ratio=0.15, verbose=True, sam_weighting=True, alpha=1.33, use_platt=True)
+    rf_results = rf_trainer.train_sklearn_classifier(train_ratio=0.7, val_ratio=0.15, verbose=True, sam_weighting=True, alpha=10, use_platt=True)
 
     print("Training completed.")
     print("Training results:")
@@ -73,7 +73,7 @@ def main():
 
     
     # Save model
-    model_name = 'rf_best_model'
+    model_name = 'rf_best_model_cos_sim'
     rf_trainer.save(f'rf/models/{model_name}.joblib')
 
     # Train baseline SVM for comparison
@@ -114,15 +114,6 @@ def main():
     print("\nConfusion matrices saved to:")
     print("  - plots/rf_confusion_matrix.png")
     print("  - plots/rf_confusion_matrix_normalized.png")
-
-    # Save model
-    model_name = 'rf_best_model'
-    rf_trainer.save(f'rf/models/{model_name}.joblib')
-
-    # Display output
-    print("=" * 80)
-    print("\nSaved models:")
-    print(f"  - rf/models/{model_name}.joblib")
 
 if __name__ == "__main__":
     main()

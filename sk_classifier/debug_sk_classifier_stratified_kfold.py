@@ -238,8 +238,8 @@ def main():
         sam_weights = sam_weights_full[:, calibrated_clf.classes_]  # (n_val, n_classes)
 
         # 6. Apply SAM weights to calibrated probabilities
-        alpha = 1.33
-        weighted_probs = probs * (sam_weights ** alpha)
+        alpha = 10.0
+        weighted_probs = probs * (1 + alpha * sam_weights)
         weighted_probs = np.nan_to_num(weighted_probs, nan=0.0)
 
         # Final predictions after applying SAM weights
