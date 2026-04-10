@@ -1,17 +1,18 @@
 {
   "profile_name": "Kidney Functional Units (7 cell types)",
   "description": "Configuration for kidney tissue analysis with major nephron segments",
-  
   "processing_options": {
     "perform_RF_classification": false,
     "perform_masking": false,
     "display_plots": true
   },
-  
   "dataset_parameters": {
     "mask_type": "CODEX_FTUcells_masks",
-    "regions": ["Cortex", "Medulla"],
-    "display_units": [
+    "subgroups": [
+      "Cortex",
+      "Medulla"
+    ],
+    "display_units_maps": [
       "Glomeruli",
       "Proximal Tubule",
       "Thick Ascending Limb",
@@ -42,7 +43,6 @@
     ],
     "ratios_to_display": null
   },
-  
   "display_names": {
     "16:0 Cardiolipin": "CL 16:0",
     "PC Mix": "PC",
@@ -89,7 +89,6 @@
     "Lipid_Unsaturation": "Lipid Unsat",
     "Redox": "ORR"
   },
-  
   "unit_mappings": {
     "glom": "Glomeruli",
     "proxtub": "Proximal Tubule",
@@ -99,7 +98,6 @@
     "tdl": "Thin Descending Limb",
     "vasc": "Vasculature"
   },
-  
   "unit_colors": {
     "Glomeruli": "#EC1411",
     "Proximal Tubule": "#00A43D",
@@ -109,7 +107,6 @@
     "Thin Descending Limb": "#002BAA",
     "Vasculature": "#EE7733"
   },
-  
   "unit_display_names": {
     "Glomeruli": "Glomeruli",
     "Proximal Tubule": "Proximal Tubule",
@@ -119,7 +116,6 @@
     "Thin Descending Limb": "Thin Descending Limb",
     "Vasculature": "Vasculature"
   },
-  
   "heatmap_unit_order": [
     "Glomeruli",
     "Proximal Tubule",
@@ -129,17 +125,23 @@
     "Thin Descending Limb",
     "Vasculature"
   ],
-  
-  "multi_panel_config": {
-    "selected_molecules": [
-      "18:1 Cholesterol ester",
-      "AG 16:0",
-      "PC Mix",
-      "16:0 Cardiolipin"
+  "sample_analysis_config": {
+    "granularity_levels": [
+      [
+        "Source_ID"
+      ],
+      [
+        "Group_ID"
+      ]
     ],
-    "selected_ratios": [
-      "Redox",
-      "Lipid_Unsaturation"
-    ]
+    "selected_values": null,
+    "filter_col": null
+  },
+  "individual_plot_config": {
+    "create_individual_plots": true,
+    "selected_molecules": "All",
+    "selected_ratios": "All",
+    "compare_by": "Group_ID",
+    "consolidate_Group_IDs": false
   }
 }

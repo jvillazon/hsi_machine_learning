@@ -15,7 +15,7 @@ base_directory = "/Users/jorgevillazon/Documents/files/codex-srs/HuBMAP .tif fil
 
 class HSI_Unlabeled_Dataset(Dataset):
     def __init__(self, img_dir, ch_start, transform=None, image_normalization=False, min_max_normalization=False,
-                 wavenumber_start=2700, wavenumber_end=3100, num_samples=61):
+                 wavenumber_start=2700, wavenumber_end=3100, num_samples=61, compute_stats=True):
         """
         Initialize HSI Dataset
         Args:
@@ -25,10 +25,12 @@ class HSI_Unlabeled_Dataset(Dataset):
             wavenumber_start: Starting wavenumber for molecule dataset (default 2700)
             wavenumber_end: Ending wavenumber for molecule dataset (default 3100)
             num_samples: Number of samples in wavenumber range (default 61)
+            compute_stats: Whether to compute global normalization stats (expensive scan)
         """
         self.wavenumber_start = wavenumber_start
         self.wavenumber_end = wavenumber_end
         self.num_samples = num_samples
+        self.compute_stats = compute_stats
         # Find image files with both .tif and .tiff extensions.
         # On case-insensitive file systems (e.g., Windows), multiple glob
         # patterns can match the same file path, so deduplicate by normalized path.
@@ -74,24 +76,54 @@ class HSI_Unlabeled_Dataset(Dataset):
                 # Store image shape for  ion
                 height, width = image.shape[-2], image.shape[-1]
 
-                # Reshape to (wavenumbers, pixels)
-                img_data = image.reshape(image.shape[0], -1).T
-                img_data = np.flip(img_data, axis=1).astype(np.float32)
-
-                if self.min_max_normalization:
-                    # Compute pixel-specific min and max for normalization
-                    image_min = np.mean(img_data[:,:self.ch_start], axis=1, keepdims=True)
-                    image_max = np.max(img_data, axis=1, keepdims=True)
-                    self.image_normalization = False  # Disable image normalization if min-max is used
-                elif self.image_normalization:
-                    # Compute image min and max for normalization
-                    img_data = img_data - np.mean(img_data[:,:self.ch_start], axis=1, keepdims=True)
-                    image_min = 0 # np.median(img_data[:,:self.ch_start]) --- IGNORE ---
-                    image_max = np.mean(img_data) + 3*np.std(img_data)   # robust global max estimate
-                else:
-                    # Image normalization disabled
-                    image_min = None
-                    image_max = None
+                # Check if we need to compute global statistics
+                image_min = None
+                image_max = None
+                
+                if self.compute_stats:
+                    # Use a chunked approach for statistics calculation to save memory
+                    n_pixels = height * width
+                    chunk_size = 1000000  # 1 million pixels per chunk
+                    
+                    # We'll calculate the mean of the silent region (image_min) 
+                    # and the global mean/std for robust max (image_max)
+                    sum_silent = 0.0
+                    sum_all = 0.0
+                    sum_sq_all = 0.0
+                    
+                    # Reshape memmap to (channels, pixels) for linear chunking
+                    # Note: memmap.reshape is generally safe as it doesn't load whole data into RAM
+                    image_flat = image.reshape(image.shape[0], -1)
+                    
+                    print(f"  Calculating statistics in chunks for {os.path.basename(img_path)}...")
+                    for start_p in range(0, n_pixels, chunk_size):
+                        end_p = min(start_p + chunk_size, n_pixels)
+                        # Load chunk from flattened memmap: shape (channels, chunk_size)
+                        chunk = image_flat[:, start_p:end_p].T
+                        # Convert to float32 and flip wavenumbers
+                        chunk = np.flip(chunk, axis=1).astype(np.float32)
+                        
+                        # Update silent region statistic
+                        sum_silent += np.sum(np.mean(chunk[:, :self.ch_start], axis=1))
+                        
+                        # Update global statistics for mean/std
+                        sum_all += np.sum(chunk)
+                        sum_sq_all += np.sum(chunk**2)
+                    
+                    avg_silent = sum_silent / n_pixels
+                    global_mean = sum_all / (n_pixels * image.shape[0])
+                    global_std = np.sqrt((sum_sq_all / (n_pixels * image.shape[0])) - (global_mean**2))
+                    
+                    if self.min_max_normalization:
+                        # In this mode, we previously used pixel-wise min/max which is very slow/memory-intensive
+                        # For consistency with the requested fix, we'll store the scalar averages
+                        image_min = avg_silent
+                        image_max = global_mean + 3 * global_std
+                        self.image_normalization = False
+                    elif self.image_normalization:
+                        # image_min is scalar subtracted from everything
+                        image_min = avg_silent
+                        image_max = global_mean + 3 * global_std
                     
                 self.image_stats[img_path] = {
                     'image_min': image_min,
@@ -100,7 +132,7 @@ class HSI_Unlabeled_Dataset(Dataset):
                     'pixel_size_y': pixel_size_y,
                     'height': height,
                     'width': width,
-                    'start_idx': current_size  # Store starting index for this image
+                    'start_idx': current_size
                 }
             else:
                 size = 0
@@ -171,22 +203,30 @@ class HSI_Unlabeled_Dataset(Dataset):
         # Flip spectra if needed (depending on dataset orientation)
         image_spectra = np.flip(image_spectra, axis=1).astype(np.float32)
 
-        if self.image_normalization:
-            # Get the min/max from entire image
-            image_spectra = image_spectra - np.mean(image_spectra[:,:self.ch_start], axis=1, keepdims=True)
-            image_min = self.image_stats[img_path]['image_min']
-            image_max = self.image_stats[img_path]['image_max']
-            # Normalize using per-wavenumber min/max
-            image_spectra = (image_spectra - image_min) / (image_max - image_min + 1e-6)
-        
-        if self.min_max_normalization:
-            # Get channel min/max values for this image
+        if self.image_normalization or self.min_max_normalization:
+            # Get the min/max from stored image stats
             stats = self.image_stats[img_path]
             image_min = stats['image_min']
             image_max = stats['image_max']
-        
-            # Normalize using per-wavenumber min/max
-            image_spectra = (image_spectra - image_min) / (image_max - image_min + 1e-6)
+            
+            # Step 1: Mean center the silent region in-place
+            # This is equivalent to spectra - mean(silent)
+            silent_mean = np.mean(image_spectra[:, :self.ch_start], axis=1, keepdims=True)
+            image_spectra -= silent_mean
+            
+            # Step 2: Normalize by range in-place
+            # Final formula: (spectra - image_min) / (range + 1e-6)
+            # Since we already subtracted silent_mean, we might need to adjust image_min 
+            # but in this implementation image_min is actually the avg_silent from __init__,
+            # so subtracting silent_mean effectively sets the baseline.
+            
+            # Actually, to follow the original logic exactly:
+            # spectra = spectra - mean(silent)
+            # spectra = (spectra - 0) / (image_max - 0 + 1e-6)  [if image_min was 0]
+            
+            denom = (image_max - image_min + 1e-6)
+            # image_spectra already has silent region at ~0
+            image_spectra /= denom
         
         return image_spectra  # Return as (n_pixels, n_wavenumbers)
     

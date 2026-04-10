@@ -57,9 +57,10 @@ Each profile is a JSON file in the `configs/` directory with the following secti
   "dataset_parameters": {
     "mask_type": "CODEX_clusters_masks",
     "regions": ["Cortex", "Medulla"],
-    "display_units": null,
+    "display_units_maps": null,
     "molecules_to_display": [...],
-    "ratios_to_display": null
+    "ratios_to_display": null,
+    "display_units_boxplots": [...]
   }
 }
 ```

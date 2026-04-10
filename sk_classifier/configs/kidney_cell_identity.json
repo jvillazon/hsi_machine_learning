@@ -1,24 +1,62 @@
 {
   "profile_name": "Kidney Xenium Cell Identity (45 cell types)",
   "description": "Configuration for kidney tissue analysis with Xenium cell identity classification",
-  
   "processing_options": {
     "perform_RF_classification": false,
-    "perform_masking": true,
+    "perform_masking": false,
     "display_plots": true
   },
-  
   "dataset_parameters": {
     "mask_type": "Xenium_cells_masks",
     "regions": null,
-    "display_units": [
+    "display_units_maps": [
       "POD",
       "PT",
-      "TAL",
+      "CNT",
       "DCT",
-      "PC"
+      "TAL",
+      "DTL",
+      "ATL",
+      "IC",
+      "PC",
+      "PEC",
+      "MD",
+      "FIB",
+      "infFIB",
+      "pvFIB",
+      "EC",
+      "EC-GC",
+      "altPOD",
+      "altPT",
+      "altCNT",
+      "altDCT",
+      "altTAL",
+      "altDTL",
+      "altATL",
+      "altIC",
+      "aFIB",
+      "B",
+      "DC",
+      "MON",
+      "N",
+      "NK",
+      "PL",
+      "T",
+      "MAC",
+      "resMAC",
+      "moMAC",
+      "moMAC-INF",
+      "MAST",
+      "Lymphoid",
+      "Myeloid",
+      "NEU",
+      "SC/NEU",
+      "MC",
+      "MYOF",
+      "REN",
+      "VSM/P",
+      "Unassigned"
     ],
-
     "molecules_to_display": [
       "16:0 Cardiolipin",
       "PC Mix",
@@ -41,7 +79,6 @@
     ],
     "ratios_to_display": null
   },
-  
   "display_names": {
     "16:0 Cardiolipin": "CL 16:0",
     "PC Mix": "PC",
@@ -88,8 +125,7 @@
     "Lipid_Unsaturation": "Lipid Unsat",
     "Redox": "ORR"
   },
-  
-  "unit_mappings" : {
+  "unit_mappings": {
     "altpt": "altPT",
     "altdtl": "altDTL",
     "pt": "PT",
@@ -137,31 +173,62 @@
     "mc": "MC",
     "pdc": "PDC"
   },
-  
-  "unit_colors" : {
+  "unit_colors": {
     "POD": "#e8260c",
     "PT": "#0a8416",
     "TAL": "#EE2DB7",
     "DCT": "#ebd409",
     "PC": "#245bad"
   },
-  
-  "unit_display_names": {
-    "POD": "Podocytes",
-    "PT": "Proximal Tubule",
-    "TAL": "Thick Ascending Limb",
-    "DCT": "Distal Tubule",
-    "PC": "Principal Cells"
-  },
-  
+  "unit_display_names": null,
   "heatmap_unit_order": [
-    "Podocytes",
-    "Proximal Tubule",
-    "Distal Tubule",
-    "Principal Cells",
-    "Thick Ascending Limb"
+    "POD",
+    "PT",
+    "CNT",
+    "DCT",
+    "TAL",
+    "DTL",
+    "ATL",
+    "IC",
+    "PC",
+    "PEC",
+    "MD",
+    "FIB",
+    "infFIB",
+    "pvFIB",
+    "EC",
+    "EC-GC",
+    "altPOD",
+    "altPT",
+    "altCNT",
+    "altDCT",
+    "altTAL",
+    "altDTL",
+    "altATL",
+    "altIC",
+    "aFIB",
+    "B",
+    "DC",
+    "MON",
+    "N",
+    "NK",
+    "PL",
+    "T",
+    "MAC",
+    "resMAC",
+    "moMAC",
+    "moMAC-INF",
+    "MAST",
+    "Lymphoid",
+    "Myeloid",
+    "NEU",
+    "SC/NEU",
+    "MC",
+    "MYOF",
+    "REN",
+    "VSM/P",
+    "Unassigned"
   ],
-  
   "multi_panel_config": {
     "selected_molecules": [
       "18:1 Cholesterol ester",
@@ -173,5 +240,35 @@
       "Redox",
       "Lipid_Unsaturation"
     ]
+  },
+  "sample_analysis_config": {
+    "per_sample_analysis": true,
+    "selected_samples": null,
+    "type_mapping": {
+      "ref": "ref",
+      "aki": "aki",
+      "ckd": "ckd"
+    },
+    "compare_order": [
+      "ref",
+      "aki",
+      "ckd"
+    ]
+  },
+  "individual_plot_config": {
+    "create_individual_plots": true,
+    "selected_molecules": [
+      "16:0 Cardiolipin",
+      "C8 L-Carnitine",
+      "C12 Carnitine",
+      "C16 Carnitine",
+      "C18 Carnitine (d9-cis)"
+    ],
+    "selected_ratios": [
+      "Redox",
+      "Lipid_Unsaturation"
+    ],
+    "figure_width": 5.0,
+    "figure_height": 5.0
   }
 }

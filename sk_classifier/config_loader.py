@@ -64,9 +64,10 @@ def apply_config(config: Dict[str, Any]) -> tuple:
     Returns:
         Tuple of all configuration variables in order:
         (perform_RF_classification, perform_masking, display_plots,
-         mask_type, regions, display_units, molecules_to_display, ratios_to_display,
-         display_names, unit_colors, unit_display_names, heatmap_unit_order,
-         selected_molecules, selected_ratios)
+         mask_type, subgroups, display_units_maps, molecules_to_display, ratios_to_display,
+         display_names, unit_mappings, unit_colors, unit_display_names, heatmap_unit_order,
+         selected_molecules, selected_ratios, display_units_boxplots, 
+         individual_plot_config, sample_analysis_config)
     """
     # Processing options
     proc_opts = config.get("processing_options", {})
@@ -76,11 +77,12 @@ def apply_config(config: Dict[str, Any]) -> tuple:
     
     # Dataset parameters
     dataset_params = config.get("dataset_parameters", {})
-    mask_type = dataset_params.get("mask_type", "CODEX_clusters_masks")
-    regions = dataset_params.get("regions", ["Cortex", "Medulla"])
-    display_units = dataset_params.get("display_units", None)
+    mask_type = dataset_params.get("mask_type", "Mask")
+    subgroups = dataset_params.get("subgroups",  None)
+    display_units_maps = dataset_params.get("display_units_maps", None)
     molecules_to_display = dataset_params.get("molecules_to_display", None)
     ratios_to_display = dataset_params.get("ratios_to_display", None)
+    display_units_boxplots = dataset_params.get("display_units_boxplots", None)
     
     # Display configuration
     display_names = config.get("display_names", {})
@@ -88,16 +90,23 @@ def apply_config(config: Dict[str, Any]) -> tuple:
     unit_display_names = config.get("unit_display_names", {})
     heatmap_unit_order = config.get("heatmap_unit_order", [])
     
-    # Multi-panel config
-    multi_panel = config.get("multi_panel_config", {})
-    selected_molecules = multi_panel.get("selected_molecules", [])
-    selected_ratios = multi_panel.get("selected_ratios", [])
+    # Individual plot config
+    individual_plot_config = config.get("individual_plot_config", {})
+    selected_molecules = individual_plot_config.get("selected_molecules", [])
+    selected_ratios = individual_plot_config.get("selected_ratios", [])
+
+    # Unit mappings config
+    unit_mappings = config.get("unit_mappings", {})
     
+    # Sample analysis config
+    sample_analysis_config = config.get("sample_analysis_config", {})
+
     return (
         perform_RF_classification, perform_masking, display_plots,
-        mask_type, regions, display_units, molecules_to_display, ratios_to_display,
-        display_names, unit_colors, unit_display_names, heatmap_unit_order,
-        selected_molecules, selected_ratios
+        mask_type, subgroups, display_units_maps, molecules_to_display, ratios_to_display,
+        display_names, unit_mappings, unit_colors, unit_display_names, heatmap_unit_order,
+        selected_molecules, selected_ratios, display_units_boxplots,
+        individual_plot_config, sample_analysis_config
     )
 
 
@@ -122,5 +131,14 @@ def print_config_info(profile_name: str = "kidney_clusters") -> None:
             print(f"  {key}: {len(val)} molecules")
         else:
             print(f"  {key}: {val}")
+    # print(f"\nIndividual Plot Configuration:")
+    # individual_config = config.get("individual_plot_config", {})
+    # if individual_config:
+    #     for key, val in individual_config.items():
+    #         if isinstance(val, list):
+    #             print(f"  {key}: {val}")
+    #         else:
+    #             print(f"  {key}: {val}")
+    # else:
+    #     print(f"  (not configured)")
     print(f"\nUnits: {len(config.get('unit_colors', {}))}")
-    print(f"Heatmap order: {len(config.get('heatmap_unit_order', []))} units")

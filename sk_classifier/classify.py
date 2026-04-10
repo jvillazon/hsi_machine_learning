@@ -3,8 +3,6 @@ import os
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
-import tifffile
-import warnings
 from glob import glob
 
 import sys 
@@ -24,7 +22,7 @@ def main():
     # ========================================================================
     # Available profiles: 'kidney_clusters' (default), 'kidney_nephron'
     # Change this to switch between different configurations
-    PROFILE = 'kidney_ftu'  # Update with desired profile name (without .json extension)
+    PROFILE = 'kidney_clusters'  # Update with desired profile name (without .json extension)
     
     # Print available profiles on first run
     print(f"Available configuration profiles:")
@@ -38,10 +36,30 @@ def main():
     
     # Apply configuration - unpack all settings
     (perform_RF_classification, perform_masking, display_plots,
-     mask_type, regions, display_units, molecules_to_display, ratios_to_display,
-     display_names, unit_colors, unit_display_names, heatmap_unit_order,
-     selected_molecules, selected_ratios) = apply_config(config)
+     mask_type, subgroups, display_units_maps, molecules_to_display, ratios_to_display,
+     display_names, unit_mappings, unit_colors, unit_display_names, heatmap_unit_order,
+     selected_molecules, selected_ratios, display_units_boxplots,
+     individual_plot_config, sample_analysis_config) = apply_config(config)
     
+    display_units_boxplots = ["Cluster2", "Cluster3", "Cluster4", "Cluster5"]
+
+    if display_units_boxplots:
+        display_units_boxplots_type = f"{display_units_boxplots[0]}-{display_units_boxplots[-1]}"
+    
+
+    if display_units_boxplots:
+        print("Currently selected boxplot units:")
+        for i, unit in enumerate(display_units_boxplots):
+            dname = unit_display_names.get(unit, unit)
+            print(f"  {i+1}. {unit}: {dname}")
+    else:
+        print("No specific units designated - will default to all available units.")
+
+    # Extract analysis granularity settings
+    granularity_levels = sample_analysis_config.get('granularity_levels', [])
+    selected_values = sample_analysis_config.get('selected_values', None) # Renamed from selected_samples to be agnostic
+    filter_col = sample_analysis_config.get('filter_col', 'Source_ID') # Allow specifying the filter column
+
     # Derive bubble_unit_order as reverse of heatmap order
     bubble_unit_order = heatmap_unit_order[::-1]
     
@@ -50,7 +68,7 @@ def main():
     # ========================================================================
 
     # Define dataset parameters (these could also be moved to the config if desired)
-    base_directory = r"D:\integrated_pipeline\HSI_data\data"
+    base_directory = r"D:\integrated_pipeline\registered_data\CODEX\data"
     wn_1 = 2700  # Starting wavenumber (inclusive)
     wn_2 = 3100  # Ending wavenumber (inclusive)
     num_samp = 61
@@ -67,7 +85,7 @@ def main():
         wavenumber_end=wn_2,
         num_samples=num_samp
     )
-    plots_directory = os.path.join(os.path.dirname(base_directory), f'{chosen_model_name}_{mask_type}_plots')
+    plots_directory = os.path.join(os.path.dirname(base_directory), f'{chosen_model_name}_{mask_type}_S21_plots')
 
     # Create dataset with specified wavenumber range
     dataset = HSI_Unlabeled_Dataset(
@@ -79,6 +97,7 @@ def main():
         num_samples=num_samp,
         wavenumber_start=wn_1,
         wavenumber_end=wn_2,
+        compute_stats=perform_RF_classification
     )
     
     labeled_dataset = HSI_Labeled_Dataset(
@@ -140,38 +159,34 @@ def main():
                 ratio_folder = os.path.join(os.path.dirname(base_directory), 'Ratio', img_name_no_ext)
                 
                                 
-                # Read original predictions CSV once
-                if not os.path.exists(csv_path):
-                    print(f"Prediction CSV not found for {img_name}: {csv_path}")
-                    continue
+
                 
                 # Check if mask folder exists
                 if not os.path.exists(mask_folder):
                     print(f"Mask folder not found for {img_name}: {mask_folder}")
                     continue
 
-                
-                # Extract sample name
-                sample_name = img_name.split('-')[0] if '-' in img_name else img_name_no_ext
-                
                 # Process predictions with masks
                 try:
-                    pred_results = visualizer.apply_rf_masking(
-                        prediction_csv_path=csv_path,
-                        mask_list_path=mask_folder,
-                        regions=regions,
-                        img_name=img_name_no_ext,
-                        sample_name=sample_name,
-                        prefix=mask_prefix,
-                        group_subclasses=True
-                    )
+                    # Read original predictions CSV once
+                    if not os.path.exists(csv_path):
+                        print(f"\nPrediction CSV not found for {img_name}: {csv_path}")
+                    else:
+                        pred_results = visualizer.apply_rf_masking(
+                            prediction_csv_path=csv_path,
+                            mask_list_path=mask_folder,
+                            subgroups=subgroups,
+                            img_name=img_name_no_ext,
+                            prefix=mask_prefix,
+                            group_subclasses=True
+                        )
                     
-                    # Merge results into predictions_per_unit
-                    for unit_name, entries in pred_results.items():
-                        if unit_name not in predictions_per_unit:
-                            predictions_per_unit[unit_name] = entries
-                        else:
-                            predictions_per_unit[unit_name].extend(entries)
+                        # Merge results into predictions_per_unit
+                        for unit_name, entries in pred_results.items():
+                            if unit_name not in predictions_per_unit:
+                                predictions_per_unit[unit_name] = entries
+                            else:
+                                predictions_per_unit[unit_name].extend(entries)
                 except Exception as e:
                     print(f"Failed to process predictions for {img_name}: {e}")
                 
@@ -185,9 +200,8 @@ def main():
                             ratio_results = visualizer.apply_rf_masking(
                                 ratio_tiff_path=ratio_tiff_path,
                                 mask_list_path=mask_folder,
-                                regions=regions,
+                                subgroups=subgroups,
                                 img_name=img_name_no_ext,
-                                sample_name=sample_name,
                                 prefix=mask_prefix
                             )
                             
@@ -202,9 +216,7 @@ def main():
         
         # Calculate percentages
         if predictions_per_unit:
-            # Note: unit_mappings is not used in the current config system
-            # To implement unit mappings, add them to your config JSON file
-            percentages_df = visualizer.quantify_unit_class_percentages_nested(predictions_per_unit, unit_mappings=None)
+            percentages_df = visualizer.quantify_unit_class_percentages_nested(predictions_per_unit, unit_mappings=unit_mappings)
         
             # Display summary
             print("\nPercentages DataFrame (first 10 rows):")
@@ -218,9 +230,7 @@ def main():
         
         # Calculate mean ratios
         if ratios_per_unit:
-            # Note: unit_mappings is not used in the current config system
-            # To implement unit mappings, add them to your config JSON file
-            ratios_df = visualizer.quantify_unit_ratio_means_nested(ratios_per_unit, unit_mappings=None)
+            ratios_df = visualizer.quantify_unit_ratio_means_nested(ratios_per_unit, unit_mappings=unit_mappings)
             
             # Display summary
             print("\nMean Ratios DataFrame (first 10 rows):")
@@ -246,61 +256,58 @@ def main():
                 print(f"\nLoaded mean ratios DataFrame from {os.path.basename(output_ratio_csv)}")
         except Exception as e:
             print(f"Failed to load mean ratios DataFrame: {e}")
+    # --- Optional Data Filtering ---
+    # Apply global filters defined in config
+    if selected_values is not None and filter_col:
+        for df in [percentages_df, ratios_df]:
+            if df is not None and filter_col in df.columns:
+                df = df[df[filter_col].isin(selected_values)].copy()
+                print(f"  Applied global filter: {filter_col} in {selected_values}")
+    
+    # --- S21-Anchored Unit Filtering ---
+    # Filter both dataframes to only include units that have presence in S21
+    anchor_source = 'S21'
+    if ratios_df is not None and 'Source_ID' in ratios_df.columns:
+        unit_counts = ratios_df[ratios_df['Source_ID'] == anchor_source]['Unit'].value_counts() 
+        s21_units = unit_counts[unit_counts > 10].index.tolist()
+        
+        if len(s21_units) > 0:
+            # Anchor units (keep units from S21, include their S24 data if it exists)
+            if percentages_df is not None:
+                percentages_df = percentages_df[percentages_df['Unit'].isin(s21_units)].copy()
+                print(f"  Unit-level filter: Kept {len(s21_units)} units that exist in {anchor_source} (percentages)")
+            
+            if ratios_df is not None:
+                # 1. Prioritize S21 for Redox (Remove non-S21 Redox entries)
+                # redox_mask = (ratios_df['Ratio_Type'] == 'Redox') #& (ratios_df['Source_ID'] != anchor_source)
+                # ratios_df = ratios_df[~redox_mask].copy()
+                
+                # 2. Re-anchor Ratio units (keep units from S21)
+                ratios_df = ratios_df[ratios_df['Unit'].isin(s21_units)].copy()
+                print(f"  Unit-level filter: Kept units that exist in {anchor_source} for ratios")
+                print(f"  Item-level filter: Redox analysis restricted to {anchor_source} only")
+        else:
+            print(f"  Warning: No data found for anchor source {anchor_source}. Skipping unit-anchored filtering.")
 
     # Display statistical significance plots if enabled
     if display_plots:
+        # Extract individual plot settings early to avoid UnboundLocalError in granularity loop
+        create_individual_plots = individual_plot_config.get('create_individual_plots', True)
+        individual_molecules = individual_plot_config.get('selected_molecules', "All")
+        individual_ratios = individual_plot_config.get('selected_ratios', "All")
+
         if  percentages_df is None:
             try:
                 percentages_df = pd.read_csv(output_csv)
                 print(f"\nLoaded percentages DataFrame from {os.path.basename(output_csv)}")
             except Exception as e:
-                print(f"Failed to load percentages DataFrame: {e}")
-        
-        if ratios_df is None:
-            if os.path.exists(output_ratio_csv):
-                try:
-                    if os.path.exists(output_ratio_csv):
-                        ratios_df = pd.read_csv(output_ratio_csv)
-                        print(f"\nLoaded mean ratios DataFrame from {os.path.basename(output_ratio_csv)}")
-                except Exception as e:
-                    print(f"Failed to load mean ratios DataFrame: {e}")
-                    ratios_df = None
+                print(f"Failed to load data DataFrame: {e}")
 
-            
-        # Perform one-way ANOVA comparing units for percentages_df
         if percentages_df is not None and not percentages_df.empty:
-        #     print("\n" + "="*80)
-        #     print("GENERATING BOX PLOTS AND PERFORMING ONE-WAY ANOVA")
-        #     print("="*80)
-        #     percentages_unit_dir = os.path.join(plots_directory, 'anova_unit_percentages')
-        #     percentages_unit_results = visualizer.one_way_anova_unit_comparison(
-        #         df=percentages_df,
-        #         value_col='Percentage',
-        #         grouping_col='Molecule',
-        #         output_dir=percentages_unit_dir,
-        #         data_type='percentage',
-        #         show_plots=False,  # Set to True to display plots interactively
-        #         display_name_map=display_names,
-        #         unit_color_map=unit_colors,
-        #         unit_display_map=unit_display_names
-        #     )
+            print("\n================================================================================")
+            print("GENERATING HEATMAPS")
+            print("================================================================================ ")
 
-        # if ratios_df is not None and not ratios_df.empty:
-        #     ratios_unit_dir = os.path.join(plots_directory, 'anova_unit_ratios')
-        #     ratios_unit_results = visualizer.one_way_anova_unit_comparison(
-        #         df=ratios_df,
-        #         value_col='Mean_Ratio',
-        #         grouping_col='Ratio_Type',
-        #         output_dir=ratios_unit_dir,
-        #         data_type='ratio',
-        #         show_plots=False,  # Set to True to display plots interactively
-        #         display_name_map=display_names,
-        #         unit_color_map=unit_colors,
-        #         unit_display_map=unit_display_names
-        #     )
-
-
-            print("\nGENERATING HEATMAPS")
             # Generate unit-aggregated heatmaps for percentages
             percentages_unit_heatmap_dir = os.path.join(plots_directory, 'heatmaps_unit_percentages')
             visualizer.generate_unit_heatmaps(
@@ -311,11 +318,12 @@ def main():
                 data_type='percentage',
                 show_plots=False,
                 display_name_map=display_names,
-                units_to_display=display_units,
+                units_to_display=display_units_maps,
                 unit_display_map=unit_display_names,
                 unit_order=heatmap_unit_order,
                 cmap= 'RdBu_r'  # Red-Blue colormap for percentages
             )
+        if ratios_df is not None and not ratios_df.empty:
             visualizer.generate_unit_heatmaps(
                 df=ratios_df,
                 value_col='Mean_Ratio',
@@ -324,30 +332,33 @@ def main():
                 data_type='ratio',
                 show_plots=False,
                 display_name_map=display_names,
-                units_to_display=display_units,
+                units_to_display=display_units_maps,
                 unit_display_map=unit_display_names,
                 unit_order=heatmap_unit_order,
                 cmap = 'RdBu_r'  # Red-Blue colormap for ratios (adjust as needed)
             )
 
-            print("\nGENERATING BUBBLE PLOTS")
-
+        print("\n================================================================================")
+        print("GENERATING BUBBLE PLOTS")
+        print("================================================================================ ")
+        if percentages_df is not None and not percentages_df.empty:
             percentages_unit_buble_dir = os.path.join(plots_directory, 'bubble_plots_unit_percentages')
             visualizer.generate_unit_bubble_charts(
                 df=percentages_df,
                 value_col='Percentage',
                 grouping_col='Molecule',
-                output_dir=percentages_unit_buble_dir,
-                data_type='percentage',
-                show_plots=False,
-                display_name_map=display_names,
-                units_to_display=display_units,
-                unit_display_map=unit_display_names,
-                unit_order=bubble_unit_order,
-                groups_to_display=molecules_to_display,
-                cmap = 'RdBu_r'
-            )
+            output_dir=percentages_unit_buble_dir,
+            data_type='percentage',
+            show_plots=False,
+            display_name_map=display_names,
+            units_to_display=display_units_maps,
+            unit_display_map=unit_display_names,
+            unit_order=bubble_unit_order,
+            groups_to_display=molecules_to_display,
+            cmap = 'RdBu_r'
+        )
 
+        if ratios_df is not None and not ratios_df.empty:
             ratios_unit_buble_dir = os.path.join(plots_directory, 'bubble_plots_unit_ratios')
             visualizer.generate_unit_bubble_charts(
                 df=ratios_df,
@@ -357,19 +368,37 @@ def main():
                 data_type='ratio',
                 show_plots=False,
                 display_name_map=display_names,
-                units_to_display=display_units,
+                units_to_display=display_units_maps,
                 unit_display_map=unit_display_names,
                 unit_order=bubble_unit_order,
                 groups_to_display=ratios_to_display,
                 cmap = 'RdBu_r'
             )
 
-            # ----------------------------------------------------------------
-            # Per-sample heatmaps and bubble charts
-            # Groups rows by the Sample_Name column (e.g. 'aki', 'ckd', 'ref')
-            # and generates a top-10 heatmap + bubble chart for each group.
-            # ----------------------------------------------------------------
-            print("\nGENERATING PER-SAMPLE HEATMAPS AND BUBBLE CHARTS")
+
+            ratios_raw_bubble_dir = os.path.join(plots_directory, 'bubble_chart_raw_ratios')
+            raw_ratio_bubble_data = visualizer.generate_raw_ratio_bubble_chart(
+                df=ratios_df,
+                value_col='Mean_Ratio',
+                grouping_col='Ratio_Type',
+                output_dir=ratios_raw_bubble_dir,
+                show_plots=False,
+                display_name_map=display_names,
+                units_to_display=display_units_maps,
+                unit_display_map=unit_display_names,
+                unit_order=bubble_unit_order
+            )
+        else:
+            print("\nSkipping bubble chart generation for ratios: No data available")
+
+        # ----------------------------------------------------------------
+        # Multi-Granularity Analysis
+        # Generates plots based on configurations like ["Sample_Name"], ["Group_ID"], etc.
+        # ----------------------------------------------------------------
+        if granularity_levels:
+            print("\n================================================================================")
+            print("GENERATING MULTI-GRANULARITY HEATMAPS AND BUBBLE CHARTS")
+            print("================================================================================ ")  
 
             for df_label, df_iter, val_col, grp_col, dtype in [
                 ('percentages', percentages_df, 'Percentage',  'Molecule',   'percentage'),
@@ -377,121 +406,235 @@ def main():
             ]:
                 if df_iter is None or df_iter.empty:
                     continue
-                if 'Sample_Name' not in df_iter.columns:
-                    print(f"  Sample_Name column not found in {df_label} DataFrame, skipping.")
-                    continue
+                
+                # Global filter if provided (redundant check if already applied above, but keeps loop robust)
+                if selected_values is not None and filter_col in df_iter.columns:
+                    df_iter = df_iter[df_iter[filter_col].isin(selected_values)].copy()
 
-                unique_samples = sorted(df_iter['Sample_Name'].dropna().unique())
-                print(f"\nFound {len(unique_samples)} sample group(s) in {df_label}: {unique_samples}")
-
-                for sname in unique_samples:
-                    sample_df = df_iter[df_iter['Sample_Name'] == sname].copy()
-                    if sample_df.empty:
+                for group_cols in granularity_levels:
+                    # Check if all columns exist
+                    cols_to_use = [c for c in group_cols if c in df_iter.columns]
+                    if not cols_to_use:
+                        print(f"  Skipping granularity level {group_cols} (columns not found)")
                         continue
-                    print(f"  Sample '{sname}': {len(sample_df)} records")
+                    
+                    print(f"\n  Analyzing granularity: {cols_to_use}")
+                    
+                    # Find unique combinations of the specified columns
+                    combinations = df_iter[cols_to_use].drop_duplicates().values
+                    
+                    for combo in combinations:
+                        # Create mask for this combination
+                        mask = True
+                        combo_parts = []
+                        for i, col in enumerate(cols_to_use):
+                            val = combo[i]
+                            mask &= (df_iter[col] == val) if pd.notna(val) else df_iter[col].isna()
+                            combo_parts.append(str(val))
+                        
+                        subset_df = df_iter[mask].copy()
+                        if subset_df.empty:
+                            continue
+                            
+                        # Flat name for folder and titles
+                        combo_str = "_".join(combo_parts)
+                        print(f"    Processing grouping: {combo_str} ({len(subset_df)} records)")
 
-                    _groups = molecules_to_display if grp_col == 'Molecule' else ratios_to_display
+                        level_folder = "_".join(cols_to_use)
+                        output_dir_base = os.path.join(plots_directory, f'granularity_{df_label}', level_folder, combo_str)
+                        
+                        _groups = molecules_to_display if grp_col == 'Molecule' else ratios_to_display
 
-                    # Heatmap
-                    visualizer.generate_unit_heatmaps(
-                        df=sample_df,
-                        value_col=val_col,
-                        grouping_col=grp_col,
-                        output_dir=os.path.join(plots_directory, f'per_sample_heatmaps_{df_label}', sname),
-                        data_type=dtype,
-                        top_n=10,
-                        groups_to_display=_groups,
-                        show_plots=False,
-                        display_name_map=display_names,
-                        units_to_display=display_units,
-                        unit_display_map=unit_display_names,
-                        unit_order=heatmap_unit_order,
-                        cmap='RdBu_r'
-                    )
+                        # Heatmap
+                        visualizer.generate_unit_heatmaps(
+                            df=subset_df,
+                            value_col=val_col,
+                            grouping_col=grp_col,
+                            output_dir=os.path.join(output_dir_base, 'heatmaps'),
+                            data_type=dtype,
+                            top_n=10,
+                            groups_to_display=_groups,
+                            show_plots=False,
+                            display_name_map=display_names,
+                            units_to_display=display_units_maps,
+                            unit_display_map=unit_display_names,
+                            unit_order=heatmap_unit_order,
+                            cmap='RdBu_r'
+                        )
 
-                    # Bubble chart
-                    visualizer.generate_unit_bubble_charts(
-                        df=sample_df,
-                        value_col=val_col,
-                        grouping_col=grp_col,
-                        output_dir=os.path.join(plots_directory, f'per_sample_bubble_plots_{df_label}', sname),
-                        data_type=dtype,
-                        top_n=10,
-                        groups_to_display=_groups,
-                        show_plots=False,
-                        display_name_map=display_names,
-                        units_to_display=display_units,
-                        unit_display_map=unit_display_names,
-                        unit_order=bubble_unit_order,
-                        cmap = 'RdBu_r'
-                    )
+                        # Bubble chart
+                        visualizer.generate_unit_bubble_charts(
+                            df=subset_df,
+                            value_col=val_col,
+                            grouping_col=grp_col,
+                            output_dir=os.path.join(output_dir_base, 'bubble_plots'),
+                            data_type=dtype,
+                            top_n=10,
+                            groups_to_display=_groups,
+                            show_plots=False,
+                            display_name_map=display_names,
+                            units_to_display=display_units_maps,
+                            unit_display_map=unit_display_names,
+                            unit_order=bubble_unit_order,
+                            cmap='RdBu_r'
+                        )
 
+                        # Individual Bar Plots
+                        if create_individual_plots and len(cols_to_use) == 1:
+                            # Determine items to plot based on the config selection
+                            if df_label == 'percentages':
+                                items_to_plot = individual_plot_config.get('selected_molecules', 'All')
+                            else:
+                                items_to_plot = individual_plot_config.get('selected_ratios', 'All')
+
+                            print(f"    Generating individual bar plots for {combo_str} (Unit-level comparison)")
+                            visualizer.create_individual_barplots(
+                                df=subset_df,
+                                value_col=val_col,
+                                grouping_col=grp_col,
+                                items_list=items_to_plot,
+                                output_dir=os.path.join(output_dir_base, f'individual_bar_{display_units_boxplots_type}_plots'),
+                                data_type=dtype,
+                                show_plots=False,
+                                display_name_map=display_names,
+                                unit_color_map=unit_colors,
+                                unit_display_map=unit_display_names,
+                                units_to_display=display_units_boxplots,
+                                compare_by=None,  # Consolidate: No compare_by for granularity subfolders
+                                compare_order=None,
+                                consolidate_Group_IDs=individual_plot_config.get('consolidate_Group_IDs', True)
+                            )
         else:
-            print("\nSkipping unit comparison ANOVA for percentages: No data available")
-        
-        # Generate raw (non-normalized) ratio heatmap
-        if ratios_df is not None and not ratios_df.empty:
-            ratios_raw_heatmap_dir = os.path.join(plots_directory, 'heatmap_raw_ratios')
-            raw_ratio_heatmap_data = visualizer.generate_raw_ratio_heatmap(
-                df=ratios_df,
-                value_col='Mean_Ratio',
-                grouping_col='Ratio_Type',
-                output_dir=ratios_raw_heatmap_dir,
-                show_plots=False,
-                display_name_map=display_names,
-                units_to_display=display_units,
-                unit_display_map=unit_display_names,
-                unit_order=heatmap_unit_order
-            )
-        else:
-            print("\nSkipping heatmap generation for ratios: No data available")
+            print("\nSkipping granularity analysis (no levels defined in config)")
+    
+    # Generate individual box plots for selected molecules/ratios
+    print("\n================================================================================")
+    print("GENERATING INDIVIDUAL BOX PLOTS")
+    print("================================================================================")
+    
+    if create_individual_plots:
 
-        # Generate multi-panel box plots for selected molecules/ratios
-        print("\nGENERATING MULTI-PANEL BOX PLOTS")
-        
-        if percentages_df is not None and not percentages_df.empty:
-            # Define molecules to include in multi-panel figure
-            selected_molecules = ['18:1 Cholesterol ester', 'AG 16:0',
-                                'PC Mix', '16:0 Cardiolipin']
-            
-            multi_panel_percentages_dir = os.path.join(plots_directory, 'multi_panel_percentages')
-            visualizer.create_multi_panel_boxplots(
+        if percentages_df is not None and not percentages_df.empty and individual_molecules:
+            percentages_output_dir = os.path.join(plots_directory, f'individual_bar_plots_{display_units_boxplots_type}_percentages')
+
+            # percentages_individual_dir = os.path.join(plots_directory, 'individual_percentages')
+            # print("\nCreating individual plots for percentages...")
+            # visualizer.create_individual_boxplots(
+            #     df=percentages_df,
+            #     value_col='Percentage',
+            #     grouping_col='Molecule',
+            #     items_list=individual_molecules,
+            #     output_dir=percentages_individual_dir,
+            #     data_type='percentage',
+            #     figure_width=individual_figure_width,
+            #     figure_height=individual_figure_height,
+            #     show_plots=False,
+            #     display_name_map=display_names,
+            #     unit_color_map=unit_colors,
+            #     unit_display_map=unit_display_names,
+            #     units_to_display=display_units_boxplots,
+            #     compare_by='Sample_Type' if sample_compare_order else None,
+            #     compare_order=sample_compare_order if sample_compare_order else None,
+            #     consolidate_Group_IDs=True
+            # )
+            # print(f"\nGenerated individual box plots for percentages in {percentages_individual_dir}")
+
+            print("\nCreating individual bar plots for percentages...")
+            visualizer.create_individual_barplots(
                 df=percentages_df,
                 value_col='Percentage',
                 grouping_col='Molecule',
-                molecules_list=selected_molecules,
-                nrows=2,
-                ncols=2,
-                output_dir=multi_panel_percentages_dir,
+                items_list=individual_molecules,
+                output_dir=percentages_output_dir,
                 data_type='percentage',
                 show_plots=False,
                 display_name_map=display_names,
                 unit_color_map=unit_colors,
-                # unit_display_map=unit_display_names
+                unit_display_map=unit_display_names,
+                units_to_display=display_units_boxplots,
+                compare_by=individual_plot_config.get('compare_by', None),
+                compare_order=individual_plot_config.get('compare_order', None),
+                consolidate_Group_IDs=individual_plot_config.get('consolidate_Group_IDs', True)
             )
-            print(f"\nGenerated multi-panel box plots for percentages in {multi_panel_percentages_dir}")
+            visualizer.create_individual_barplots(
+                df=percentages_df,
+                value_col='Percentage',
+                grouping_col='Molecule',
+                items_list=individual_molecules,
+                output_dir=percentages_output_dir,
+                data_type='percentage',
+                show_plots=False,
+                display_name_map=display_names,
+                unit_color_map=unit_colors,
+                unit_display_map=unit_display_names,
+                units_to_display=display_units_boxplots,
+                compare_by=None,
+                compare_order=None,
+                consolidate_Group_IDs=individual_plot_config.get('consolidate_Group_IDs', True)
+            )
+            print(f"Generated individual bar plots for percentages")
         
-        if ratios_df is not None and not ratios_df.empty:
-            # Define ratio types to include in multi-panel figure
-            selected_ratios = ['Redox', 'Lipid_Unsaturation']
-            
-            multi_panel_ratios_dir = os.path.join(plots_directory, 'multi_panel_ratios')
-            visualizer.create_multi_panel_boxplots(
+        if ratios_df is not None and not ratios_df.empty and individual_ratios:
+            ratios_output_dir = os.path.join(plots_directory, f'individual_bar_plots_{display_units_boxplots_type}_ratios')
+            # ratios_individual_dir = os.path.join(plots_directory, 'individual_ratios')
+            # print("\nCreating individual plots for ratios...")
+            # visualizer.create_individual_boxplots(
+            #     df=ratios_df,
+            #     value_col='Mean_Ratio',
+            #     grouping_col='Ratio_Type',
+            #     items_list=individual_ratios,
+            #     output_dir=ratios_individual_dir,
+            #     data_type='ratio',
+            #     figure_width=individual_figure_width,
+            #     figure_height=individual_figure_height,
+            #     show_plots=False,
+            #     display_name_map=display_names,
+            #     unit_color_map=unit_colors,
+            #     unit_display_map=unit_display_names,
+            #     units_to_display=display_units_boxplots,
+            #     compare_by='Sample_Type' if sample_compare_order else None,
+            #     compare_order=sample_compare_order if sample_compare_order else None,
+            #     consolidate_Group_IDs=True
+            # )
+            # print(f"\nGenerated individual box plots for ratios in {ratios_individual_dir}")
+            print("\nCreating individual bar plots for ratios...")
+            visualizer.create_individual_barplots(
                 df=ratios_df,
                 value_col='Mean_Ratio',
                 grouping_col='Ratio_Type',
-                molecules_list=selected_ratios,
-                nrows=1,
-                ncols=2,
-                output_dir=multi_panel_ratios_dir,
+                items_list=individual_ratios,
+                output_dir=ratios_output_dir,
                 data_type='ratio',
                 show_plots=False,
                 display_name_map=display_names,
                 unit_color_map=unit_colors,
-                # unit_display_map=unit_display_names
+                unit_display_map=unit_display_names,
+                units_to_display=display_units_boxplots,
+                compare_by=individual_plot_config.get('compare_by', None),
+                compare_order=individual_plot_config.get('compare_order', None),
+                consolidate_Group_IDs=individual_plot_config.get('consolidate_Group_IDs', True),
+                
             )
-            print(f"\nGenerated multi-panel box plots for ratios in {multi_panel_ratios_dir}")
-
+            visualizer.create_individual_barplots(
+                df=ratios_df,
+                value_col='Mean_Ratio',
+                grouping_col='Ratio_Type',
+                items_list=individual_ratios,
+                output_dir=ratios_output_dir,
+                data_type='ratio',
+                show_plots=False,
+                display_name_map=display_names,
+                unit_color_map=unit_colors,
+                unit_display_map=unit_display_names,
+                units_to_display=display_units_boxplots,
+                compare_by=None,
+                compare_order=None,
+                consolidate_Group_IDs=individual_plot_config.get('consolidate_Group_IDs', True),
+                
+            )
+            print(f"Generated individual bar plots for ratios")
+    else:
+        print("Individual plot configuration disabled")
 
 if __name__ == "__main__":
     main()

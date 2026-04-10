@@ -1,17 +1,14 @@
 {
   "profile_name": "Kidney Clusters (26 cell types)",
   "description": "Configuration for kidney tissue analysis with 26 clusters",
-  
   "processing_options": {
     "perform_RF_classification": false,
-    "perform_masking": true,
+    "perform_masking": false,
     "display_plots": true
   },
-  
   "dataset_parameters": {
     "mask_type": "CODEX_clusters_masks",
-    "regions": ["Cortex", "Medulla"],
-    "display_units": null,
+    "display_units_maps": null,
     "molecules_to_display": [
       "16:0 Cardiolipin",
       "PC Mix",
@@ -32,9 +29,16 @@
       "Docosahexaenoic Acid",
       "Tetracosapentaenoic Acid"
     ],
-    "ratios_to_display": null
+    "ratios_to_display": null,
+    "display_units_boxplots": [
+      "Cluster12",
+      "Cluster13",
+      "Cluster14",
+      "Cluster15",
+      "Cluster16",
+      "Cluster17"
+    ]
   },
-  
   "display_names": {
     "16:0 Cardiolipin": "CL 16:0",
     "PC Mix": "PC",
@@ -81,7 +85,6 @@
     "Lipid_Unsaturation": "Lipid Unsat",
     "Redox": "ORR"
   },
-  
   "unit_mappings": {
     "cluster1": "Cluster1",
     "cluster2": "Cluster2",
@@ -110,36 +113,34 @@
     "cluster25": "Cluster25",
     "cluster26": "Cluster26"
   },
-  
   "unit_colors": {
-    "Cluster 1": "#e8260c",
-    "Cluster 2": "#0a8416",
-    "Cluster 3": "#10c922",
-    "Cluster 4": "#35ee48",
-    "Cluster 5": "#7af487",
-    "Cluster 6": "#8b5403",
-    "Cluster 7": "#fbc573",
-    "Cluster 8": "#870763",
-    "Cluster 9": "#f20cb1",
-    "Cluster 10": "#f777d3",
-    "Cluster 11": "#ebd409",
-    "Cluster 12": "#073a87",
-    "Cluster 13": "#094cb2",
-    "Cluster 14": "#0b5fdc",
-    "Cluster 15": "#2275f3",
-    "Cluster 16": "#4c90f5",
-    "Cluster 17": "#77aaf7",
-    "Cluster 18": "#088686",
-    "Cluster 19": "#0dcccc",
-    "Cluster 20": "#32f1f1",
-    "Cluster 21": "#78f6f6",
-    "Cluster 22": "#5c0b8d",
-    "Cluster 23": "#8210c9",
-    "Cluster 24": "#a42ced",
-    "Cluster 25": "#be68f2",
-    "Cluster 26": "#7a711e"
+    "Cluster1": "#e8260c",
+    "Cluster2": "#0a8416",
+    "Cluster3": "#10c922",
+    "Cluster4": "#35ee48",
+    "Cluster5": "#7af487",
+    "Cluster6": "#8b5403",
+    "Cluster7": "#fbc573",
+    "Cluster8": "#870763",
+    "Cluster9": "#f20cb1",
+    "Cluster10": "#f777d3",
+    "Cluster11": "#ebd409",
+    "Cluster12": "#073a87",
+    "Cluster13": "#094cb2",
+    "Cluster14": "#0b5fdc",
+    "Cluster15": "#2275f3",
+    "Cluster16": "#4c90f5",
+    "Cluster17": "#77aaf7",
+    "Cluster18": "#088686",
+    "Cluster19": "#0dcccc",
+    "Cluster20": "#32f1f1",
+    "Cluster21": "#78f6f6",
+    "Cluster22": "#5c0b8d",
+    "Cluster23": "#8210c9",
+    "Cluster24": "#a42ced",
+    "Cluster25": "#be68f2",
+    "Cluster26": "#7a711e"
   },
-  
   "unit_display_names": {
     "Cluster1": "Glomeruli | Podo, CD31",
     "Cluster2": "PT | LRP2",
@@ -168,26 +169,48 @@
     "Cluster25": "Immune - T | CD3, CD8",
     "Cluster26": "Interstitial cells | IGFBP7"
   },
-  
   "heatmap_unit_order": [
-    "Cluster1", "Cluster2", "Cluster3", "Cluster4", "Cluster5",
-    "Cluster6", "Cluster7", "Cluster8", "Cluster9", "Cluster10",
-    "Cluster11", "Cluster12", "Cluster13", "Cluster14", "Cluster15",
-    "Cluster16", "Cluster17", "Cluster18", "Cluster19", "Cluster20",
-    "Cluster21", "Cluster22", "Cluster23", "Cluster24", "Cluster25",
+    "Cluster1",
+    "Cluster2",
+    "Cluster3",
+    "Cluster4",
+    "Cluster5",
+    "Cluster6",
+    "Cluster7",
+    "Cluster8",
+    "Cluster9",
+    "Cluster10",
+    "Cluster11",
+    "Cluster12",
+    "Cluster13",
+    "Cluster14",
+    "Cluster15",
+    "Cluster16",
+    "Cluster17",
+    "Cluster18",
+    "Cluster19",
+    "Cluster20",
+    "Cluster21",
+    "Cluster22",
+    "Cluster23",
+    "Cluster24",
+    "Cluster25",
     "Cluster26"
   ],
-  
-  "multi_panel_config": {
-    "selected_molecules": [
-      "18:1 Cholesterol ester",
-      "AG 16:0",
-      "PC Mix",
-      "16:0 Cardiolipin"
+  "sample_analysis_config": {
+    "granularity_levels": [
+      [
+        "Source_ID"
+      ]
     ],
-    "selected_ratios": [
-      "Redox",
-      "Lipid_Unsaturation"
-    ]
+    "selected_values": null,
+    "filter_col": "Source_ID"
+  },
+  "individual_plot_config": {
+    "create_individual_plots": true,
+    "selected_molecules": "All",
+    "selected_ratios": "All",
+    "compare_by": "Source_ID",
+    "consolidate_Group_IDs": false
   }
 }

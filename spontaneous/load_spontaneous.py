@@ -1,10 +1,68 @@
 import os
 import glob
 import numpy as np
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
+import pybaselines
+from pybaselines import whittaker
 
 import matplotlib.pyplot as plt
 
-base_directory = r"/Volumes/ADATA SE880/Molecule Identification/PS Mix"
+base_directory = r"E:\Data\Jorge\Vallon Kidney\3_31_26 15-1 kidney"
+
+
+def baseline_correct(spectrum, wavenumbers, lam=1e3, p=0.0001, niter=100, mode='als', eta=0.0005, show_plot=False):
+    """
+    Perform baseline correction using pybaselines (Asymmetric Least Squares or drPLS).
+    
+    Parameters:
+    -----------
+    spectrum : np.ndarray
+        1D array of intensity values corresponding to the spectrum.
+    wavenumbers : np.ndarray
+        1D array of wavenumber values corresponding to the spectrum.
+    lam : float
+        Smoothness parameter (default: 1e4). Higher values make the baseline smoother.
+    p : float
+        Asymmetry parameter for 'als' (default: 0.0001).
+    niter : int
+        Number of iterations for the algorithm (default: 100).
+    mode : str
+        Algorithm to use: 'als' or 'drpls' (default: 'als').
+    eta : float
+        Smoothness parameter for 'drpls' (default: 0.05).
+    show_plot : bool
+        Whether to plot the results (default: False).
+    
+    Returns:
+    --------
+    np.ndarray : Baseline-corrected spectrum
+    """
+    
+    # Ensure 1D to avoid broadcasting issues
+    y = np.asanyarray(spectrum).flatten()
+    
+    if mode == 'als':
+        # Asymmetric Least Squares
+        baseline, _ = whittaker.asls(y, lam=lam, p=p, max_iter=niter)
+    elif mode == 'drpls':
+        # Dually Reweighted Penalized Least Squares
+        baseline, _ = whittaker.drpls(y, lam=lam, eta=eta, max_iter=niter)
+    else:
+        raise ValueError(f"Unknown mode: {mode}. Use 'als' or 'drpls'.")
+
+    corrected_spectrum = y - baseline
+
+    if show_plot:
+        plt.figure(figsize=(10, 4))
+        plt.plot(wavenumbers, y, label='Original Spectrum', color='blue')    
+        plt.plot(wavenumbers, baseline, label='Estimated Baseline', color='red', linestyle='--')
+        plt.plot(wavenumbers, corrected_spectrum, label='Baseline-Corrected Spectrum', color='green')
+        plt.title(f'Baseline Correction ({mode.upper()})')
+        plt.legend()
+        plt.show()
+
+    return corrected_spectrum
 
 
 def normalize_by_value(array, min_value=np.array([]), max_value=np.array([]), axis=1):
@@ -79,9 +137,33 @@ def snv_normalize(spectra, axis=0):
         raise ValueError("Input must be 1D or 2D array")
 
 
-def load_txt_folder_to_array(folder_dir, skip_first_column=True, remove_spectra=[]):
+def load_txt_folder_to_array(folder_dir, skip_first_column=True, remove_spectra=[], baseline_correction=None):
+    """Load all .txt files in a folder into a single array, optionally skipping the first column and applying baseline correction.
+    
+    Parameters:
+    -----------
+    folder_dir : str
+        Directory containing .txt files.
+    skip_first_column : bool
+        Whether to skip the first column (wavenumbers) when loading.
+    remove_spectra : list
+        List of spectrum indices to remove.
+    baseline_correction : callable
+        Function to apply baseline correction (default: None).
+
+    Returns:
+    --------
+    np.ndarray : Combined array of spectra.
+    """
+
     files = glob.glob(os.path.join(folder_dir, '*.txt'))
     arr = np.loadtxt(files[0])
+
+    if baseline_correction is not None:
+        # Correct only the first spectrum (which is in column 1, after wavenumbers in column 0)
+        # We use flatten to ensure it's 1D, and the corrected version is re-inserted as a column.
+        arr[:, 1:] = baseline_correct(arr[:, 1:], arr[:, 0], mode='als', show_plot=True)[:, np.newaxis]
+    
 
     for idx, file in enumerate(files[1:]):
         temp = np.loadtxt(file)
@@ -98,14 +180,19 @@ def load_txt_folder_to_array(folder_dir, skip_first_column=True, remove_spectra=
             
             # Interpolate each spectrum column (skip first column which is wavenumbers)
             for col in range(1, temp.shape[1]):
-                temp_interpolated[:, col] = np.interp(arr_wavenumbers, temp_wavenumbers, temp[:, col])
-            
-            temp = temp_interpolated
+                interp_spectrum = np.interp(arr_wavenumbers, temp_wavenumbers, temp[:, col])
+                    
+                temp_interpolated[:, col] = interp_spectrum   
+
+            temp = temp_interpolated  # Use the interpolated array for further processing  
         
-        if skip_first_column:
-            arr = np.concatenate((arr, temp[:, 1:]), axis=1)
-        else:
-            arr = np.concatenate((arr, temp), axis=1)
+        if baseline_correction is not None:
+
+            temp_spec = baseline_correct(temp[:, 1:], arr[:, 0], mode='als', show_plot=True)  # Apply baseline correction to spectra (skip wavenumbers)
+            temp[:, 1:] = temp_spec[:, np.newaxis]  # Add back the wavenumber column for concatenation
+
+        
+        arr = np.concatenate((arr, temp[:, 1:]), axis=1)
 
     if len(remove_spectra) > 0:
         arr = np.delete(arr, remove_spectra, axis=1)
@@ -410,7 +497,7 @@ def save_variability_data(wavenumbers, mean_spectrum, std_spectrum, cv_spectrum,
 def main():
     molecule = os.path.basename(base_directory).strip()
     print(f"Reading from {base_directory}...")
-    txt_arr = load_txt_folder_to_array(base_directory, remove_spectra=[])
+    txt_arr = load_txt_folder_to_array(base_directory, remove_spectra=[], baseline_correction=True)
     os.makedirs(os.path.join(base_directory, "images"), exist_ok=True)
 
     
