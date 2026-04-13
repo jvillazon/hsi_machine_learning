@@ -160,6 +160,47 @@ class HSI_Visualizer:
         # Filter the dataframe
         return df[(df[value_col] >= lower_bound) & (df[value_col] <= upper_bound)]
 
+    def _adjust_color_for_group(self, hex_color, group_id):
+        """
+        Adjust a hex color slightly based on group ID to distinguish subgroups visually.
+        For example, 'Cortex'/'C' gets slightly lighter, 'Medulla'/'M' gets slightly darker.
+        
+        Args:
+            hex_color: Hex color string (e.g., '#1f77b4')
+            group_id: Group identifier (e.g., 'C', 'M', 'Cortex', 'Medulla')
+            
+        Returns:
+            Adjusted hex color string
+        """
+        import matplotlib.colors as mcolors
+        
+        # Map common group IDs to adjustment factors
+        # Positive factor = lighter, negative factor = darker
+        group_adjustments = {
+            'C': 0.15,           # Cortex - slightly lighter
+            'M': -0.15,          # Medulla - slightly darker
+            'Cortex': 0.15,      # Full name
+            'Medulla': -0.15,    # Full name
+            'A': 0.10,           # Generic A - slightly lighter
+            'B': -0.10,          # Generic B - slightly darker
+        }
+        
+        adjustment = group_adjustments.get(group_id, 0.0)
+        
+        # Convert hex to RGB
+        rgb = mcolors.hex2color(hex_color)
+        
+        # Adjust brightness
+        if adjustment > 0:
+            # Lighten: move towards white
+            adjusted_rgb = tuple(min(1.0, c + (1 - c) * adjustment) for c in rgb)
+        else:
+            # Darken: move towards black
+            adjusted_rgb = tuple(max(0.0, c + c * adjustment) for c in rgb)
+        
+        # Convert back to hex
+        return mcolors.rgb2hex(adjusted_rgb)
+
 
     def visualize_spectrum(self, spectrum, prediction=None, probabilities=None, img_idx=None):
         """
@@ -326,13 +367,19 @@ class HSI_Visualizer:
 
     def create_probability_stack(self, img_probabilities, img_shape, img_path, output_path, stats):
         """
-        Reconstruct probability stack for a specific image and save as TIFF
-        
+        Reconstruct probability stack for a specific image and save as TIFF.
+
+        The output stack inherits the spatial resolution (pixel size) and unit
+        from the source image so that it opens in ImageJ with the same physical
+        calibration as the original HSI image.
+
         Args:
-            img_probabilities: Array of probabilities for a single image
-            img_path: Path of the image to reconstruct
+            img_probabilities: Array of probabilities for a single image (n_pixels, n_classes)
+            img_path: Path of the source image (used only for error messages)
             output_path: Path to save the probability stack TIFF
-            stats: Dictionary to image statistics
+            stats: Dictionary of image statistics from HSI_Unlabeled_Dataset,
+                   expected to contain 'pixel_size_x', 'pixel_size_y',
+                   'resolution_unit', and 'ij_unit'.
         """
 
         # Get image shape
@@ -351,20 +398,31 @@ class HSI_Visualizer:
         else:
             channel_names = [str(c) for c in range(n_classes)]
 
+        pixel_size_x = stats.get('pixel_size_x', 1)
+        pixel_size_y = stats.get('pixel_size_y', 1)
+        resolution_unit = stats.get('resolution_unit', 1)  # TIFF ResolutionUnit tag int
+        ij_unit = stats.get('ij_unit', 'micron')           # ImageJ unit string
+
+        res_x = (1.0 / pixel_size_x) if pixel_size_x and pixel_size_x != 1 else 1.0
+        res_y = (1.0 / pixel_size_y) if pixel_size_y and pixel_size_y != 1 else 1.0
+
         # Save as TIFF with individual page labels
         try:
-            # ImageJ format requires writing entire stack at once
-            # Use contiguous series with proper metadata
+            # ImageJ format requires writing entire stack at once.
+            # Pass resolution=(pixels/unit in X, pixels/unit in Y) and the
+            # matching resolutionunit tag so the calibration survives round-trips.
             tifffile.imwrite(
                 output_path,
                 prob_stack.astype(np.float32),
                 imagej=True,
+                resolution=(res_x, res_y),
+                resolutionunit=resolution_unit,
                 metadata={
-                    'axes': 'ZYX',  # Stack as Z slices
-                    'Labels': channel_names,  # List of string labels for each slice
-                    'unit': 'pixel',
-                    'spacing': 1.0,
-                },   
+                    'axes': 'ZYX',       # Stack as Z slices
+                    'Labels': channel_names,
+                    'unit': ij_unit,     # Physical unit string (e.g. 'um', 'micron')
+                    'spacing': pixel_size_y,  # Z spacing reuses Y pixel size
+                },
             )
             
             print(f"Saved probability stack with {n_classes} channels to: {output_path}")
@@ -487,12 +545,12 @@ class HSI_Visualizer:
                 continue
             
             # Minimum instance size threshold (in pixels)
-            min_instance_size = 50
+            min_instance_size = 250
             
             # Process each connected component using local bounding boxes
             # to avoid repeatedly allocating full-image masks.
             object_slices = ndi.find_objects(labeled_mask)
-            dilation_iterations = 1
+            dilation_iterations = 2
             for label, obj_slice in enumerate(object_slices, start=1):
                 if obj_slice is None:
                     continue
@@ -880,6 +938,27 @@ class HSI_Visualizer:
                 legend_patches = [mpatches.Patch(color=comparison_palette[i], label=str(g).upper()) 
                                  for i, g in enumerate(compare_order)]
                 ax.legend(handles=legend_patches, loc='upper right', frameon=True, fontsize=10)
+            elif not compare_by and len(all_plot_units) > 0:
+                # Create legend for units when not comparing, respecting units_to_display order
+                legend_patches = []
+                units_in_order = units_to_display if units_to_display is not None else all_plot_units
+                for unit in units_in_order:
+                    if unit in all_plot_units:
+                        # Get the display name for the unit
+                        display_unit = unit
+                        if unit_display_map:
+                            base_unit = unit.split(' (')[0] if ' (' in unit else unit
+                            if base_unit in unit_display_map:
+                                mapped = unit_display_map[base_unit]
+                                display_unit = unit.replace(base_unit, mapped)
+                        
+                        # Get the color for this unit
+                        base_unit = unit.split(' (')[0] if ' (' in unit else unit
+                        color = unit_color_map.get(base_unit, '#888888') if unit_color_map else '#888888'
+                        legend_patches.append(mpatches.Patch(color=color, label=display_unit))
+                
+                if legend_patches:
+                    ax.legend(handles=legend_patches, loc='upper right', frameon=True, fontsize=10)
             
             # Tukey HSD significance testing across units (when no compare_by is given)
             if not compare_by and len(all_plot_units) > 1:
@@ -2066,6 +2145,47 @@ class HSI_Visualizer:
             print(f"Error creating raw ratio bubble chart: {str(e)}")
             return {}
 
+    def _save_standalone_legend(self, handles, title, save_path, ncol=1, fontsize=11, title_fontsize=12):
+        """Save a standalone legend figure as a PNG.
+
+        Parameters
+        ----------
+        handles : list of matplotlib.patches.Patch (or Line2D)
+            Legend handle objects with labels already set.
+        title : str
+            Legend title text.
+        save_path : str
+            Full file path (should end in .png) where the legend will be saved.
+        ncol : int
+            Number of columns in the legend.
+        fontsize : int
+            Font size for legend entry labels.
+        title_fontsize : int
+            Font size for the legend title.
+        """
+        import matplotlib.pyplot as plt
+
+        # Use enough columns to keep the legend readable but not too wide
+        n = len(handles)
+        if ncol == 1 and n > 6:
+            ncol = 2
+
+        fig, ax = plt.subplots(figsize=(max(2.5, ncol * 1.8 + 0.5), max(1.2, (n / ncol) * 0.35 + 0.6)))
+        legend = ax.legend(
+            handles=handles,
+            loc='center',
+            frameon=True,
+            fontsize=fontsize,
+            title=title,
+            title_fontsize=title_fontsize,
+            ncol=ncol,
+        )
+        legend.get_frame().set_facecolor('white')
+        legend.get_frame().set_alpha(0.95)
+        ax.axis('off')
+        fig.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+        plt.close(fig)
+
     def create_individual_barplots(self, df, value_col, grouping_col, items_list=None,
                                     output_dir=None, data_type='percentage',
                                     show_plots=False, display_name_map=None,
@@ -2139,6 +2259,27 @@ class HSI_Visualizer:
             # Identify unique units to plot
             all_plot_units = sorted(item_data['Plot_Unit'].unique())
             
+            # Reorder all_plot_units to match units_to_display order if provided
+            if units_to_display is not None:
+                # Create a mapping of base unit -> list of all plot units for that base
+                plot_units_by_base = {}
+                for plot_unit in all_plot_units:
+                    base_unit = plot_unit.split(' (')[0] if ' (' in plot_unit else plot_unit
+                    if base_unit not in plot_units_by_base:
+                        plot_units_by_base[base_unit] = []
+                    plot_units_by_base[base_unit].append(plot_unit)
+                
+                # Reorder to match units_to_display
+                reordered_units = []
+                for base_unit in units_to_display:
+                    if base_unit in plot_units_by_base:
+                        # Sort subgroups by Group_ID to maintain consistent order
+                        subgroups = sorted(plot_units_by_base[base_unit])
+                        reordered_units.extend(subgroups)
+                
+                all_plot_units = reordered_units
+
+            
             # Identify all unique comparison groups for this item to ensure consistency across units
             all_item_groups = []
             if compare_by and compare_by in item_data.columns:
@@ -2194,10 +2335,10 @@ class HSI_Visualizer:
                                 colors.append(comparison_palette[i % len(comparison_palette)])
                                 
                         # Increment even if empty to leave a gap (keeps bars aligned across units)
-                        current_pos += 0.45 
+                        current_pos += 0.5 
                     
                     # Calculate center for unit label
-                    unit_tick_positions.append((unit_start_pos + current_pos - 0.45) / 2)
+                    unit_tick_positions.append((unit_start_pos + current_pos - 0.55) / 2)
                     
                     # --- Intra-unit statistical analysis ---
                     # Only collect groups that actually have data for this specific unit
@@ -2277,9 +2418,19 @@ class HSI_Visualizer:
                             bar_stderrs.append(0)
                         
                     positions.append(current_pos)
-                    # Use unit_color_map if provided
+                    # Use unit_color_map if provided, with color variation for Group_ID subgroups
                     base_unit = unit.split(' (')[0] if ' (' in unit else unit
-                    color = unit_color_map.get(base_unit, '#888888') if unit_color_map else '#888888'
+                    base_color = unit_color_map.get(base_unit, '#888888') if unit_color_map else '#888888'
+                    
+                    # Extract Group_ID if present and apply color variation
+                    if ' (' in unit and not compare_by:
+                        # Extract Group_ID (e.g., 'C' or 'M' from 'Unit (C)')
+                        group_id = unit.split(' (')[-1].rstrip(')')
+                        # Apply subtle color variations: slightly darker for some IDs, lighter for others
+                        color = self._adjust_color_for_group(base_color, group_id)
+                    else:
+                        color = base_color
+                    
                     colors.append(color)
                     
                     unit_tick_positions.append(current_pos)
@@ -2365,24 +2516,23 @@ class HSI_Visualizer:
             # unit_tick_labels = cleaned_labels
 
             # Labels and styling
-            ax.set_xticks(unit_tick_positions)
-            ax.set_xticklabels(unit_tick_labels, rotation=90, ha='center', fontsize=12)
-            
             display_item = display_name_map.get(item_name, item_name) if display_name_map else item_name
-            y_label = 'Relative Percentage (%)' if data_type == 'percentage' else 'Mean Ratio'
+            y_label = 'Relative Prob. %' if data_type == 'percentage' else 'Mean Ratio'
             ax.set_ylabel(y_label, fontweight='bold', fontsize=14)
             
             title_suffix = f" by {compare_by.replace('_', ' ')}" if compare_by else ""
-            ax.set_title(f"{display_item} Distribution{title_suffix}", fontweight='bold', fontsize=16, pad=15)
+            ax.set_title(f"{display_item}", fontweight='bold', fontsize=16, pad=15)
             
-            # Legend if comparing
             if compare_by:
+                # --- X-tick labels on axis (compare_by mode) ---
+                ax.set_xticks(unit_tick_positions)
+                ax.set_xticklabels(unit_tick_labels, rotation=90, ha='center', fontsize=12)
+
                 # Use the same all_item_groups as used for the bars for legend consistency
                 legend_labels = [str(g).lower().capitalize() for g in all_item_groups]
                 
                 legend_patches = []
                 for i, label in enumerate(legend_labels):
-
                     # Match label back to group_colors if possible
                     color_found = False
                     if compare_by == 'Group_ID':
@@ -2399,6 +2549,20 @@ class HSI_Visualizer:
                 legend_path = os.path.join(output_dir, "comparison_legend.png")
                 if not os.path.exists(legend_path):
                     self._save_standalone_legend(legend_patches, "Comparison Groups", legend_path)
+            else:
+                # --- No compare_by: hide x-ticks, build unit-color legend instead ---
+                ax.set_xticks([])
+                ax.set_xticklabels([])
+
+                # Build legend patches from per-bar colors and display labels
+                unit_legend_patches = []
+                for lbl, clr in zip(unit_tick_labels, colors):
+                    unit_legend_patches.append(mpatches.Patch(color=clr, label=lbl))
+
+                # Save unit legend once per call (keyed to output_dir)
+                unit_legend_path = os.path.join(output_dir, "unit_legend.png")
+                if not os.path.exists(unit_legend_path):
+                    self._save_standalone_legend(unit_legend_patches, "Units", unit_legend_path)
 
             # Note: We will draw all significance markers (intra-unit and inter-unit) at the end
             # to ensure proper vertical stacking.
@@ -2452,7 +2616,7 @@ class HSI_Visualizer:
                         for (mx1, mx2), mlevel in drawn_markers:
                             if mlevel == level:
                                 # Check if intervals overlap
-                                if not (x2 + 0.1 < mx1 or x1 - 0.1 > mx2):
+                                if not (x2 + 0.2 < mx1 or x1 - 0.2 > mx2):
                                     collision = True
                                     break
                         if not collision:
@@ -2469,6 +2633,9 @@ class HSI_Visualizer:
                 max_level = max([m[1] for m in drawn_markers]) if drawn_markers else 0
                 ax.set_ylim(top=y_max * (1.20 + max_level * line_height))
             
+            # Fix aspect ratio
+            ax.set_box_aspect(4/2)
+
             # Grid and spines
             ax.grid(axis='y', linestyle='--', alpha=0.3)
             for spine in ax.spines.values(): spine.set_edgecolor('#cccccc')
