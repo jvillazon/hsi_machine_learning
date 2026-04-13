@@ -616,25 +616,36 @@ class HSI_Classifier:
         # and can differ from self.model.classes_.
         # self.model.classes_ contains integer indices (mol_idx from __getitem__).
         # Map each index to its molecule name string so downstream dicts are
-        # keyed by human-readable names (needed for superclass color matching).
+        # keyed by human-readable names.
         ordered_classes = self.model.classes_
         mol_names = self.labeled_dataset.molecule_names  # shape (n_classes,)
         class_shap = {}
         feature_importance_by_class = {}
 
+        # Basic alignment check
+        if isinstance(shap_values, list) and len(shap_values) != len(ordered_classes):
+            print(f"Warning: SHAP returned {len(shap_values)} output arrays, but model has {len(ordered_classes)} classes. "
+                  f"Indices might be misaligned.")
+
         # Compute feature importance by class
         for cls_idx, cls in enumerate(ordered_classes):
             # Resolve human-readable molecule name from integer class index
+            # This ensures that class '2' (e.g. FA 18:1) is mapped correctly regardless of position
             cls_name = mol_names[cls] if cls < len(mol_names) else str(cls)
 
             if isinstance(shap_values, list):
+                # SHAP returns list of output arrays for multi-class classifiers
+                # Indexing into the list matches the model's classes_ index for sklearn wrappers.
                 cls_shap = shap_values[cls_idx] if cls_idx < len(shap_values) else shap_values[-1]
             else:
-                cls_shap = shap_values[cls_idx]
+                # Single output (binary case)
+                cls_shap = shap_values
 
             feature_importance = np.mean(np.abs(cls_shap), axis=0)
             class_shap[cls_name] = cls_shap
             feature_importance_by_class[cls_name] = feature_importance
+            
+            print(f"Mapped SHAP index {cls_idx} to class '{cls_name}' (label {cls})")
 
         return {
             'shap_values': shap_values,
@@ -804,7 +815,7 @@ class HSI_Classifier:
         return fig
 
     def plot_shap_spectra(self, shap_results, wavenumbers, class_idx=0, 
-                          sample_idx=0, output_path=None):
+                          sample_idx=0, spectrum=None, output_path=None):
         """
         Plot SHAP explanation overlaid on spectrum for a specific sample.
         
@@ -813,40 +824,50 @@ class HSI_Classifier:
             wavenumbers: array of wavenumber values
             class_idx: class index to explain
             sample_idx: sample index to explain
+            spectrum: optional explicit spectrum (n_features,) to overlay on. 
+                     If None, tries to use the actual sample from shap_results['spectra_subset'].
             output_path: optional path to save the figure
         """
-        # Reference spectra for class
-        spectra, labels = self.labeled_dataset.get_reference()
-
         # Resolve molecule name from model's integer class index
         cls_int = self.model.classes_[class_idx] if class_idx < len(self.model.classes_) else self.model.classes_[-1]
-        cls = self.labeled_dataset.molecule_names[cls_int] if cls_int < len(self.labeled_dataset.molecule_names) else str(cls_int)
+        cls_name = self.labeled_dataset.molecule_names[cls_int] if cls_int < len(self.labeled_dataset.molecule_names) else str(cls_int)
 
-        # Find the reference spectrum for this class
-        matching = spectra[labels == cls]
-        if len(matching) == 0:
-            print(f"Warning: no reference spectrum found for class '{cls}'. Using first spectrum.")
-            spectrum = spectra[0]
+        # Decide which spectrum to plot underlying the SHAP bars
+        if spectrum is not None:
+            # User provided a specific spectrum
+            plot_spectrum = spectrum
+        elif 'spectra_subset' in shap_results and sample_idx < len(shap_results['spectra_subset']):
+            # Use the actual spectrum that was explained (BEST PRACTICE)
+            plot_spectrum = shap_results['spectra_subset'][sample_idx]
+            print(f"Plotting SHAP on actual explained spectrum for sample {sample_idx}")
         else:
-            spectrum = matching[0]
+            # Fall back to reference spectra if no actual data is provided
+            print("Warning: actual explained spectrum not provided/available. Using class reference.")
+            spectra, labels = self.labeled_dataset.get_reference()
+            matching = spectra[labels == cls_name]
+            if len(matching) == 0:
+                plot_spectrum = spectra[0]
+            else:
+                plot_spectrum = matching[0]
 
         shap_values = shap_results['class_shap']
 
-        if cls not in shap_values:
-            print(f"Warning: class '{cls}' not found in SHAP results. Available: {list(shap_values.keys())}")
-            cls = list(shap_values.keys())[class_idx] if class_idx < len(shap_values) else list(shap_values.keys())[0]
+        if cls_name not in shap_values:
+            print(f"Warning: class '{cls_name}' not found in SHAP results. Available: {list(shap_values.keys())}")
+            cls_name = list(shap_values.keys())[class_idx] if class_idx < len(shap_values) else list(shap_values.keys())[0]
 
-        shap_vals = shap_values[cls][sample_idx]
+        shap_vals = shap_values[cls_name][sample_idx]
         
         fig, axes = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
         
         # Plot spectrum
         ax1 = axes[0]
-        ax1.plot(wavenumbers, spectrum, 'b-', linewidth=2)
+        ax1.plot(wavenumbers, plot_spectrum, 'k-', linewidth=2, label='Explained Spectrum')
         ax1.set_ylabel('Intensity', fontsize=20)
-        ax1.set_title(f'Spectrum for Class {cls}', fontsize=18)
+        ax1.set_title(f'Spectrum for Class {cls_name}', fontsize=18)
         ax1.tick_params(axis='both', labelsize=16)
         ax1.grid(True, alpha=0.3)
+        ax1.legend()
         
         # Plot SHAP values with color coding
         ax2 = axes[1]
@@ -913,10 +934,21 @@ class HSI_Classifier:
             
             # Save example SHAP spectra plots
             if wavenumbers is not None:
+                # Get the subset of spectra that were explained
+                spectra_subset = shap_results.get('spectra_subset', [])
+                
                 for cls_idx in range(min(3, len(shap_results['shap_values']))):
                     spec_path = os.path.join(output_dir, f'shap_spectrum_class_{cls_idx}.png')
+                    
+                    # Pass the specific spectrum if available
+                    explained_spec = None
+                    if len(spectra_subset) > 0:
+                        explained_spec = spectra_subset[0] # Just use the first one from the explained subset as an example
+                        
                     self.plot_shap_spectra(shap_results, wavenumbers, 
-                                           class_idx=cls_idx, output_path=spec_path)
+                                           class_idx=cls_idx, 
+                                           spectrum=explained_spec,
+                                           output_path=spec_path)
         
         return shap_results
     

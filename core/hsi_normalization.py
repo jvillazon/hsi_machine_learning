@@ -48,7 +48,7 @@ def spectral_standardization(data, wavenum_1=2700, wavenum_2=3100, num_samp=61, 
 
 def main():
     # Setup parameters
-    base_directory = "D:/ADATA Backup/HuBMAP/HuBMAP CosMx/CosMx HSI/HSI/"
+    base_directory = r"D:\integrated_pipeline\HSI_data\processed_data"
     num_samp = 61
     wn_1 = 2700
     wn_2 = 3100
@@ -70,6 +70,7 @@ def main():
         num_samples=num_samp,
         wavenumber_start=wn_1,
         wavenumber_end=wn_2,
+        compute_stats=True
     )
     print('Saving macromolecule channels...')
 
@@ -179,7 +180,44 @@ def main():
                 'PhysicalSizeYUnit': 'um',
             }
         )
-        unsat_ratio = np.divide(unsat_image, (sat_image + 1e-6))
+
+        P_image = protein_image - lipid_image
+        P_image = np.maximum(P_image, 0)
+        P_image = np.where(P_image > 50, 0, P_image)
+        tifffile.imwrite(
+            os.path.join(output_dir, f"P_image-{sample}"), 
+            P_image,
+            resolution=resolution,  # X and Y resolution
+            imagej=True,
+            metadata={
+                'axes': 'YX',  # Y, X for 2D image
+                'unit': 'um',
+                'PhysicalSizeX': pixel_size_x,
+                'PhysicalSizeXUnit': 'um',
+                'PhysicalSizeY': pixel_size_y,
+                'PhysicalSizeYUnit': 'um',
+            }
+        )
+
+        L_image = (5 * lipid_image) - (0.4 * protein_image)
+        L_image = np.maximum(L_image, 0)
+        L_image = np.where(L_image > 50, 0, L_image)
+        tifffile.imwrite(
+            os.path.join(output_dir, f"L_image-{sample}"), 
+            L_image,
+            resolution=resolution,  # X and Y resolution
+            imagej=True,
+            metadata={
+                'axes': 'YX',  # Y, X for 2D image
+                'unit': 'um',
+                'PhysicalSizeX': pixel_size_x,
+                'PhysicalSizeXUnit': 'um',
+                'PhysicalSizeY': pixel_size_y,
+                'PhysicalSizeYUnit': 'um',
+            }
+        )
+
+        unsat_ratio = np.divide(unsat_image, (sat_image + unsat_image + 1e-6))
         unsat_ratio = np.maximum(unsat_ratio, 0)
         unsat_ratio = np.where(unsat_ratio > 50, 0, unsat_ratio)
         lipid_ratio = np.divide(lipid_image, (protein_image + 1e-6))

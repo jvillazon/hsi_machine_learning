@@ -2520,6 +2520,9 @@ class HSI_Visualizer:
             y_label = 'Relative Prob. %' if data_type == 'percentage' else 'Mean Ratio'
             ax.set_ylabel(y_label, fontweight='bold', fontsize=14)
             
+            # Ensure output directory exists
+            os.makedirs(output_dir, exist_ok=True)
+            
             title_suffix = f" by {compare_by.replace('_', ' ')}" if compare_by else ""
             ax.set_title(f"{display_item}", fontweight='bold', fontsize=16, pad=15)
             
@@ -2642,7 +2645,11 @@ class HSI_Visualizer:
             
             plt.tight_layout()
             # Save
-            item_safe = item_name.replace(':', '').replace('/', '_').replace(' ', '_')
+            # Comprehensive sanitization to avoid Windows path/character issues
+            item_safe = item_name.replace(':', '_').replace('/', '_').replace(' ', '_')
+            item_safe = item_safe.replace('(', '').replace(')', '').replace("'", "").replace('"', '')
+            item_safe = item_safe.replace(',', '').replace(';', '').replace('&', 'and')
+            
             if compare_by:
                 item_safe += f"_by_{compare_by}"
 

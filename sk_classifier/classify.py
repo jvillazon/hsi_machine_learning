@@ -1,9 +1,10 @@
-
 import os
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
 from glob import glob
+import json
+from datetime import datetime
 
 import sys 
 from pathlib import Path
@@ -22,7 +23,7 @@ def main():
     # ========================================================================
     # Available profiles: 'kidney_clusters' (default), 'kidney_nephron'
     # Change this to switch between different configurations
-    PROFILE = 'kidney_clusters'  # Update with desired profile name (without .json extension)
+    PROFILE = 'kidney_maldi'  # Update with desired profile name (without .json extension)
     
     # Print available profiles on first run
     print(f"Available configuration profiles:")
@@ -40,8 +41,6 @@ def main():
      display_names, unit_mappings, unit_colors, unit_display_names, heatmap_unit_order,
      selected_molecules, selected_ratios, display_units_boxplots,
      individual_plot_config, sample_analysis_config) = apply_config(config)
-    
-    display_units_boxplots = ["Cluster2", "Cluster3", "Cluster4", "Cluster5"]
 
     if display_units_boxplots:
         display_units_boxplots_type = f"{display_units_boxplots[0]}-{display_units_boxplots[-1]}"
@@ -68,14 +67,15 @@ def main():
     # ========================================================================
 
     # Define dataset parameters (these could also be moved to the config if desired)
-    base_directory = r"D:\integrated_pipeline\registered_data\CODEX\data"
+    base_directory = r"D:\integrated_pipeline\HSI_data\processed_data"
     wn_1 = 2700  # Starting wavenumber (inclusive)
     wn_2 = 3100  # Ending wavenumber (inclusive)
     num_samp = 61
-    ch_start = int(((wn_2 - 2800)/(wn_2 - wn_1)) * num_samp)  # Calculate channel index corresponding to end of cell silent region (2800 cm^-1)
+    ch_start = int(((2800 - wn_1)/(wn_2 - wn_1)) * num_samp)  # Calculate channel index corresponding to end of cell silent region (2800 cm^-1)
 
-    # Define model name
+    # Define model name and shortened slug for paths
     chosen_model_name = 'rf_n150_md40_mss2_msl9_a9_best_model_platt'  # Update with correct model name
+    model_slug = chosen_model_name[:15] if len(chosen_model_name) > 15 else chosen_model_name
     model_path = f'sk_classifier/models/{chosen_model_name}.joblib'
 
     # Create visualizer
@@ -85,7 +85,8 @@ def main():
         wavenumber_end=wn_2,
         num_samples=num_samp
     )
-    plots_directory = os.path.join(os.path.dirname(base_directory), f'{chosen_model_name}_{mask_type}_S21_plots')
+    # Static plots directory (shortened)
+    plots_directory = os.path.join(os.path.dirname(base_directory), f'plots_{mask_type}')
 
     # Create dataset with specified wavenumber range
     dataset = HSI_Unlabeled_Dataset(
@@ -108,8 +109,22 @@ def main():
         compute_min_max=True,
         noise_multiplier=0.5
     )
+    # Define output folders with conditional timestamping
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # RF output base (timestamped only if classification is being performed)
+    output_base_name = f"{model_slug}_outputs"
+    if perform_RF_classification:
+        output_base_name += f"_{timestamp}"
+    output_base = os.path.join(os.path.dirname(base_directory), output_base_name)
+    
+    # Masking output dir (timestamped only if masking is being performed)
+    masked_output_name = f"{mask_type}_output_csv"
+    if perform_masking:
+        masked_output_name += f"_{timestamp}"
+    masked_output_dir = os.path.join(os.path.dirname(base_directory), masked_output_name)
+
     # Initialize Random Forest classifier
-    output_base = os.path.join(os.path.dirname(base_directory), f"{chosen_model_name}_outputs")
     classifier = HSI_Classifier(dataset, model_path=model_path, output_base=output_base, visualizer=visualizer, labeled_dataset=labeled_dataset)
 
     # Initialize variables that may be used across conditional blocks
@@ -118,8 +133,18 @@ def main():
 
     if perform_RF_classification:    
         if os.path.exists(model_path):
+            # Create output directory and save config info
+            os.makedirs(output_base, exist_ok=True)
+            
+            # Archive config with timestamp
+            config_archive = config.copy()
+            config_archive['run_timestamp'] = timestamp
+            config_filename = f'config_info_{timestamp}.json'
+            with open(os.path.join(output_base, config_filename), 'w') as f:
+                json.dump(config_archive, f, indent=4)
+            
             # Run inference
-            print("\nRunning RandomForest inference on dataset...")
+            print(f"\nRunning RandomForest inference. Outputs: {output_base}")
             timing_stats = classifier.predict(alpha=10, generate_shap=True)  # Adjust alpha as needed for spectral weighting
         else:
             print(f"No model found at {model_path}")
@@ -129,14 +154,21 @@ def main():
                 spectra, img_idx = dataset[idx]
                 visualizer.visualize_spectrum(spectra, img_idx=img_idx)
 
-    # Make mask directory to save .csv outputs from masked quantification
-    masked_output_dir = os.path.join(os.path.dirname(base_directory), f"{mask_type}_output_csv")
-    os.makedirs(masked_output_dir, exist_ok=True)
-
+    # Logic for output files (will use specific timestamped dir if masking was performed)
     output_csv = os.path.join(masked_output_dir, 'masked_predictions_percentages.csv')
     output_ratio_csv = os.path.join(masked_output_dir, 'masked_ratio_means.csv')
 
     if perform_masking:
+        # Prepare output directory and save config info
+        os.makedirs(masked_output_dir, exist_ok=True)
+        
+        # Archive config with timestamp
+        config_archive = config.copy()
+        config_archive['run_timestamp'] = timestamp
+        config_filename = f'config_info_{timestamp}.json'
+        with open(os.path.join(masked_output_dir, config_filename), 'w') as f:
+            json.dump(config_archive, f, indent=4)
+            
         # Apply masking if enabled
         mask_prefix = mask_type.split("_")[0]  
         print("\nProcessing masks and quantifying results...")
@@ -279,8 +311,8 @@ def main():
             
             if ratios_df is not None:
                 # 1. Prioritize S21 for Redox (Remove non-S21 Redox entries)
-                # redox_mask = (ratios_df['Ratio_Type'] == 'Redox') #& (ratios_df['Source_ID'] != anchor_source)
-                # ratios_df = ratios_df[~redox_mask].copy()
+                redox_mask = (ratios_df['Ratio_Type'] == 'Redox') & (ratios_df['Source_ID'] != anchor_source)
+                ratios_df = ratios_df[~redox_mask].copy()
                 
                 # 2. Re-anchor Ratio units (keep units from S21)
                 ratios_df = ratios_df[ratios_df['Unit'].isin(s21_units)].copy()
