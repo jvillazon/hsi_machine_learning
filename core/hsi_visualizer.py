@@ -1,5 +1,8 @@
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.colors as mcolors
 from matplotlib.colors import LinearSegmentedColormap
 import pandas as pd
@@ -11,6 +14,8 @@ from statsmodels.stats.multicomp import pairwise_tukeyhsd
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
 import scipy.ndimage as ndi
+from scipy.stats import ttest_ind, spearmanr
+from tqdm import tqdm
 
 # Colormap extracted from bubble plot SVG (blue → grey → red diverging)
 _SVG_BUBBLE_CMAP_COLORS = [
@@ -27,10 +32,11 @@ class HSI_Visualizer:
     DEFAULT_PALETTE = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
                        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
     
-    def __init__(self, mol_path, wavenumber_start=2700, wavenumber_end=3100, num_samples=61):
+    def __init__(self, mol_path=None, wavenumber_start=2700, wavenumber_end=3100, num_samples=61):
         """
         Initialize HSI Visualizer
         Args:
+            mol_path: Optional path to molecule dataset (.npz)
             wavenumber_start: Starting wavenumber for molecule dataset (default 2700)
             wavenumber_end: Ending wavenumber for molecule dataset (default 3100)
             num_samples: Number of samples in wavenumber range (default 61)
@@ -39,11 +45,16 @@ class HSI_Visualizer:
         self.wavenumber_end = wavenumber_end
         self.num_samples = num_samples
 
-        print(f"Loading molecules from: {mol_path}")
-        mol_data = np.load(mol_path, allow_pickle=True)
-        self.normalized_molecules = mol_data['normalized_molecules']
-        self.molecule_names = mol_data['molecule_names']
-        print(f"HSI Visualizer initialized with {len(self.molecule_names)} molecules.")
+        if mol_path:
+            print(f"Loading molecules from: {mol_path}")
+            mol_data = np.load(mol_path, allow_pickle=True)
+            self.normalized_molecules = mol_data['normalized_molecules']
+            self.molecule_names = mol_data['molecule_names']
+            print(f"HSI Visualizer initialized with {len(self.molecule_names)} molecules.")
+        else:
+            self.normalized_molecules = None
+            self.molecule_names = None
+            print("HSI Visualizer initialized without molecule reference.")
     
     @staticmethod
     def _hex_to_rgb_normalized(hex_color):
@@ -157,35 +168,53 @@ class HSI_Visualizer:
         lower_bound = q1 - 1.5 * iqr
         upper_bound = q3 + 1.5 * iqr
         
-        # Filter the dataframe
-        return df[(df[value_col] >= lower_bound) & (df[value_col] <= upper_bound)]
+        # Use .values for comparison to avoid "ValueError: Can only compare identically-labeled Series objects"
+        # which occurs when the DataFrame has a non-unique index (common when concatenating images).
+        mask = (df[value_col].values >= lower_bound.values) & (df[value_col].values <= upper_bound.values)
+        
+        return df[mask]
 
-    def _adjust_color_for_group(self, hex_color, group_id):
+    def _adjust_color_for_group(self, hex_color, group_id, subgroup_list=None):
         """
         Adjust a hex color slightly based on group ID to distinguish subgroups visually.
-        For example, 'Cortex'/'C' gets slightly lighter, 'Medulla'/'M' gets slightly darker.
+        
+        If subgroup_list is provided, it uses a dynamic gradient based on index.
+        Otherwise, it falls back to keyword matching ('Cortex' -> lighter, 'Medulla' -> darker).
         
         Args:
             hex_color: Hex color string (e.g., '#1f77b4')
-            group_id: Group identifier (e.g., 'C', 'M', 'Cortex', 'Medulla')
+            group_id: Group identifier (e.g., 'CortexInner', 'M')
+            subgroup_list: Optional list of all subgroups to calculate dynamic scaling.
             
         Returns:
             Adjusted hex color string
         """
         import matplotlib.colors as mcolors
-        
-        # Map common group IDs to adjustment factors
-        # Positive factor = lighter, negative factor = darker
-        group_adjustments = {
-            'C': 0.15,           # Cortex - slightly lighter
-            'M': -0.15,          # Medulla - slightly darker
-            'Cortex': 0.15,      # Full name
-            'Medulla': -0.15,    # Full name
-            'A': 0.10,           # Generic A - slightly lighter
-            'B': -0.10,          # Generic B - slightly darker
-        }
-        
-        adjustment = group_adjustments.get(group_id, 0.0)
+        adjust_limit = 0.5  # Max adjustment (50% lighter/darker)
+
+        # Check if we can use dynamic scaling based on index in list
+        if subgroup_list and group_id in subgroup_list:
+            n = len(subgroup_list)
+            if n > 1:
+                idx = subgroup_list.index(group_id)
+                # Linear gradient: first item is +0.5 (lighter), last item is -0.5 (darker)
+                adjustment = adjust_limit - (idx / (n - 1))
+            else:
+                adjustment = 0.0
+        else:
+            # Fallback to keyword matching logic (supports initials or full names)
+            if not group_id:
+                adjustment = 0.0
+            elif 'Cortex' in str(group_id) or str(group_id) == 'C':
+                adjustment = adjust_limit
+            elif 'Medulla' in str(group_id) or str(group_id) == 'M':
+                adjustment = -1 * adjust_limit
+            elif str(group_id) == 'A':
+                adjustment = adjust_limit
+            elif str(group_id) == 'B':
+                adjustment = -1 * adjust_limit
+            else:
+                adjustment = 0.0
         
         # Convert hex to RGB
         rgb = mcolors.hex2color(hex_color)
@@ -200,6 +229,38 @@ class HSI_Visualizer:
         
         # Convert back to hex
         return mcolors.rgb2hex(adjusted_rgb)
+
+    def _get_hatch_for_group(self, group_id, subgroup_list=None):
+        """
+        Get a hatch pattern based on group ID to distinguish subgroups visually.
+        
+        Args:
+            group_id: Group identifier (e.g., 'CortexInner', 'M')
+            subgroup_list: Optional list of all subgroups to ensure consistent indexing.
+            
+        Returns:
+            Hatch string (e.g., '//', '///', '////')
+        """
+        # Define available patterns with increasing density
+        patterns = ['/', '//', '///', '////', '/////', '//////', '///////']
+        
+        if not group_id:
+            return None
+            
+        if subgroup_list and group_id in subgroup_list:
+            n = len(subgroup_list)
+            if n > 0:
+                idx = subgroup_list.index(group_id)
+                # Ensure we don't exceed patterns list; wrap if necessary but usually we have enough
+                return patterns[idx % len(patterns)]
+        
+        # Fallback keyword matching with density
+        if 'Cortex' in str(group_id) or str(group_id) == 'C':
+            return '//'
+        elif 'Medulla' in str(group_id) or str(group_id) == 'M':
+            return '////'
+        
+        return '/'
 
 
     def visualize_spectrum(self, spectrum, prediction=None, probabilities=None, img_idx=None):
@@ -273,7 +334,10 @@ class HSI_Visualizer:
             plt.ylabel("Normalized Intensity")
         
         plt.tight_layout()
-        # plt.show()
+        if show_plots:
+            plt.show()
+        else:
+            plt.close(fig)
     
     def visualize_spectrum_in_axes(self, ax_spectrum, ax_prob, spectrum, prediction=None, probabilities=None, img_idx=None):
         """
@@ -333,6 +397,152 @@ class HSI_Visualizer:
             
             colors = ['green' if i == prediction else 'gray' for i in sorted_indices]
             ax_prob.barh(range(len(sorted_probs)), sorted_probs, color=colors)
+
+    def plot_spectral_grid(self, spectra_list, class_idx, titles=None, output_path=None, figsize=(18, 12)):
+        """
+        Plot a grid of spectra overlaid with a reference spectrum.
+        
+        Args:
+            spectra_list: List of numpy arrays (n_wavenumbers,)
+            class_idx: Index of the class for the reference overlay
+            titles: Optional list of titles for each subplot
+            output_path: Optional path to save the plot
+            figsize: Tuple for figure size
+        """
+        import matplotlib.pyplot as plt
+        n_samples = len(spectra_list)
+        if n_samples == 0:
+            print("No spectra to plot.")
+            return None
+            
+        n_cols = int(np.ceil(np.sqrt(n_samples)))
+        n_rows = int(np.ceil(n_samples / n_cols))
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, sharex=True, sharey=True)
+        if n_samples == 1:
+            axes = [axes]
+        else:
+            axes = axes.flatten()
+        
+        wavenumber = np.linspace(self.wavenumber_start, self.wavenumber_end, self.num_samples)
+        
+        if self.normalized_molecules is not None and class_idx < len(self.normalized_molecules):
+            reference_spectrum = self.normalized_molecules[class_idx]
+            class_name = self.molecule_names[class_idx]
+            ref_max = np.max(reference_spectrum)
+        else:
+            reference_spectrum = None
+            class_name = f"Class {class_idx}"
+        
+        for i in range(n_samples):
+            ax = axes[i]
+            spec = spectra_list[i]
+            
+            # Scale to [0, 1] for visual comparison if possible
+            spec_min = np.min(spec)
+            spec_max = np.max(spec)
+            spec_norm = (spec - spec_min) / (spec_max - spec_min + 1e-8)
+            
+            ax.plot(wavenumber, spec_norm, 'b-', label='Predicted Pixel', alpha=0.8, linewidth=1.5)
+            
+            if reference_spectrum is not None:
+                # Reference is already normalized in Labeled_Dataset usually
+                ref_min = np.min(reference_spectrum)
+                ref_max_val = np.max(reference_spectrum)
+                ref_norm = (reference_spectrum - ref_min) / (ref_max_val - ref_min + 1e-8)
+                ax.plot(wavenumber, ref_norm, 'r--', label=f'Ref: {class_name}', alpha=0.6, linewidth=1.5)
+            
+            if titles and i < len(titles):
+                ax.set_title(titles[i], fontsize=10)
+            
+            ax.grid(True, alpha=0.3)
+            if i == 0:
+                ax.legend(fontsize=8)
+        
+        # Hide unused axes
+        for i in range(n_samples, len(axes)):
+            axes[i].axis('off')
+            
+        fig.suptitle(f"Representative Predictions for '{class_name}'", fontsize=20, fontweight='bold')
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            print(f"Saved spectral grid plot to {output_path}")
+            
+        plt.show()
+        return fig
+
+    def plot_spectral_averages_grid(self, class_stats_list, output_path=None, figsize=(18, 12)):
+        """
+        Plot a grid of class average spectra with standard deviation shading.
+        
+        Args:
+            class_stats_list: List of dicts, each with {name, mean, std, reference, n_pixels}
+            output_path: Optional path to save the plot
+            figsize: Tuple for figure size
+        """
+        import matplotlib.pyplot as plt
+        n_samples = len(class_stats_list)
+        if n_samples == 0:
+            print("No class stats to plot.")
+            return None
+            
+        n_cols = int(np.ceil(np.sqrt(n_samples)))
+        n_rows = int(np.ceil(n_samples / n_cols))
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, sharex=True, sharey=True)
+        if n_samples == 1:
+            axes = [axes]
+        else:
+            axes = axes.flatten()
+        
+        wavenumber = np.linspace(self.wavenumber_start, self.wavenumber_end, self.num_samples)
+        
+        for i in range(n_samples):
+            ax = axes[i]
+            stats = class_stats_list[i]
+            
+            name = stats['name']
+            mean = stats['mean']
+            std = stats['std']
+            ref = stats['reference']
+            n_pixels = stats['n_pixels']
+            
+            # Normalize for visualization [0, 1]
+            v_min = np.min(mean)
+            v_max = np.max(mean)
+            norm_mean = (mean - v_min) / (v_max - v_min + 1e-8)
+            norm_std = std / (v_max - v_min + 1e-8)
+            
+            ax.plot(wavenumber, norm_mean, 'b-', label='Mean Predicted', linewidth=2)
+            ax.fill_between(wavenumber, norm_mean - norm_std, norm_mean + norm_std, color='b', alpha=0.2, label='±1 Std')
+            
+            if ref is not None:
+                r_min = np.min(ref)
+                r_max = np.max(ref)
+                norm_ref = (ref - r_min) / (r_max - r_min + 1e-8)
+                ax.plot(wavenumber, norm_ref, 'r--', label='Reference', alpha=0.7, linewidth=1.5)
+            
+            ax.set_title(f"{name}\n(n={n_pixels} pixels)", fontsize=12, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            if i == 0:
+                ax.legend(fontsize=9)
+        
+        # Hide unused axes
+        for i in range(n_samples, len(axes)):
+            axes[i].axis('off')
+            
+        fig.suptitle("Predicted Class Averages (Mean ± Std)", fontsize=22, fontweight='bold')
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            print(f"Saved class averages grid plot to {output_path}")
+            
+        plt.show()
+        return fig
+
     def create_prediction_csv(self, img_predictions, img_shape, img_path, output_path):
         """
         Reconstruct predictions for a specific image as a pandas DataFrame
@@ -431,7 +641,7 @@ class HSI_Visualizer:
             print(f"Warning: failed to save probability stack for {img_path}: {e}")
 
     def apply_rf_masking(self, prediction_csv_path=None, ratio_tiff_path=None, mask_list_path=None, prefix='CODEX', results_per_unit=None, 
-                        subgroups=None, img_name=None, Source_ID=None, classes_to_ignore=None, group_subclasses=False):
+                        subgroups=None, img_name=None, Source_ID=None, classes_to_ignore=None, group_subclasses=False,dilations=2, min_instance_size=250):
         """
         Apply masks and quantify predictions or ratios for each instance.
         
@@ -456,24 +666,28 @@ class HSI_Visualizer:
         
         if prediction_csv_path is not None and ratio_tiff_path is not None:
             raise ValueError("Provide only one of prediction_csv_path or ratio_tiff_path, not both")
-        
-        # Set default classes to ignore if not provided
-        if classes_to_ignore is None:
-            classes_to_ignore = ['Masked', 'Kidney Background', 'No Match']
-        classes_to_ignore_set = {cls.strip() for cls in classes_to_ignore}
-        
         # Determine mode
         is_prediction_mode = prediction_csv_path is not None
+
+        # Set default classes to ignore if not provided
+        if classes_to_ignore is None and is_prediction_mode:
+            classes_to_ignore = ['Masked', 'Kidney Background', 'No Match']
+            classes_to_ignore_set = {cls.strip() for cls in classes_to_ignore}
         
-        # Load data
+        # Load data matrix or prepare TIFF handle
         if is_prediction_mode:
             # Load CSV as matrix (no header, no index) - each cell is a predicted class name
             data_df = pd.read_csv(prediction_csv_path, header=None, index_col=False)
             data_matrix = data_df.values  # Convert to numpy array for easier indexing
+            target_shape = data_matrix.shape
             if img_name is None:
                 img_name = os.path.basename(prediction_csv_path).replace('_predictions.csv', '')
         else: 
-            data_img = tifffile.imread(ratio_tiff_path)
+            # In ratio mode, we use TiffFile for memory efficiency
+            tif = tifffile.TiffFile(ratio_tiff_path)
+            num_pages = len(tif.pages)
+            target_shape = tif.pages[0].shape
+            
             if img_name is None:
                 img_name = os.path.splitext(os.path.basename(ratio_tiff_path))[0]
                 # Remove ratio type suffix (e.g., "image-Lipid_to_Protein-ratio" -> "image")
@@ -481,11 +695,11 @@ class HSI_Visualizer:
                     img_name = img_name.split('-')[0]
             
             # Extract ratio type from filename
-            ratio_basename = os.path.basename(ratio_tiff_path).replace('.tif', '')
+            ratio_basename = os.path.splitext(os.path.basename(ratio_tiff_path))[0]
             ratio_type = ratio_basename.replace(f"{img_name}-", "").replace("-ratio", "")
         
-        # Load mask files
-        mask_files = glob(os.path.join(mask_list_path, '*[-mask][-Mask].tif'))
+        # Load mask files supporting both -mask.tif and -Mask.tif
+        mask_files = glob(os.path.join(mask_list_path, '*-mask.tif')) 
         if not mask_files:
             raise ValueError(f"No mask TIFF files found in {mask_list_path}")
         
@@ -493,22 +707,10 @@ class HSI_Visualizer:
             results_per_unit = {}
         
         # Process each mask file
-        for mask_file in mask_files:
-            # Load mask
-            mask_img = tifffile.imread(mask_file)
-            
-            # Check if mask has extra dimensions and squeeze if needed
-            if mask_img.ndim > 2:
-                mask_img = np.squeeze(mask_img)
-            
-            # Ensure mask is 2D
-            if mask_img.ndim != 2:
-                print(f"Skipping {os.path.basename(mask_file)}: expected 2D mask, got shape {mask_img.shape}")
-                continue
-            
-            # Extract unit name from mask filename
+        for mask_file in tqdm(mask_files, desc="Processing masks"):
             mask_basename = os.path.basename(mask_file)
-            # Remove prefix and mask suffix
+            
+            # --- EXTRACT NAMES FROM FILENAME FIRST ---
             unit_name = mask_basename
             if prefix and unit_name.startswith(f"{prefix}-"):
                 unit_name = unit_name[len(prefix)+1:]
@@ -520,98 +722,112 @@ class HSI_Visualizer:
             subgroup = None
             if "_" in unit_name and subgroups is not None:
                 unit_parts = unit_name.split('_')
-                if len(unit_parts) >= 2:
-                    second_part = unit_parts[-1]
-                    for s_name in subgroups:
-                        # Match criteria: prefix or first-4-chars
-                        if s_name.lower().startswith(second_part.lower()) or second_part.lower().startswith(s_name.lower()[:4]):
-                            subgroup = s_name
+                if len(unit_parts) == 2:
+                    match0 = next((s for s in subgroups if s.lower() == unit_parts[0].lower()), None)
+                    match1 = next((s for s in subgroups if s.lower() == unit_parts[1].lower()), None)
+                    if match0:
+                        subgroup = match0
+                        unit_name = unit_parts[1]
+                    elif match1:
+                        subgroup = match1
+                        unit_name = unit_parts[0]
+                
+                if subgroup is None:
+                    for i, part in enumerate(unit_parts):
+                        match = next((s for s in subgroups if s.lower() == part.lower()), None)
+                        if match:
+                            subgroup = match
+                            remaining = [p for j, p in enumerate(unit_parts) if i != j]
+                            unit_name = "_".join(remaining)
                             break
-                unit_name = unit_parts[0]
+                
             
-            # Check shape compatibility
-            if is_prediction_mode:
-                if data_matrix.shape != mask_img.shape:
-                    print(f"Skipping {mask_basename}: shape mismatch (data: {data_matrix.shape}, mask: {mask_img.shape})")
-                    continue
-            else:
-                if data_img.shape != mask_img.shape:
-                    print(f"Skipping {mask_basename}: shape mismatch (data: {data_img.shape}, mask: {mask_img.shape})")
-                    continue
+            if subgroups is not None and subgroup is None:
+                continue
+
+            # Load mask
+            mask_img = tifffile.imread(mask_file)
+            if mask_img.ndim > 2:
+                mask_img = np.squeeze(mask_img)
+            
+            if mask_img.ndim != 2:
+                print(f"Skipping {mask_basename}: expected 2D mask, got shape {mask_img.shape}")
+                continue
+            
+            # Resize mask if needed
+            if mask_img.shape != target_shape:
+                print(f"  Resizing mask {mask_basename} from {mask_img.shape} to {target_shape} due to downsampling...")
+                zoom_factors = (target_shape[0] / mask_img.shape[0], target_shape[1] / mask_img.shape[1])
+                mask_img = ndi.zoom(mask_img, zoom_factors, order=0)
             
             # Label mask for instance segmentation
             labeled_mask, num_features = ndi.label(mask_img > 0)
             if num_features == 0:
                 continue
             
-            # Minimum instance size threshold (in pixels)
-            min_instance_size = 250
-            
-            # Process each connected component using local bounding boxes
-            # to avoid repeatedly allocating full-image masks.
+            # Identify valid instances and pre-calculate their metadata
             object_slices = ndi.find_objects(labeled_mask)
-            dilation_iterations = 2
+            instance_metadata = []
+            
             for label, obj_slice in enumerate(object_slices, start=1):
                 if obj_slice is None:
                     continue
 
-                # Add padding to the slice for dilation to avoid clipping at edges
                 y_slice, x_slice = obj_slice
-                y_start = max(0, y_slice.start - dilation_iterations)
-                y_end = min(labeled_mask.shape[0], y_slice.stop + dilation_iterations)
-                x_start = max(0, x_slice.start - dilation_iterations)
-                x_end = min(labeled_mask.shape[1], x_slice.stop + dilation_iterations)
+                y_start = max(0, y_slice.start - dilations)
+                y_end = min(labeled_mask.shape[0], y_slice.stop + dilations)
+                x_start = max(0, x_slice.start - dilations)
+                x_end = min(labeled_mask.shape[1], x_slice.stop + dilations)
                 
                 padded_slice = (slice(y_start, y_end), slice(x_start, x_end))
-
-                # Use padded slice to extract local label context
                 local_labels = labeled_mask[padded_slice]
                 instance_mask = local_labels == label
 
-                # Check size before dilation
-                instance_size = int(np.sum(instance_mask))
-                if instance_size < min_instance_size:
-                    continue
-                
-                # Apply dilation - now it has room to grow within the padded slice
-                instance_mask = ndi.binary_dilation(instance_mask, iterations=dilation_iterations-1)
-                
-                # Check size after dilation
                 if int(np.sum(instance_mask)) < min_instance_size:
                     continue
-                
-                if is_prediction_mode:
-                    # Quantify predictions - extract class names at mask positions
-                    predictions = data_matrix[padded_slice][instance_mask]
-                    
-                    # Check if we have valid predictions
+
+                # Dilate mask if requested (using original logic: dilations-1)
+                if dilations > 0:
+                    instance_mask = ndi.binary_dilation(instance_mask, iterations=dilations-1)
+
+                # Centroids
+                rows, cols = np.nonzero(local_labels == label)
+                rows += padded_slice[0].start
+                cols += padded_slice[1].start
+                centroid_y = int(np.mean(rows))
+                centroid_x = int(np.mean(cols))
+
+                instance_metadata.append({
+                    'label': label,
+                    'padded_slice': padded_slice,
+                    'instance_mask': instance_mask,
+                    'centroid_x': centroid_x,
+                    'centroid_y': centroid_y
+                })
+
+            if not instance_metadata:
+                continue
+
+            # Quantify based on mode
+            if is_prediction_mode:
+                for inst in instance_metadata:
+                    predictions = data_matrix[inst['padded_slice']][inst['instance_mask']]
                     if len(predictions) == 0:
                         continue
                     
-                    # Count occurrences of each class
                     unique_classes, counts = np.unique(predictions, return_counts=True)
                     class_counts = {key.strip(): value for key, value in dict(zip(unique_classes, counts)).items()}
                     
-                    # Remove ignored classes
                     for cls in classes_to_ignore_set:
                         if cls in class_counts:
                             del class_counts[cls]
 
                     if group_subclasses:
-                        # Find mix classes available globally or fallback to present classes
-                        if hasattr(self, 'molecule_names') and self.molecule_names is not None:
-                            all_classes = self.molecule_names
-                        else:
-                            all_classes = list(class_counts.keys())
-                            
+                        all_classes = self.molecule_names if hasattr(self, 'molecule_names') and self.molecule_names else list(class_counts.keys())
                         mix_classes = [c.strip() for c in all_classes if isinstance(c, str) and "Mix" in c]
-                        
                         for mix_class in mix_classes:
-                            superclass = mix_class.replace(" Mix", "") # e.g., "TAG" from "TAG Mix"
-                            
-                            # Find subclasses present in current predictions that map to this mix class
+                            superclass = mix_class.replace(" Mix", "")
                             subclasses = [c for c in class_counts.keys() if superclass in c and c != mix_class]
-                            
                             if subclasses:
                                 combined_count = class_counts.get(mix_class, 0)
                                 for sub in subclasses:
@@ -620,47 +836,49 @@ class HSI_Visualizer:
                                 class_counts[mix_class] = combined_count
 
                     total = sum(class_counts.values())
-                    if total > 0:
-                        pct = {k: (v / total * 100.0) for k, v in class_counts.items()}
-                        
-                        hierarchies = {}
-                    else:
-                        pct = {k: 0.0 for k in class_counts.items()}
+                    pct = {k: (v / total * 100.0) if total > 0 else 0.0 for k, v in class_counts.items()}
                     
-                    # Store prediction data
                     data_entry = {
                         'percentages': pct,
                         'image_name': img_name,
                         'Source_ID': Source_ID if Source_ID else img_name.split('-')[0],
-                        'instance_label': f"{int(label)}"
+                        'instance_label': f"{int(inst['label'])}",
+                        'centroid_x': inst['centroid_x'],
+                        'centroid_y': inst['centroid_y']
                     }
                     if subgroup:
                         data_entry['Group_ID'] = subgroup
-                    
                     results_per_unit.setdefault(unit_name, []).append(data_entry)
-                
-                else:
-                    # Quantify ratios
-                    masked_ratio = data_img[padded_slice][instance_mask]
+            
+            else:
+                # Ratio mode: Process each slice memory-efficiently
+                for slice_idx in range(num_pages):
+                    data_slice = tif.pages[slice_idx].asarray()
+                    r_type_slice = f"{ratio_type}_{slice_idx + 1}" if num_pages > 1 else ratio_type
                     
-                    # Calculate mean ratio (excluding zeros)
-                    non_zero_ratios = masked_ratio[masked_ratio > 0]
-                    if non_zero_ratios.size > 0:
-                        mean_ratio = np.mean(non_zero_ratios)
+                    for inst in instance_metadata:
+                        masked_ratio = data_slice[inst['padded_slice']][inst['instance_mask']]
+                        non_zero_ratios = masked_ratio[(masked_ratio > 0) & np.isfinite(masked_ratio)]
                         
-                        # Store ratio data
-                        ratio_entry = {
-                            'ratios': {ratio_type: mean_ratio},
-                            'image_name': img_name,
-                            'Source_ID': Source_ID if Source_ID else img_name.split('-')[0],
-                            'instance_label': f"{int(label)}"
-                        }
-                        if subgroup:
-                            ratio_entry['Group_ID'] = subgroup
-                        
-                        results_per_unit.setdefault(unit_name, []).append(ratio_entry)
-                    # If no non-zero ratios, skip this instance entirely
+                        if non_zero_ratios.size > 0:
+                            mean_ratio = np.nanmean(non_zero_ratios)
+                            ratio_entry = {
+                                'ratios': {r_type_slice: mean_ratio},
+                                'image_name': img_name,
+                                'Source_ID': Source_ID if Source_ID else img_name.split('-')[0],
+                                'instance_label': f"{int(inst['label'])}",
+                                'centroid_x': inst['centroid_x'],
+                                'centroid_y': inst['centroid_y']
+                            }
+                            if subgroup:
+                                ratio_entry['Group_ID'] = subgroup
+                            results_per_unit.setdefault(unit_name, []).append(ratio_entry)
+        
+        if not is_prediction_mode:
+            tif.close()
+            
         return results_per_unit
+
 
     def quantify_unit_class_percentages_nested(self, units_dict, unit_mappings=None):
         """
@@ -698,6 +916,8 @@ class HSI_Visualizer:
                 Source_ID = pct_entry['Source_ID']
                 instance_label = pct_entry['instance_label']
                 Group_ID = pct_entry.get('Group_ID', None)
+                centroid_x = pct_entry.get('centroid_x', None)
+                centroid_y = pct_entry.get('centroid_y', None)
                 
                 for molecule, percentage in pct_dict.items():
                     records.append({
@@ -708,7 +928,9 @@ class HSI_Visualizer:
                         'Image_Name': image_name,
                         'Source_ID': Source_ID,
                         'Instance_Label': instance_label,
-                        'Group_ID': Group_ID
+                        'Group_ID': Group_ID,
+                        'centroid_x': centroid_x,
+                        'centroid_y': centroid_y
                     })
         df = pd.DataFrame.from_records(records)
         return df
@@ -749,6 +971,8 @@ class HSI_Visualizer:
                     Source_ID = ratio_entry.get('Source_ID', 'Unknown')
                     instance_label = ratio_entry.get('instance_label', '0')
                     Group_ID = ratio_entry.get('Group_ID', None)
+                    centroid_x = ratio_entry.get('centroid_x', None)
+                    centroid_y = ratio_entry.get('centroid_y', None)
                 else:
                     # Old format: just a dict of ratio values
                     ratio_dict = ratio_entry
@@ -756,6 +980,8 @@ class HSI_Visualizer:
                     Source_ID = 'Unknown'
                     instance_label = '0'
                     Group_ID = None
+                    centroid_x = None
+                    centroid_y = None
                 
 
                 
@@ -773,437 +999,1422 @@ class HSI_Visualizer:
                         'Image_Name': image_name,
                         'Source_ID': Source_ID,
                         'Instance_Label': instance_label,
-                        'Group_ID': Group_ID
+                        'Group_ID': Group_ID,
+                        'centroid_x': centroid_x,
+                        'centroid_y': centroid_y
                     })
         
         df = pd.DataFrame.from_records(records)
         return df
 
-    def create_individual_boxplots(self, df, value_col, grouping_col, items_list,
-                                  output_dir=None, data_type='percentage',
-                                  figure_width=8.0, figure_height=5.0,
-                                  show_plots=False, display_name_map=None,
-                                  unit_color_map=None, unit_display_map=None,
-                                  units_to_display=None,
-                                  compare_by=None, compare_order=None,
-                                  consolidate_Group_IDs=False):
+    def aggregate_molecule_groups(self, df, group_map, molecule_col='Molecule', value_col='Percentage', keep_original=True):
         """
-        Create individual box plots for publication, optionally comparing across sample types.
+        Aggregate fine-grained molecule classes into supergroups.
         
         Args:
-            df: DataFrame containing the measurements.
-            value_col: Column name for the values ('Percentage' or 'Mean_Ratio').
-            grouping_col: Column name for the items ('Molecule' or 'Ratio_Type').
-            items_list: List of molecules/ratios to plot.
-            output_dir: Directory to save plots.
-            compare_by: Column to compare within each unit (e.g., 'Sample_Type').
-            compare_order: Ordered list of groups for the comparison column.
-            consolidate_Group_IDs: If True, merges C/M Group_IDs into base Units for cleaner comparison.
-        """
-        import matplotlib.patches as mpatches
-        from scipy.stats import f_oneway, ttest_ind
-
-        if output_dir is None:
-            output_dir = 'individual_boxplots'
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Prepare color palette for comparison groups
-        # Publication-quality colors: Teal, Orange, Gray or similar
-        comparison_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
-        
-        # Filter units if specified
-        if units_to_display is not None:
-            df = df[df['Unit'].isin(units_to_display)].copy()
-        
-        # Consolidation check
-        if consolidate_Group_IDs or compare_by == 'Group_ID':
-            df['Plot_Unit'] = df['Unit']
-        else:
-            # Create Unit_Group_ID column if not consolidate
-            def make_unit_Group_ID(row):
-                Group_ID = row.get('Group_ID')
-                if pd.isna(Group_ID) or Group_ID in [None, '', 'Other', 'O']:
-                    return str(row['Unit'])
-                # Abbreviate Group_ID
-                reg_abbrev = str(Group_ID)[0] if len(str(Group_ID)) > 0 else ''
-                if reg_abbrev in ['O', '']: return str(row['Unit'])
-                return f"{row['Unit']} ({reg_abbrev})"
-            df['Plot_Unit'] = df.apply(make_unit_Group_ID, axis=1)
-
-        # Iterate through items
-        for item_name in items_list:
-            item_data = df[df[grouping_col] == item_name].copy()
-            item_data.replace([np.inf, -np.inf], np.nan, inplace=True)
-            item_data = item_data.dropna(subset=[value_col])
+            df: Long-form percentages DataFrame
+            group_map: Dict of {SupergroupName: [Molecule1, Molecule2, ...]}
+            molecule_col: Column containing molecule names
+            value_col: Column containing values to sum
+            keep_original: If True, original molecules are kept alongside the new supergroups (default True)
             
-            if len(item_data) == 0:
-                print(f"  Skipping {item_name}: no valid data")
+        Returns:
+            DataFrame with aggregated "supergroups" added
+        """
+        if df is None or df.empty:
+            return df
+            
+        new_df = df.copy()
+        
+        # Identify non-value and non-molecule columns to group by
+        metadata_cols = [c for c in df.dropna(axis=1, how='all').columns if c not in [molecule_col, value_col]]
+        
+        # Track all molecules that are being aggregated
+        aggregated_molecules = [m for sublist in group_map.values() for m in sublist]
+        
+        aggregated_results = []
+        for group_name, molecules in group_map.items():
+            # Filter for molecules in this group
+            subset = df[df[molecule_col].isin(molecules)]
+            if subset.empty:
+                continue
+                
+            # Aggregate by metadata columns
+            grouped = subset.groupby(metadata_cols, observed=True)[value_col].sum().reset_index()
+            grouped[molecule_col] = group_name
+            aggregated_results.append(grouped)
+            
+        if not aggregated_results:
+            return new_df
+            
+        # Combine aggregated results
+        agg_df = pd.concat(aggregated_results, ignore_index=True)
+        
+        if not keep_original:
+            # Drop molecules that were aggregated
+            new_df = new_df[~new_df[molecule_col].isin(aggregated_molecules)]
+            
+        # Append supergroups
+        final_df = pd.concat([new_df, agg_df], ignore_index=True)
+        return final_df
+
+    def plot_composition_bar(self, df, grouping_cols, molecule_col='Molecule', value_col='Percentage', 
+                             output_dir=None, title_prefix='', figsize=(15, 8), 
+                             show_plots=False, palette=None, display_name_map=None, unit_order=None,
+                             normalize=True):
+        """
+        Generate stacked bar charts showing the composition of molecules per group.
+        
+        Args:
+            df: DataFrame containing the data.
+            grouping_cols: List of columns to group by (e.g., ['Unit'] or ['Source_ID', 'Unit']).
+            molecule_col: Column containing molecule names.
+            value_col: Column containing values to sum/average.
+            output_dir: Directory to save the plots.
+            title_prefix: Prefix for the plot title.
+            figsize: Tuple for figure size.
+            show_plots: Whether to display plots interactively.
+            palette: Optional colormap or list of colors.
+            display_name_map: Optional mapping for molecule names in the legend.
+            unit_order: Optional list to order the groups on the X-axis.
+            normalize: If True, normalizes each bar to 100%.
+        """
+        import matplotlib.pyplot as plt
+        import os
+
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            
+        # Group and average across replicates
+        agg_df = df.groupby(grouping_cols + [molecule_col], observed=True)[value_col].mean().reset_index()
+        
+        # Pivot for stacked bar chart
+        pivot_df = agg_df.pivot_table(index=grouping_cols, columns=molecule_col, values=value_col).fillna(0)
+        
+        # Normalize to 100% if requested
+        if normalize:
+            row_sums = pivot_df.sum(axis=1)
+            # Avoid division by zero
+            pivot_df = pivot_df.div(row_sums.where(row_sums > 0, 1), axis=0) * 100
+        
+        # Apply unit order if provided
+        if unit_order:
+            # Handle multi-index if grouping_cols has more than one column
+            if len(grouping_cols) == 1:
+                pivot_df = pivot_df.reindex(unit_order)
+            else:
+                # If multi-level, we sort by the last level (assumed to be Unit)
+                unit_col = grouping_cols[-1]
+                pivot_df = pivot_df.reset_index()
+                # Only reorder if all categories are present or we allow NaNs
+                existing_units = [u for u in unit_order if u in pivot_df[unit_col].values]
+                pivot_df[unit_col] = pd.Categorical(pivot_df[unit_col], categories=unit_order, ordered=True)
+                pivot_df = pivot_df.sort_values(grouping_cols).set_index(grouping_cols)
+        
+        # Map molecule names for legend if display_name_map is provided
+        if display_name_map:
+            pivot_df = pivot_df.rename(columns=display_name_map)
+        
+        # Plotting
+        fig, ax = plt.subplots(figsize=figsize)
+        pivot_df.plot(kind='bar', stacked=True, ax=ax, colormap=palette or 'tab20')
+        
+        # Title and Labels
+        group_label = ", ".join(grouping_cols)
+        norm_suffix = " (%)" if normalize else ""
+        plt.title(f"{title_prefix} Molecule Composition per {group_label}", fontweight='bold', fontsize=16)
+        plt.ylabel(f"Composition{norm_suffix}", fontweight='bold', fontsize=14)
+        plt.xlabel(group_label, fontweight='bold', fontsize=14)
+        
+        # Legend styling
+        plt.legend(title="Molecule", bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0.)
+        
+        plt.tight_layout()
+        
+        if output_dir:
+            # Create a safe filename
+            safe_prefix = title_prefix.replace(' ', '_').replace(':', '').replace('/', '_').lower()
+            safe_groups = "_".join(grouping_cols).lower()
+            filename = f"{safe_prefix}_{safe_groups}_composition.png"
+            plt.savefig(os.path.join(output_dir, filename), dpi=300, bbox_inches='tight')
+            
+        if show_plots:
+            plt.show()
+        else:
+            plt.close(fig)
+            
+        return pivot_df
+
+    def plot_cluster_comparison_across_images(self, df, unit_name, molecule_list=None, 
+                                             output_dir=None, value_col='Percentage',
+                                             show_plots=False, display_name_map=None,
+                                             unit_color_map=None, palette='viridis',
+                                             display_units=None,
+                                             remove_outliers=True):
+        """
+        Compare molecule percentages for a specific cluster across different images.
+        Shows mean bars with overlaid individual data points.
+        
+        Args:
+            df: DataFrame containing the data.
+            unit_name: Name of the cluster (Unit) to analyze.
+            molecule_list: List of molecules to compare. If "All" or None, uses all in the unit.
+            output_dir: Directory to save the plots (will create a subfolder for the unit).
+            value_col: Column containing values to plot.
+            show_plots: Whether to display plots interactively.
+            display_name_map: Optional mapping for molecule names in titles.
+            unit_color_map: Not used here as we color by Source_ID usually.
+            palette: Seaborn palette for images.
+            remove_outliers: If True, applies 1.5 * IQR filtration per image.
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import os
+        
+        # Filter for the specific unit
+        unit_df = df[df['Unit'] == unit_name].copy()
+        if unit_df.empty:
+            print(f"No data found for unit: {unit_name}")
+            return
+            
+        if molecule_list == "All" or molecule_list is None:
+            molecule_list = sorted(unit_df['Molecule'].unique())
+        elif isinstance(molecule_list, str):
+            molecule_list = [molecule_list]
+            
+        if output_dir:
+            unit_safe = unit_name.replace(' ', '_').replace('/', '_')
+            unit_dir = os.path.join(output_dir, 'cluster_comparison_across_images', unit_safe)
+            os.makedirs(unit_dir, exist_ok=True)
+            
+        # Build global list of all unique image names across the entire input df
+        # so that every plot has the same X-axis width regardless of which images have data
+        all_image_names = sorted([str(n) for n in df['Image_Name'].dropna().unique()])
+        
+        for molecule in molecule_list:
+            mol_df_stats = unit_df[unit_df['Molecule'] == molecule].copy()
+            if mol_df_stats.empty:
+                continue
+            
+            # 1. Prepare raw data for stats
+            mol_df_stats = mol_df_stats.dropna(subset=[value_col])
+            img_stats_raw = mol_df_stats.groupby('Image_Name')[value_col].agg(['mean', 'count'])
+            valid_imgs_raw = img_stats_raw[(img_stats_raw['mean'] > 0) & (img_stats_raw['count'] > 1)].index.tolist()
+            mol_df_stats = mol_df_stats[mol_df_stats['Image_Name'].isin(valid_imgs_raw)].copy()
+
+            if mol_df_stats.empty:
                 continue
 
-            # Identify unique units to plot
-            all_plot_units = sorted(item_data['Plot_Unit'].unique())
-            
-            # Prepare data groups
-            plot_data = []
-            group_labels = []
-            colors = []
-            positions = []
-            
-            current_pos = 1
-            unit_tick_positions = []
-            unit_tick_labels = []
-            unit_group_positions = {}  # Map unit -> {group: position}
-            
-            # Sort units by original unit_order if possible
-            # (Just uses alphabetical for Plot_Unit for now)
-            
-            for unit in all_plot_units:
-                unit_data = item_data[item_data['Plot_Unit'] == unit]
-                unit_start_pos = current_pos
-                unit_group_positions[unit] = {}
-                
-                if compare_by and compare_by in item_data.columns:
-                    # Get specific groups and their order
-                    if compare_order:
-                        groups = [g for g in compare_order if g in unit_data[compare_by].unique()]
-                    else:
-                        groups = sorted(unit_data[compare_by].unique())
-                    
-                    if not groups:
-                        print(f"    WARNING: No comparison groups found for unit {unit} (column '{compare_by}')")
-                    else:
-                        print(f"    Found comparison groups for unit {unit}: {groups}")
+            # 2. Prepare filtered data for plotting
+            if remove_outliers:
+                mol_df_plot = self._apply_outlier_filtration(mol_df_stats, value_col, ['Image_Name'])
+            else:
+                mol_df_plot = mol_df_stats
 
-                    for i, group in enumerate(groups):
-                        group_data = unit_data[unit_data[compare_by] == group][value_col].values
-                        if len(group_data) > 0:
-                            plot_data.append(group_data)
-                            unit_group_positions[unit][group] = current_pos
-                            positions.append(current_pos)
-                            colors.append(comparison_palette[i % len(comparison_palette)])
-                            current_pos += 0.6
-                    
-                    # Calculate center for unit label
-                    unit_tick_positions.append((unit_start_pos + current_pos - 0.6) / 2)
-                    current_pos += 0.8  # Gap between units
-                else:
-                    # Simple unit-based plot
-                    vals = unit_data[value_col].values
-                    plot_data.append(vals)
-                    positions.append(current_pos)
-                    # Use unit_color_map if provided
-                    base_unit = unit.split(' (')[0] if ' (' in unit else unit
-                    color = unit_color_map.get(base_unit, '#888888') if unit_color_map else '#888888'
-                    colors.append(color)
-                    
-                    unit_tick_positions.append(current_pos)
-                    current_pos += 1.0
+            if mol_df_plot.empty:
+                continue
 
-                # Map display name for unit
-                display_unit = unit
-                if unit_display_map:
-                    base_unit = unit.split(' (')[0] if ' (' in unit else unit
-                    if base_unit in unit_display_map:
-                        mapped = unit_display_map[base_unit]
-                        display_unit = unit.replace(base_unit, mapped)
-                unit_tick_labels.append(display_unit)
-
-            if not plot_data: continue
-
-            # Plotting
-            fig, ax = plt.subplots(figsize=(figure_width, figure_height))
+            # --- Cross-image significance testing on RAW data ---
+            from scipy.stats import ttest_ind
+            from statsmodels.stats.multicomp import pairwise_tukeyhsd
             
-            bp = ax.boxplot(plot_data, positions=positions, patch_artist=True,
-                           widths=0.4, showfliers=False,
-                           boxprops=dict(linewidth=1.2, edgecolor='black'),
-                           medianprops=dict(color='black', linewidth=1.5),
-                           whiskerprops=dict(color='black', linewidth=1.2),
-                           capprops=dict(color='black', linewidth=1.2))
+            image_names_with_data = sorted(mol_df_stats['Image_Name'].unique())
+            sig_symbols = {0.001: '***', 0.01: '**', 0.05: '*', 1.0: 'ns'}
+            unit_significance = []
             
-            for patch, color in zip(bp['boxes'], colors):
-                patch.set_facecolor(color)
-                patch.set_alpha(0.8)
-
-            # Labels and styling
-            ax.set_xticks(unit_tick_positions)
-            ax.set_xticklabels(unit_tick_labels, rotation=45, ha='right', fontsize=12)
+            if len(image_names_with_data) == 2:
+                data1 = mol_df_stats[mol_df_stats['Image_Name'] == image_names_with_data[0]][value_col].values
+                data2 = mol_df_stats[mol_df_stats['Image_Name'] == image_names_with_data[1]][value_col].values
+                if len(data1) > 1 and len(data2) > 1:
+                    _, p_val = ttest_ind(data1, data2, equal_var=True)
+                    sig = 'ns'
+                    for thresh, symb in sorted(sig_symbols.items()):
+                        if p_val <= thresh: sig = symb; break
+                    if sig != 'ns':
+                        try:
+                            idx1 = all_image_names.index(image_names_with_data[0])
+                            idx2 = all_image_names.index(image_names_with_data[1])
+                            unit_significance.append((idx1, idx2, sig))
+                            print(f"    Significant: {molecule} — {image_names_with_data[0]} vs {image_names_with_data[1]}: p={p_val:.4f} ({sig})")
+                        except ValueError: pass
             
-            display_item = display_name_map.get(item_name, item_name) if display_name_map else item_name
-            y_label = 'Percentage (%)' if data_type == 'percentage' else 'Mean Ratio'
-            ax.set_ylabel(y_label, fontweight='bold', fontsize=14)
-            ax.set_title(f"{display_item} Distribution", fontweight='bold', fontsize=16, pad=15)
-            
-            # Simple Legend if comparing
-            if compare_by and compare_order:
-                legend_patches = [mpatches.Patch(color=comparison_palette[i], label=str(g).upper()) 
-                                 for i, g in enumerate(compare_order)]
-                ax.legend(handles=legend_patches, loc='upper right', frameon=True, fontsize=10)
-            elif not compare_by and len(all_plot_units) > 0:
-                # Create legend for units when not comparing, respecting units_to_display order
-                legend_patches = []
-                units_in_order = units_to_display if units_to_display is not None else all_plot_units
-                for unit in units_in_order:
-                    if unit in all_plot_units:
-                        # Get the display name for the unit
-                        display_unit = unit
-                        if unit_display_map:
-                            base_unit = unit.split(' (')[0] if ' (' in unit else unit
-                            if base_unit in unit_display_map:
-                                mapped = unit_display_map[base_unit]
-                                display_unit = unit.replace(base_unit, mapped)
-                        
-                        # Get the color for this unit
-                        base_unit = unit.split(' (')[0] if ' (' in unit else unit
-                        color = unit_color_map.get(base_unit, '#888888') if unit_color_map else '#888888'
-                        legend_patches.append(mpatches.Patch(color=color, label=display_unit))
-                
-                if legend_patches:
-                    ax.legend(handles=legend_patches, loc='upper right', frameon=True, fontsize=10)
-            
-            # Tukey HSD significance testing across units (when no compare_by is given)
-            if not compare_by and len(all_plot_units) > 1:
-                """
-                Perform pairwise Tukey HSD test across displayed units.
-                This tests whether the means of different units are significantly different.
-                """
-                # Prepare data for Tukey HSD: create DataFrame with Unit and value columns
-                # Apply outlier filtration per group before pooling for Tukey
-                item_data_filtered = self._apply_outlier_filtration(item_data, value_col, ['Plot_Unit'])
-                
-                records = []
-                for _, row in item_data_filtered.iterrows():
-                    records.append({'Unit': row['Plot_Unit'], 'Value': row[value_col]})
-                
-                if records and len(item_data_filtered['Plot_Unit'].unique()) > 1:
-                    tukey_df = pd.DataFrame(records)
-                    
-                    try:
-                        # Perform Tukey HSD test
-                        tukey_result = pairwise_tukeyhsd(endog=tukey_df['Value'], 
-                                                        groups=tukey_df['Unit'], 
-                                                        alpha=0.05)
-                        
-                        # Extract p-values and create comparison dict
-                        pvalues_dict = {}
-                        for row in tukey_result.summary().data[1:]:  # Skip header
-                            group1 = str(row[0])
-                            group2 = str(row[1])
-                            pval = float(row[3])  # Fixed: index 3 is p-adj, index 5 was upper CI bound
-                            pvalues_dict[(group1, group2)] = pval
-                        
-                        # Draw significance bars directly on plot
-                        sig_symbols = {
-                            0.001: '***',
-                            0.01: '**',
-                            0.05: '*',
-                            1.0: 'ns'
-                        }
-                        
-                        # Sort comparisons by their span (smaller spans first to avoid overlaps)
-                        sorted_comparisons = sorted(pvalues_dict.items(), 
-                                                   key=lambda x: abs(unit_tick_positions[all_plot_units.index(x[0][1])] - 
-                                                                      unit_tick_positions[all_plot_units.index(x[0][0])]))
-                        
-                        y_max = ax.get_ylim()[1]
-                        line_height = 0.02
-                        current_y_offset = 1
-                        
-                        for (unit1, unit2), pval in sorted_comparisons:
-                            if unit1 not in all_plot_units or unit2 not in all_plot_units:
-                                continue
-                            
-                            idx1 = all_plot_units.index(unit1)
-                            idx2 = all_plot_units.index(unit2)
-                            
-                            if idx1 > idx2:
-                                idx1, idx2 = idx2, idx1
-                            
-                            # Determine significance symbol
+            elif len(image_names_with_data) > 2:
+                try:
+                    res = pairwise_tukeyhsd(endog=mol_df_stats[value_col], groups=mol_df_stats['Image_Name'], alpha=0.05)
+                    for row in res.summary().data[1:]:
+                        if row[6]:  # reject is True
+                            p_val_raw = row[3]
+                            p_adj = 0.001 if isinstance(p_val_raw, str) and '<' in p_val_raw else float(p_val_raw)
                             sig = 'ns'
-                            for threshold, symbol in sorted(sig_symbols.items()):
-                                if pval <= threshold:
-                                    sig = symbol
-                                    break
-                            
-                            if sig == 'ns':
-                                continue  # Skip non-significant
-                            
-                            # Calculate bar y position and draw line
-                            y_pos = y_max * (1.0 + line_height * current_y_offset)
-                            x1, x2 = unit_tick_positions[idx1], unit_tick_positions[idx2]
-                            ax.plot([x1, x2], [y_pos, y_pos], 'k-', linewidth=1.0)
-                            ax.text((x1 + x2) / 2, y_pos, sig, ha='center', va='bottom', fontsize=10, fontweight='bold')
-                            
-                            current_y_offset += 1
-                        
-                        # Adjust y-limit to accommodate significance bars
-                        ax.set_ylim(top=y_max * (1.0 + line_height * (current_y_offset + 1)))
-                    except Exception as e:
-                        print(f"    Warning: Could not perform Tukey HSD for {item_name}: {e}")
+                            for thresh, symb in sorted(sig_symbols.items()):
+                                if p_adj <= thresh: sig = symb; break
+                            try:
+                                idx1 = all_image_names.index(str(row[0]))
+                                idx2 = all_image_names.index(str(row[1]))
+                                unit_significance.append((idx1, idx2, sig))
+                                print(f"    Significant: {molecule} — {row[0]} vs {row[1]}: p={p_adj:.4f} ({sig})")
+                            except ValueError: pass
+                except Exception: pass
 
-            # Inter-group significance testing (e.g., Cortex vs Medulla within each unit)
-            elif compare_by and len(all_plot_units) >= 1:
-                y_max = ax.get_ylim()[1]
-                line_height = 0.05
-                
-                for unit in all_plot_units:
-                    unit_data = item_data[item_data['Plot_Unit'] == unit]
-                    groups_in_unit = sorted(unit_data[compare_by].unique())
-                    if len(groups_in_unit) < 2:
-                        continue
-                        
-                    # Prepare comparison data
-                    comp_records = []
-                    # Use filtered data for consistency
-                    unit_filtered = self._apply_outlier_filtration(unit_data, value_col, [compare_by])
-                    for group in groups_in_unit:
-                        vals = unit_filtered[unit_filtered[compare_by] == group][value_col].values
-                        for v in vals:
-                            comp_records.append({'Group': group, 'Value': v})
-                    
-                    if not comp_records:
-                        continue
-                    comp_df = pd.DataFrame(comp_records)
-                    
-                    try:
-                        # Perform Tukey or T-test
-                        if len(groups_in_unit) == 2:
-                            # Simple T-test for 2 groups
-                            g1, g2 = groups_in_unit
-                            v1 = comp_df[comp_df['Group'] == g1]['Value'].values
-                            v2 = comp_df[comp_df['Group'] == g2]['Value'].values
-                            if len(v1) >= 2 and len(v2) >= 2:
-                                _, pval = ttest_ind(v1, v2, equal_var=False)
-                                pvalues_dict = {(g1, g2): pval}
-                            else:
-                                pvalues_dict = {}
-                        else:
-                            # Tukey for >2 groups
-                            tukey_res = pairwise_tukeyhsd(endog=comp_df['Value'], groups=comp_df['Group'], alpha=0.05)
-                            pvalues_dict = {}
-                            for row in tukey_res.summary().data[1:]:
-                                pvalues_dict[(str(row[0]), str(row[1]))] = float(row[3])
-                        
-                        # Plot markers above unit cluster
-                        current_unit_offset = 1
-                        for (g1, g2), pval in pvalues_dict.items():
-                            sig = 'ns'
-                            sig_symbols = {0.001: '***', 0.01: '**', 0.05: '*', 1.0: 'ns'}
-                            for threshold, symbol in sorted(sig_symbols.items()):
-                                if pval <= threshold:
-                                    sig = symbol
-                                    break
-                            
-                            if sig == 'ns': continue
-                            
-                            x1 = unit_group_positions[unit][g1]
-                            x2 = unit_group_positions[unit][g2]
-                            y_pos = y_max * (1.0 + line_height * current_unit_offset)
-                            
-                            ax.plot([x1, x2], [y_pos, y_pos], 'k-', linewidth=0.8)
-                            ax.text((x1 + x2) / 2, y_pos, sig, ha='center', va='bottom', fontsize=8, fontweight='bold')
-                            current_unit_offset += 1
-                            
-                        # Update global y-limit if needed
-                        if current_unit_offset > 1:
-                            new_top = y_max * (1.0 + line_height * (current_unit_offset + 1))
-                            if ax.get_ylim()[1] < new_top:
-                                ax.set_ylim(top=new_top)
-                                
-                    except Exception as e:
-                        print(f"    Warning: Could not perform inter-group significance for {item_name} in {unit}: {e}")
+            fig, ax = plt.subplots(figsize=(max(6, len(all_image_names) * 0.5), 6))
             
-            # Inter-group significance testing (e.g., Cortex vs Medulla within each unit)
-            elif compare_by and len(all_plot_units) >= 1:
-                y_max = ax.get_ylim()[1]
-                line_height = 0.05
-                
-                for unit in all_plot_units:
-                    unit_data = item_data[item_data['Plot_Unit'] == unit]
-                    groups_in_unit = sorted(unit_data[compare_by].unique())
-                    if len(groups_in_unit) < 2:
-                        continue
-                        
-                    # Prepare comparison data
-                    comp_records = []
-                    # Use filtered data for consistency
-                    unit_filtered = self._apply_outlier_filtration(unit_data, value_col, [compare_by])
-                    for group in groups_in_unit:
-                        vals = unit_filtered[unit_filtered[compare_by] == group][value_col].values
-                        for v in vals:
-                            comp_records.append({'Group': group, 'Value': v})
-                    
-                    if not comp_records:
-                        continue
-                    comp_df = pd.DataFrame(comp_records)
-                    
-                    try:
-                        # Perform Tukey or T-test
-                        if len(groups_in_unit) == 2:
-                            # Simple T-test for 2 groups
-                            g1, g2 = groups_in_unit
-                            v1 = comp_df[comp_df['Group'] == g1]['Value'].values
-                            v2 = comp_df[comp_df['Group'] == g2]['Value'].values
-                            if len(v1) >= 2 and len(v2) >= 2:
-                                _, pval = ttest_ind(v1, v2, equal_var=False)
-                                pvalues_dict = {(g1, g2): pval}
-                            else:
-                                pvalues_dict = {}
-                        else:
-                            # Tukey for >2 groups
-                            tukey_res = pairwise_tukeyhsd(endog=comp_df['Value'], groups=comp_df['Group'], alpha=0.05)
-                            pvalues_dict = {}
-                            for row in tukey_res.summary().data[1:]:
-                                pvalues_dict[(str(row[0]), str(row[1]))] = float(row[3])
-                        
-                        # Plot markers above unit cluster
-                        current_unit_offset = 1
-                        for (g1, g2), pval in pvalues_dict.items():
-                            sig = 'ns'
-                            sig_symbols = {0.001: '***', 0.01: '**', 0.05: '*', 1.0: 'ns'}
-                            for threshold, symbol in sorted(sig_symbols.items()):
-                                if pval <= threshold:
-                                    sig = symbol
-                                    break
-                            
-                            if sig == 'ns': continue
-                            
-                            x1 = unit_group_positions[unit][g1]
-                            x2 = unit_group_positions[unit][g2]
-                            y_pos = y_max * (1.0 + line_height * current_unit_offset)
-                            
-                            ax.plot([x1, x2], [y_pos, y_pos], 'k-', linewidth=0.8)
-                            ax.text((x1 + x2) / 2, y_pos, sig, ha='center', va='bottom', fontsize=8, fontweight='bold')
-                            current_unit_offset += 1
-                            
-                        # Update global y-limit if needed
-                        if current_unit_offset > 1:
-                            new_top = y_max * (1.0 + line_height * (current_unit_offset + 1))
-                            if ax.get_ylim()[1] < new_top:
-                                ax.set_ylim(top=new_top)
-                                
-                    except Exception as e:
-                        print(f"    Warning: Could not perform inter-group significance for {item_name} in {unit}: {e}")
+            # Plot bars and scatter using filtered data
+            sns.barplot(data=mol_df_plot, x='Image_Name', y=value_col, ax=ax,
+                        order=all_image_names, alpha=0.6, capsize=.1, errorbar='se', palette=palette)
+            sns.stripplot(data=mol_df_plot, x='Image_Name', y=value_col, ax=ax,
+                          order=all_image_names, color='black', alpha=0.5, jitter=True, size=4)
 
-            # Grid and spines
-            ax.grid(axis='y', linestyle='--', alpha=0.3)
-            for spine in ax.spines.values(): spine.set_edgecolor('#cccccc')
-            
+            # --- Draw significance markers ---
+            if unit_significance:
+                y_min, y_max = ax.get_ylim()
+                line_height = 0.08
+                unit_significance.sort(key=lambda x: (abs(x[0]-x[1]), min(x[0], x[1])))
+                drawn_markers = []
+                for x1, x2, sig in unit_significance:
+                    if x1 > x2: x1, x2 = x2, x1
+                    level = 0
+                    while True:
+                        collision = False
+                        for (mx1, mx2), mlevel in drawn_markers:
+                            if mlevel == level and not (x2 + 0.2 < mx1 or x1 - 0.2 > mx2):
+                                collision = True; break
+                        if not collision: break
+                        level += 1
+                    y_pos = y_max * (1.10 + level * line_height)
+                    ax.plot([x1, x2], [y_pos, y_pos], 'k-', linewidth=1.0)
+                    ax.text((x1 + x2) / 2, y_pos, sig, ha='center', va='bottom', fontsize=10, fontweight='bold')
+                    drawn_markers.append(((x1, x2), level))
+                max_level = max(m[1] for m in drawn_markers)
+                ax.set_ylim(top=y_max * (1.20 + max_level * line_height))
+
+            display_unit = display_units.get(unit_name, unit_name) if display_units else unit_name
+            display_mol = display_name_map.get(molecule, molecule) if display_name_map else molecule
+            plt.title(f"{display_unit}: {display_mol}", fontweight='bold', fontsize=14)
+            plt.ylabel(f"Relative Probability Pct. (%)", fontweight='bold')
+            plt.xlabel("")
+            plt.xticks([])
+            plt.grid(axis='y', linestyle='--', alpha=0.3)
             plt.tight_layout()
             
-            # Save
-            item_safe = item_name.replace(':', '').replace('/', '_').replace(' ', '_')
-            save_path = os.path.join(output_dir, f"{data_type}_{item_safe}_boxplot.png")
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            
-            if show_plots: plt.show()
-            else: plt.close()
+            if output_dir:
+                mol_safe = str(molecule).replace(' ', '_').replace(':', '').replace('/', '_')
+                plt.savefig(os.path.join(unit_dir, f"{mol_safe}_across_images.png"), dpi=300, bbox_inches='tight')
+                
+            if show_plots:
+                plt.show()
+            else:
+                plt.close(fig)
+        
+        print(f"  Generated cross-image comparison plots for {unit_name} in {unit_dir if output_dir else 'memory'}")
 
-        return []
+    def plot_spatial_gradient_heatmap(self, df, molecule, value_col='Percentage',
+                                      image_order=None, unit_order=None,
+                                      output_dir=None, display_name_map=None,
+                                      unit_display_map=None, normalize_axis='rows',
+                                      cmap='coolwarm', figsize=None,
+                                      min_images=2, show_plots=False):
+        """
+        Generate a heatmap showing how a molecule's mean value shifts across
+        spatially-ordered images for each cluster/unit.
+
+        Rows = clusters/units. Columns = images in their provided spatial order
+        (e.g. inner medulla → inner cortex). Column labels are hidden so the
+        axis reads as a continuous spatial gradient.
+
+        Args:
+            df: DataFrame containing the data (must have 'Unit', 'Molecule',
+                'Image_Name', and value_col columns).
+            molecule: The molecule/ratio to visualize.
+            value_col: Column containing values (default 'Percentage').
+            image_order: Ordered list of Image_Name values that defines the
+                spatial axis (left → right). If None, uses sorted unique values.
+            unit_order: Ordered list of Unit values for the Y-axis. If None,
+                uses sorted unique values.
+            output_dir: Directory to save the plot.
+            display_name_map: Optional dict mapping molecule names to display names.
+            unit_display_map: Optional dict mapping unit names to display names.
+            normalize_axis: How to z-score the data before plotting.
+                'rows'  — normalise each unit (row) across its images; highlights
+                          the gradient shape within each cluster (default).
+                'cols'  — normalise each image (column) across all units; highlights
+                          which clusters are relatively high/low at each position.
+                None    — no normalisation; raw values are plotted.
+            cmap: Matplotlib colormap name (default 'coolwarm').
+            figsize: Tuple (width, height). Auto-sized if None.
+            min_images: Minimum number of images with data for a unit to be
+                included (default 2).
+            show_plots: Whether to display the plot interactively.
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import os
+
+        # --- Filter to the requested molecule ---
+        mol_df = df[df['Molecule'] == molecule].copy()
+        if mol_df.empty:
+            print(f"No data found for molecule: {molecule}")
+            return
+
+        # --- Build image order ---
+        if image_order is None:
+            image_order = sorted([str(n) for n in df['Image_Name'].dropna().unique()])
+        image_order = [str(n) for n in image_order]
+
+        # --- Compute per-unit, per-image means ---
+        mol_df['Image_Name'] = mol_df['Image_Name'].astype(str)
+        means = (mol_df.groupby(['Unit', 'Image_Name'])[value_col]
+                       .mean()
+                       .reset_index())
+
+        # Pivot: rows = Unit, cols = Image_Name in provided order
+        pivot = means.pivot(index='Unit', columns='Image_Name', values=value_col)
+
+        # Keep only image columns that are in our ordered list
+        available_images = [img for img in image_order if img in pivot.columns]
+        pivot = pivot[available_images]
+
+        # Drop units that have fewer than min_images non-null values
+        pivot = pivot[pivot.notna().sum(axis=1) >= min_images]
+
+        if pivot.empty:
+            print(f"No units with >= {min_images} images for molecule: {molecule}")
+            return
+
+        # Apply unit order: use the display-name-order from unit_display_map.values() if available,
+        # otherwise fall back to explicit unit_order list or alphabetical sort.
+        if unit_display_map is not None:
+            # Build ordering from the VALUES of unit_display_map (preserves insertion order)
+            display_to_raw = {v: k for k, v in unit_display_map.items()}
+            ordered_display_names = list(dict.fromkeys(unit_display_map.values()))  # unique, ordered
+            ordered_units = [display_to_raw[d] for d in ordered_display_names if display_to_raw.get(d) in pivot.index]
+            pivot = pivot.reindex(ordered_units)
+        elif unit_order is not None:
+            ordered_units = [u for u in unit_order if u in pivot.index]
+            pivot = pivot.reindex(ordered_units)
+        else:
+            pivot = pivot.sort_index()
+
+        # Map row labels to display names
+        if unit_display_map:
+            pivot.index = [unit_display_map.get(u, u) for u in pivot.index]
+
+        # --- Z-score normalisation ---
+        if normalize_axis == 'rows':
+            # Normalise each unit (row) across its images
+            row_means = pivot.mean(axis=1)
+            row_stds  = pivot.std(axis=1).replace(0, 1)
+            pivot = pivot.sub(row_means, axis=0).div(row_stds, axis=0)
+        elif normalize_axis == 'cols':
+            # Normalise each image (column) across all units
+            col_means = pivot.mean(axis=0)
+            col_stds  = pivot.std(axis=0).replace(0, 1)
+            pivot = pivot.sub(col_means, axis=1).div(col_stds, axis=1)
+
+        is_normalized = normalize_axis in ('rows', 'cols')
+
+        # --- Fill NaN with 0 for smooth rendering ---
+        data_arr = pivot.fillna(0).values
+
+        # Compute colour limits symmetrically around 0
+        vabs = np.nanmax(np.abs(data_arr)) if is_normalized else None
+        vmin_plot = -vabs if vabs else None
+        vmax_plot =  vabs if vabs else None
+
+        # --- Plot using sns.heatmap with no cell lines ---
+        n_rows, n_cols = pivot.shape
+        if figsize is None:
+            figsize = (max(8, n_cols * 0.35), max(4, n_rows * 0.45))
+
+        import matplotlib.cm as cm
+        import matplotlib.colors as mcolors
+
+        fig, ax = plt.subplots(figsize=figsize)
+
+        sns.heatmap(
+            pivot,
+            ax=ax,
+            cmap=cmap,
+            center=0 if is_normalized else None,
+            vmin=vmin_plot,
+            vmax=vmax_plot,
+            linewidths=0,       # no cell dividers at all
+            cbar=False,         # colorbar saved separately
+            xticklabels=False,
+        )
+
+        display_mol = display_name_map.get(molecule, molecule) if display_name_map else molecule
+        norm_labels = {'rows': ' (row z-scored)', 'cols': ' (col z-scored)'}
+        norm_note = norm_labels.get(normalize_axis, '')
+        ax.set_title(f"{display_mol} — Spatial Gradient Across Images{norm_note}",
+                     fontweight='bold', fontsize=13, pad=12)
+        ax.set_xlabel("← Inner Medulla    |    Inner Cortex →", fontsize=10)
+        ax.set_ylabel("")
+        plt.tight_layout()
+
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            mol_safe = str(molecule).replace(' ', '_').replace(':', '').replace('/', '_')
+
+            # Save the main heatmap (no colorbar embedded)
+            save_path = os.path.join(output_dir, f"spatial_gradient_{mol_safe}.png")
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"  Saved spatial gradient heatmap: {save_path}")
+
+            # Save the colorbar as a separate image
+            cbar_fig, cbar_ax = plt.subplots(figsize=(1.2, max(3, n_rows * 0.3)))
+            cbar_label_text = {'rows': 'Z-score (per unit)', 'cols': 'Z-score (per image)'}
+            cbar_label = cbar_label_text.get(normalize_axis, value_col)
+            norm = mcolors.Normalize(vmin=vmin_plot, vmax=vmax_plot)
+            cbar = cbar_fig.colorbar(
+                cm.ScalarMappable(norm=norm, cmap=cmap),
+                cax=cbar_ax,
+                orientation='vertical',
+            )
+            cbar.set_label(cbar_label, fontsize=10)
+            cbar_fig.tight_layout()
+            cbar_path = os.path.join(output_dir, f"spatial_gradient_{mol_safe}_colorbar.png")
+            cbar_fig.savefig(cbar_path, dpi=300, bbox_inches='tight')
+            plt.close(cbar_fig)
+            print(f"  Saved colorbar: {cbar_path}")
+
+        if show_plots:
+            plt.show()
+        else:
+            plt.close(fig)
+
+    def plot_spatial_gradient_heatmap_multi(self, df, query_list, query_col='Query',value_col='Value',
+                                            image_order=None, unit_order=None,
+                                            output_dir=None, display_name_map=None,
+                                            unit_display_map=None, normalize_axis='cols',
+                                            cmap='coolwarm', figsize=None,
+                                            min_images=2, show_plots=False):
+        """
+        Generate a spatial gradient heatmap with a transposed, multi-query layout:
+
+          - Rows    = images ordered spatially (medulla top -> cortex bottom).
+          - Columns = cluster/unit groups, each subdivided into len(query_list)
+                      sub-columns -- one per molecule or ratio type in query_list.
+
+        This lets you compare how multiple molecules behave across the same
+        spatial gradient side-by-side for every cluster in one figure.
+
+        Args:
+            df          : DataFrame with columns 'Unit', 'Molecule', 'Image_Name',
+                          and value_col.
+            query_list  : Single molecule name (str) OR list of molecule/ratio names.
+                          Each entry becomes one sub-column within every cluster group.
+            value_col   : Column containing values (default 'Percentage').
+            image_order : Ordered list of Image_Name values, medulla-first -> cortex-last.
+                          Rows are plotted top-to-bottom in this order.
+                          If None, sorted unique values are used.
+            unit_order  : Ordered list of Unit names for the column groups (left -> right).
+                          If None, uses unit_display_map insertion order or alphabetical.
+            output_dir  : Directory to save outputs.
+            display_name_map : Dict mapping molecule names -> display names (sub-column labels).
+            unit_display_map : Dict mapping unit names -> display names (group header labels).
+            normalize_axis :
+                'cols'  -- z-score each (unit, molecule) sub-column across images (default).
+                           Highlights the gradient shape within each cluster-molecule pair.
+                'rows'  -- z-score each image row across all sub-columns.
+                           Highlights which cluster-molecule pairs are high/low per image.
+                None    -- no normalisation; raw values plotted.
+            cmap        : Matplotlib colormap (default 'coolwarm').
+            figsize     : Tuple (w, h). Auto-sized if None.
+            min_images  : Minimum non-null image count for a unit to be included (default 2).
+            show_plots  : Whether to show the plot interactively.
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
+        import matplotlib.colors as mcolors
+        from matplotlib.transforms import blended_transform_factory
+        import os
+
+        # --- Normalise query_list to a list ---
+        if isinstance(query_list, str):
+            query_list = [query_list]
+
+        # --- Filter df to requested molecules ---
+        mol_df = df[df[query_col].isin(query_list)].copy()
+        if mol_df.empty:
+            print(f"No data found for query: {query_list}")
+            return
+
+        # --- Build image order (rows: medulla=top -> cortex=bottom) ---
+        if image_order is None:
+            image_order = sorted([str(n) for n in df['Image_Name'].dropna().unique()])
+        image_order = [str(n) for n in image_order]
+
+        # --- Compute per-unit, per-molecule, per-image means ---
+        mol_df['Image_Name'] = mol_df['Image_Name'].astype(str)
+        means = (
+            mol_df
+            .groupby(['Unit', query_col, 'Image_Name'])[value_col]
+            .mean()
+            .reset_index()
+        )
+
+        # --- Determine valid units (>= min_images across any of the query molecules) ---
+        unit_img_counts = means.groupby('Unit')['Image_Name'].nunique()
+        valid_units = unit_img_counts[unit_img_counts >= min_images].index.tolist()
+        if not valid_units:
+            print(f"No units with >= {min_images} images for query: {query_list}")
+            return
+
+        # --- Resolve unit ordering ---
+        if unit_display_map is not None:
+            display_to_raw = {v: k for k, v in unit_display_map.items()}
+            ordered_display = list(dict.fromkeys(unit_display_map.values()))
+            ordered_units = [
+                display_to_raw[d] for d in ordered_display
+                if display_to_raw.get(d) in valid_units
+            ]
+        elif unit_order is not None:
+            ordered_units = [u for u in unit_order if u in valid_units]
+        else:
+            ordered_units = sorted(valid_units)
+
+        if not ordered_units:
+            print("No valid units after applying ordering.")
+            return
+
+        n_units  = len(ordered_units)
+        n_mols   = len(query_list)
+        n_images = len(image_order)
+        n_cols   = n_units * n_mols   # total sub-columns
+
+        # --- Build full data matrix (n_images x n_cols) ---
+        # Column layout: [unit0_mol0, unit0_mol1, ..., unit1_mol0, unit1_mol1, ...]
+        data_matrix = np.full((n_images, n_cols), np.nan)
+        for ui, unit in enumerate(ordered_units):
+            for mi, mol in enumerate(query_list):
+                col_idx = ui * n_mols + mi
+                subset = means[(means['Unit'] == unit) & (means[query_col] == mol)]
+                for row_idx, img in enumerate(image_order):
+                    row_data = subset[subset['Image_Name'] == img][value_col]
+                    if not row_data.empty:
+                        data_matrix[row_idx, col_idx] = row_data.iloc[0]
+
+        # --- Apply normalisation ---
+        is_normalized = normalize_axis in ('cols', 'rows')
+        if normalize_axis == 'cols':
+            # Z-score each sub-column (unit-molecule pair) independently across images
+            col_means = np.nanmean(data_matrix, axis=0)
+            col_stds  = np.nanstd(data_matrix,  axis=0)
+            col_stds[col_stds == 0] = 1
+            data_matrix = (data_matrix - col_means[np.newaxis, :]) / col_stds[np.newaxis, :]
+        elif normalize_axis == 'rows':
+            # Z-score each image row across all sub-columns
+            row_means = np.nanmean(data_matrix, axis=1)
+            row_stds  = np.nanstd(data_matrix,  axis=1)
+            row_stds[row_stds == 0] = 1
+            data_matrix = (data_matrix - row_means[:, np.newaxis]) / row_stds[:, np.newaxis]
+
+        # Colour limits (symmetric around 0 when normalised)
+        vabs = np.nanmax(np.abs(data_matrix)) if is_normalized else None
+        vmin_plot = -vabs if vabs is not None else float(np.nanmin(data_matrix))
+        vmax_plot =  vabs if vabs is not None else float(np.nanmax(data_matrix))
+
+        # Replace NaN with 0 for rendering
+        plot_matrix = np.where(np.isnan(data_matrix), 0.0, data_matrix)
+
+        # --- Figure sizing ---
+        if figsize is None:
+            fig_w = max(6, n_cols * 0.55 + 2.5)
+            fig_h = max(4, n_images * 0.38 + 1.8)
+            figsize = (fig_w, fig_h)
+
+        fig, ax = plt.subplots(figsize=figsize)
+
+        norm_obj = mcolors.Normalize(vmin=vmin_plot, vmax=vmax_plot)
+        ax.imshow(plot_matrix, aspect='auto', cmap=cmap,
+                  norm=norm_obj, interpolation='nearest')
+
+        ax.set_xlim(-0.5, n_cols - 0.5)
+        ax.set_ylim(n_images - 0.5, -0.5)  # top=0 -> medulla at top
+
+        # --- Column separator lines ---
+        for ui in range(n_units):
+            # Thin lines between sub-columns within the same unit group
+            for mi in range(1, n_mols):
+                x = ui * n_mols + mi - 0.5
+                ax.axvline(x, color='white', linewidth=0.5, alpha=0.5, zorder=3)
+            # Thick lines between unit groups
+            if ui > 0:
+                x = ui * n_mols - 0.5
+                ax.axvline(x, color='white', linewidth=2.0, zorder=4)
+
+        # --- X-axis ticks: molecule sub-column labels ---
+        xtick_positions = list(range(n_cols))
+        xtick_labels = []
+        for _ in range(n_units):
+            for mol in query_list:
+                disp = display_name_map.get(mol, mol) if display_name_map else mol
+                xtick_labels.append(disp)
+        ax.set_xticks(xtick_positions)
+        ax.set_xticklabels(xtick_labels, rotation=45, ha='right', fontsize=8)
+        ax.tick_params(axis='x', which='both', length=0)
+        ax.xaxis.set_tick_params(pad=2)
+
+        # --- Y-axis: hide individual image labels; add directional label ---
+        ax.set_yticks([])
+        ax.set_ylabel("Medulla \u2191              \u2193 Cortex", fontsize=9, labelpad=6)
+
+        # --- Unit group bracketed headers above the axes ---
+        trans = blended_transform_factory(ax.transData, ax.transAxes)
+        bracket_y = 1.045
+        tick_y0   = 1.01
+
+        for ui, unit in enumerate(ordered_units):
+            center_col = ui * n_mols + (n_mols - 1) / 2.0
+            left_col   = ui * n_mols - 0.4
+            right_col  = ui * n_mols + n_mols - 1 + 0.4
+            unit_disp  = unit_display_map.get(unit, unit) if unit_display_map else unit
+
+            # Horizontal bracket line spanning this unit's columns
+            ax.plot([left_col, right_col], [bracket_y, bracket_y],
+                    transform=trans, color='black', lw=1.0, clip_on=False)
+            # Short vertical end-ticks of the bracket
+            for x_end in (left_col, right_col):
+                ax.plot([x_end, x_end], [tick_y0, bracket_y],
+                        transform=trans, color='black', lw=1.0, clip_on=False)
+            # Unit name text above the bracket
+            ax.text(center_col, bracket_y + 0.005, unit_disp,
+                    transform=trans, ha='center', va='bottom',
+                    fontsize=9, fontweight='bold', clip_on=False)
+
+        # --- Title ---
+        norm_labels = {'cols': ' (col z-scored)', 'rows': ' (row z-scored)'}
+        norm_note = norm_labels.get(normalize_axis, '')
+        mols_display = ', '.join(
+            (display_name_map.get(m, m) if display_name_map else m) for m in query_list
+        )
+        ax.set_title(f"Spatial Gradient: {mols_display}{norm_note}",
+                     fontweight='bold', fontsize=12, pad=30)
+
+        plt.tight_layout()
+
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            mol_safe = '_'.join(
+                str(m).replace(' ', '_').replace(':', '').replace('/', '_')
+                for m in query_list
+            )
+
+            # Save main heatmap (no embedded colorbar)
+            save_path = os.path.join(output_dir, f"spatial_gradient_multi_{mol_safe}.png")
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"  Saved spatial gradient heatmap: {save_path}")
+
+            # Save standalone colorbar
+            cbar_fig, cbar_ax = plt.subplots(figsize=(1.2, max(3, n_images * 0.25)))
+            cbar_label_text = {
+                'cols': 'Z-score (per cluster-molecule column)',
+                'rows': 'Z-score (per image row)',
+            }
+            cbar_label = cbar_label_text.get(normalize_axis, value_col)
+            cbar = cbar_fig.colorbar(
+                cm.ScalarMappable(norm=norm_obj, cmap=cmap),
+                cax=cbar_ax, orientation='vertical',
+            )
+            cbar.set_label(cbar_label, fontsize=10)
+            cbar_fig.tight_layout()
+            cbar_path = os.path.join(output_dir, f"spatial_gradient_multi_{mol_safe}_colorbar.png")
+            cbar_fig.savefig(cbar_path, dpi=300, bbox_inches='tight')
+            plt.close(cbar_fig)
+            print(f"  Saved colorbar: {cbar_path}")
+
+        if show_plots:
+            plt.show()
+        else:
+            plt.close(fig)
+
+    def plot_spatial_gradient_heatmap_multi_centroid(
+        self,
+        df,
+        query_list,
+        query_col='Query',
+        value_col='Value',
+        spatial_col='centroid_x',
+        image_col='Image_Name',
+        n_bins=50,
+        unit_col='Unit',
+        unit_order=None,
+        output_dir=None,
+        display_name_map=None,
+        unit_display_map=None,
+        normalize_axis='cols',
+        cmap='coolwarm',
+        figsize=None,
+        min_bins=2,
+        show_plots=False,
+        spatial_label=None,
+        clip_std=3,
+    ):
+        """
+        Generate a spatial gradient heatmap with a multi-query layout where the
+        spatial axis (rows) is derived from a continuous coordinate column.
+        
+        Plots are generated for each individual image found in the dataframe.
+
+          - Rows    = equal-width bins of *spatial_col* (low → high, top → bottom).
+          - Columns = cluster/unit groups, each subdivided into len(query_list)
+                      sub-columns — one per molecule or ratio type in query_list.
+
+        Args:
+            df            : DataFrame with columns for *unit_col*, *query_col*,
+                            *spatial_col*, and *value_col*.
+            query_list    : Single query name (str) OR list of query/ratio names.
+            query_col     : Column containing query labels (default 'Query').
+            value_col     : Column containing numeric values (default 'Value').
+            spatial_col   : Column for the spatial axis (default 'centroid_x').
+            image_col     : Column for image names (default 'Image_Name').
+            n_bins        : Number of bins along *spatial_col* (default 50).
+            unit_col      : Column for unit labels (default 'Unit').
+            unit_order    : Ordered list of units for columns.
+            output_dir    : Directory to save outputs.
+            display_name_map : Mapping for query names.
+            unit_display_map : Mapping for unit names.
+            normalize_axis : 'cols' (z-score per sub-column) or 'rows' (z-score per row).
+            cmap          : Colormap (default 'coolwarm').
+            figsize       : Figure size (w, h).
+            min_bins      : Min bins with data for a unit to be included.
+            show_plots    : Whether to show plots.
+            spatial_label : Y-axis label.
+            clip_std      : Standard deviations at which to clip normalized values (default 3).
+                            Outliers are marked with an asterisk (*).
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
+        import matplotlib.colors as mcolors
+        from matplotlib.transforms import blended_transform_factory
+        import os
+
+        # --- Normalise query_list to a list ---
+        if isinstance(query_list, str):
+            query_list = [query_list]
+
+        # --- Filter df to requested queries ---
+        mol_df = df[df[query_col].isin(query_list)].copy()
+        if mol_df.empty:
+            print(f"No data found for query: {query_list}")
+            return
+
+        # --- Resolve Image List ---
+        image_list = sorted(mol_df[image_col].dropna().unique()) if image_col in mol_df.columns else [None]
+        
+        for img_name in image_list:
+            if img_name is not None:
+                img_df = mol_df[mol_df[image_col] == img_name].copy()
+                img_title_label = f" [{img_name}]"
+                img_file_label = str(img_name).replace(' ', '_')
+            else:
+                img_df = mol_df.copy()
+                img_title_label = ""
+                img_file_label = "all"
+
+            # --- Validate spatial column ---
+            if spatial_col not in img_df.columns:
+                print(f"spatial_col '{spatial_col}' not found for {img_name}. Skipping.")
+                continue
+                
+            img_df = img_df.dropna(subset=[spatial_col, value_col])
+            if img_df.empty:
+                continue
+
+            # --- Build spatial bins (image-specific range) ---
+            s_min, s_max = img_df[spatial_col].min(), img_df[spatial_col].max()
+            if s_min == s_max:
+                print(f"Identical spatial values for {img_name}. Skipping.")
+                continue
+
+            bin_edges = np.linspace(s_min, s_max, n_bins + 1)
+            img_df['_spatial_bin'] = np.searchsorted(bin_edges[1:], img_df[spatial_col].values, side='left')
+            img_df['_spatial_bin'] = img_df['_spatial_bin'].clip(0, n_bins - 1)
+
+            # --- Compute per-unit, per-query, per-bin means ---
+            means = (
+                img_df
+                .groupby([unit_col, query_col, '_spatial_bin'])[value_col]
+                .mean()
+                .reset_index()
+            )
+
+            # --- Determine valid units ---
+            unit_bin_counts = means.groupby(unit_col)['_spatial_bin'].nunique()
+            valid_units = unit_bin_counts[unit_bin_counts >= min_bins].index.tolist()
+            if not valid_units:
+                print(f"No valid units (>= {min_bins} bins) for {img_name}. Skipping.")
+                continue
+
+            # --- Resolve unit ordering ---
+            if unit_display_map is not None:
+                display_to_raw = {v: k for k, v in unit_display_map.items()}
+                ordered_display = list(dict.fromkeys(unit_display_map.values()))
+                ordered_units = [display_to_raw[d] for d in ordered_display
+                                 if display_to_raw.get(d) in valid_units]
+            elif unit_order is not None:
+                ordered_units = [u for u in unit_order if u in valid_units]
+            else:
+                ordered_units = sorted(valid_units)
+
+            if not ordered_units:
+                continue
+
+            n_units, n_mols, n_rows = len(ordered_units), len(query_list), n_bins
+            n_cols = n_units * n_mols
+
+            # --- Build data matrix ---
+            data_matrix = np.full((n_rows, n_cols), np.nan)
+            for ui, unit in enumerate(ordered_units):
+                for mi, mol in enumerate(query_list):
+                    col_idx = ui * n_mols + mi
+                    subset = means[(means[unit_col] == unit) & (means[query_col] == mol)]
+                    for _, row in subset.iterrows():
+                        data_matrix[int(row['_spatial_bin']), col_idx] = row[value_col]
+
+            # --- Apply normalisation and clipping ---
+            is_normalized = normalize_axis in ('cols', 'rows')
+            outlier_indices = []
+            
+            if is_normalized:
+                if normalize_axis == 'cols':
+                    col_means = np.nanmean(data_matrix, axis=0)
+                    col_stds  = np.nanstd(data_matrix,  axis=0)
+                    col_stds[col_stds == 0] = 1
+                    data_matrix = (data_matrix - col_means[np.newaxis, :]) / col_stds[np.newaxis, :]
+                elif normalize_axis == 'rows':
+                    row_means = np.nanmean(data_matrix, axis=1)
+                    row_stds  = np.nanstd(data_matrix,  axis=1)
+                    row_stds[row_stds == 0] = 1
+                    data_matrix = (data_matrix - row_means[:, np.newaxis]) / row_stds[:, np.newaxis]
+                
+                # Identify and clip outliers
+                if clip_std is not None:
+                    outlier_mask = np.abs(data_matrix) > clip_std
+                    outlier_indices = np.argwhere(outlier_mask)
+                    data_matrix = np.clip(data_matrix, -clip_std, clip_std)
+
+            # Colour limits
+            vabs = clip_std if (is_normalized and clip_std) else np.nanmax(np.abs(data_matrix))
+            vmin_plot, vmax_plot = (-vabs, vabs) if is_normalized else (np.nanmin(data_matrix), np.nanmax(data_matrix))
+            plot_matrix = np.where(np.isnan(data_matrix), 0.0, data_matrix)
+
+            # --- Figure sizing ---
+            if figsize is None:
+                fig_w = max(6, n_cols * 0.55 + 2.5)
+                fig_h = max(4, n_rows * 0.08 + 1.8)
+                figsize_img = (fig_w, fig_h)
+            else:
+                figsize_img = figsize
+
+            fig, ax = plt.subplots(figsize=figsize_img)
+            norm_obj = mcolors.Normalize(vmin=vmin_plot, vmax=vmax_plot)
+            ax.imshow(plot_matrix, aspect='auto', cmap=cmap, norm=norm_obj, interpolation='nearest')
+
+            # --- Mark outliers with asterisks ---
+            for r, c in outlier_indices:
+                # Contrast color for the asterisk
+                val = plot_matrix[r, c]
+                text_color = 'white' if abs(val) > vabs * 0.5 else 'black'
+                ax.text(c, r, '*', color=text_color, ha='center', va='center', fontweight='bold', fontsize=10)
+
+            ax.set_xlim(-0.5, n_cols - 0.5)
+            ax.set_ylim(n_rows - 0.5, -0.5)
+
+            # --- Separators ---
+            for ui in range(n_units):
+                for mi in range(1, n_mols):
+                    x = ui * n_mols + mi - 0.5
+                    ax.axvline(x, color='white', linewidth=0.5, alpha=0.5, zorder=3)
+                if ui > 0:
+                    x = ui * n_mols - 0.5
+                    ax.axvline(x, color='white', linewidth=2.0, zorder=4)
+
+            # --- X-axis ---
+            xtick_positions = list(range(n_cols))
+            xtick_labels = []
+            for _ in range(n_units):
+                for mol in query_list:
+                    disp = display_name_map.get(mol, mol) if display_name_map else mol
+                    xtick_labels.append(disp)
+            ax.set_xticks(xtick_positions)
+            ax.set_xticklabels(xtick_labels, rotation=45, ha='right', fontsize=8)
+            ax.tick_params(axis='x', which='both', length=0)
+
+            # --- Y-axis ---
+            n_yticks = min(6, n_rows)
+            ytick_indices = np.linspace(0, n_rows - 1, n_yticks, dtype=int)
+            ytick_labels_vals = [f"{bin_edges[i]:.1f}" for i in ytick_indices]
+            ax.set_yticks(ytick_indices)
+            ax.set_yticklabels(ytick_labels_vals, fontsize=7)
+            _spatial_label = spatial_label or f"← low {spatial_col}    |    high {spatial_col} →"
+            ax.set_ylabel(_spatial_label, fontsize=9, labelpad=6)
+
+            # --- Brackets ---
+            trans = blended_transform_factory(ax.transData, ax.transAxes)
+            for ui, unit in enumerate(ordered_units):
+                center_col = ui * n_mols + (n_mols - 1) / 2.0
+                left_col, right_col = ui * n_mols - 0.4, ui * n_mols + n_mols - 1 + 0.4
+                unit_disp = unit_display_map.get(unit, unit) if unit_display_map else unit
+                ax.plot([left_col, right_col], [1.045, 1.045], transform=trans, color='black', lw=1.0, clip_on=False)
+                for x_end in (left_col, right_col):
+                    ax.plot([x_end, x_end], [1.01, 1.045], transform=trans, color='black', lw=1.0, clip_on=False)
+                ax.text(center_col, 1.05, unit_disp, transform=trans, ha='center', va='bottom', fontsize=9, fontweight='bold', clip_on=False)
+
+            # --- Title ---
+            # norm_labels = {'cols': ' (col z-scored)', 'rows': ' (row z-scored)'}
+            # norm_note = norm_labels.get(normalize_axis, '')
+            # mols_display = ', '.join((display_name_map.get(m, m) if display_name_map else m) for m in query_list)
+            # ax.set_title(f"Spatial Gradient [{spatial_col}]{img_title_label}: {mols_display}{norm_note}", fontweight='bold', fontsize=12, pad=30)
+            plt.tight_layout()
+
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+                mol_safe = '_'.join(str(m).replace(' ', '_').replace(':', '').replace('/', '_') for m in query_list)
+                spatial_safe = spatial_col.replace(' ', '_')
+                save_path = os.path.join(output_dir, f"spatial_gradient_centroid_{img_file_label}_{spatial_safe}_{mol_safe}.png")
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                
+                # Colorbar
+                cbar_fig, cbar_ax = plt.subplots(figsize=(1.2, max(3, n_rows * 0.05)))
+                cbar_label = {'cols': 'Z-score (col)', 'rows': 'Z-score (row)'}.get(normalize_axis, value_col)
+                cbar = cbar_fig.colorbar(cm.ScalarMappable(norm=norm_obj, cmap=cmap), cax=cbar_ax, orientation='vertical')
+                cbar.set_label(cbar_label, fontsize=10)
+                cbar_fig.tight_layout()
+                cbar_path = os.path.join(output_dir, f"spatial_gradient_centroid_{img_file_label}_{spatial_safe}_{mol_safe}_colorbar.png")
+                cbar_fig.savefig(cbar_path, dpi=300, bbox_inches='tight')
+                plt.close(cbar_fig)
+
+            if show_plots:
+                plt.show()
+            else:
+                plt.close(fig)
+
+
+    def plot_centroid_spatial_gradient(
+        self,
+        df,
+        ratio_col='Ratio_Type',
+        value_col='Mean_Ratio',
+        unit_col='Unit',
+        image_col='Image_Name',
+        x_col='centroid_x',
+        y_col='centroid_y',
+        ratio_order=None,
+        unit_order=None,
+        units_to_display=None,
+        unit_display_names=None,
+        unit_display_map=None,
+        ratio_display_map=None,
+        cmap='coolwarm',
+        normalize='unit',
+        point_size=6,
+        alpha=0.85,
+        raster_bins=200,
+        show_raster=True,
+        show_scatter=True,
+        output_dir=None,
+        show_plots=False,
+        figsize=None,
+        dpi=200,
+    ):
+        """
+        For each image in *df*, produce a subplot grid (rows = Units, cols = Ratio_Types)
+        where every cell is a spatial map of ``value_col`` coloured by the ratio value at
+        each instance's ``(x_col, y_col)`` centroid.
+
+        Two rendering modes can be combined:
+          - **show_raster** (default True)  — a 2-D binned mean histogram rasterised with
+            ``plt.imshow``, giving a smooth spatial background.
+          - **show_scatter** (default True) — individual centroid dots overlaid on top,
+            coloured by the same value.
+
+        Args:
+            df              : DataFrame with at least the columns listed below.
+            ratio_col       : Column holding ratio / query type labels   (default 'Ratio_Type').
+            value_col       : Column holding the numeric value to colour  (default 'Mean_Ratio').
+            unit_col        : Column holding cell-type / unit labels      (default 'Unit').
+            image_col       : Column holding image identifiers            (default 'Image_Name').
+            x_col           : Column holding the X centroid coordinate    (default 'centroid_x').
+            y_col           : Column holding the Y centroid coordinate    (default 'centroid_y').
+            ratio_order       : Optional list specifying the column order of ratio types.
+                                Defaults to sorted unique values.
+            unit_order        : Optional list specifying the row order of units (raw names).
+                                Defaults to sorted unique values.
+            units_to_display  : Optional list of raw unit names to include.  Units not in
+                                this list are silently dropped before ordering.  If None,
+                                all units present in *df* are shown.
+            unit_display_names: Optional **ordered** dict ``{raw_unit: display_name}``.
+                                - Its **keys** define which units to show AND their row order
+                                  (insertion order is respected).
+                                - Its **values** are the Y-axis label strings.
+                                When provided this takes precedence over both *units_to_display*
+                                and *unit_order* / *unit_display_map* for ordering and labelling.
+            unit_display_map  : Optional dict {raw_unit -> display_name} for Y-axis labels.
+                                Used when *unit_display_names* is not provided.
+            ratio_display_map : Optional dict {raw_ratio -> display_name} for column headers.
+            cmap            : Matplotlib colormap (default 'coolwarm').
+            normalize       : How to set vmin/vmax per subplot.
+                              'unit'   — shared scale across all ratio types for the same unit
+                                         (row-wise min/max).
+                              'ratio'  — shared scale across all units for the same ratio type
+                                         (column-wise min/max).
+                              'global' — one shared scale across the whole figure.
+                              None     — each subplot auto-scales independently.
+            point_size      : Scatter marker size (default 6).
+            alpha           : Scatter marker alpha (default 0.85).
+            raster_bins     : Number of bins along each axis for the 2-D histogram raster
+                              (default 200).
+            show_raster     : Whether to show the 2-D binned mean background (default True).
+            show_scatter    : Whether to overlay individual centroid dots (default True).
+            output_dir      : Directory to save figures (one PNG per image).
+            show_plots      : Whether to display figures interactively.
+            figsize         : (width, height) override; auto-sized if None.
+            dpi             : Resolution for saved figures (default 200).
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.colors as mcolors
+        import numpy as np
+        import os
+
+        required_cols = {ratio_col, value_col, unit_col, image_col, x_col, y_col}
+        missing = required_cols - set(df.columns)
+        if missing:
+            raise ValueError(f"DataFrame is missing columns: {missing}")
+
+        # ── Resolve ordering ────────────────────────────────────────────────
+        all_ratios = sorted(df[ratio_col].dropna().unique()) if ratio_order is None else list(ratio_order)
+
+        # unit_display_names is the primary authority: keys = selection + order + labels
+        if unit_display_names is not None:
+            # Keys define the selection and row order; values are the display labels
+            _available = set(df[unit_col].dropna().unique())
+            all_units = [u for u in unit_display_names.keys() if u in _available]
+            # Build a merged display map: unit_display_names values override unit_display_map
+            _merged_display = dict(unit_display_map or {})
+            _merged_display.update(unit_display_names)
+            unit_display_map = _merged_display
+        elif unit_order is not None:
+            all_units = list(unit_order)
+        elif unit_display_map is not None:
+            # unit_display_map insertion order drives row ordering
+            display_to_raw = {v: k for k, v in unit_display_map.items()}
+            ordered_display = list(dict.fromkeys(unit_display_map.values()))
+            _available = set(df[unit_col].dropna().unique())
+            all_units = [display_to_raw[d] for d in ordered_display
+                         if display_to_raw.get(d) in _available]
+        else:
+            all_units = sorted(df[unit_col].dropna().unique())
+
+        # Apply units_to_display filter (only when unit_display_names did NOT already filter)
+        if units_to_display is not None and unit_display_names is None:
+            _keep = set(units_to_display)
+            all_units = [u for u in all_units if u in _keep]
+
+        n_units  = len(all_units)
+        n_ratios = len(all_ratios)
+
+        if n_units == 0 or n_ratios == 0:
+            print("No units or ratio types found — nothing to plot.")
+            return
+
+        # ── Pre-compute global colour limits per normalization mode ─────────
+        def _lims(values):
+            """Return (vmin, vmax) clipped to the 2nd–98th percentile range."""
+            values = np.asarray(values, dtype=float)
+            values = values[np.isfinite(values)]
+            if len(values) == 0:
+                return 0.0, 1.0
+            lo, hi = np.nanpercentile(values, 2), np.nanpercentile(values, 98)
+            if lo == hi:
+                lo, hi = lo - 0.5, hi + 0.5
+            return float(lo), float(hi)
+
+        # Pre-compute limit tables
+        global_lims  = _lims(df[value_col])                                   # (lo, hi)
+        unit_lims    = {u: _lims(df.loc[df[unit_col] == u, value_col])
+                        for u in all_units}
+        ratio_lims   = {r: _lims(df.loc[df[ratio_col] == r, value_col])
+                        for r in all_ratios}
+
+        def _subplot_lims(unit, ratio):
+            if normalize == 'global':
+                return global_lims
+            elif normalize == 'unit':
+                return unit_lims[unit]
+            elif normalize == 'ratio':
+                return ratio_lims[ratio]
+            else:
+                # independent — caller must pass actual values
+                return None
+
+        # ── Per-image loop ──────────────────────────────────────────────────
+        image_names = sorted(df[image_col].dropna().unique())
+
+        for image_name in image_names:
+            img_df = df[df[image_col] == image_name].copy()
+            if img_df.empty:
+                continue
+
+            # Only keep units / ratios present in this image
+            present_units  = [u for u in all_units  if u in img_df[unit_col].values]
+            present_ratios = [r for r in all_ratios if r in img_df[ratio_col].values]
+            if not present_units or not present_ratios:
+                continue
+
+            n_rows = len(present_units)
+            n_cols = len(present_ratios)
+
+            # ── Figure sizing ────────────────────────────────────────────
+            if figsize is None:
+                fig_w = max(4 * n_cols + 1.5, 8)
+                fig_h = max(3.2 * n_rows + 1.2, 5)
+                _figsize = (fig_w, fig_h)
+            else:
+                _figsize = figsize
+
+            fig, axes = plt.subplots(
+                n_rows, n_cols,
+                figsize=_figsize,
+                squeeze=False,
+            )
+
+            # Global spatial extent for this image (consistent axes across all subplots)
+            x_all = img_df[x_col].values
+            y_all = img_df[y_col].values
+            x_min, x_max = float(np.nanmin(x_all)), float(np.nanmax(x_all))
+            y_min, y_max = float(np.nanmin(y_all)), float(np.nanmax(y_all))
+            pad_x = max((x_max - x_min) * 0.02, 10)
+            pad_y = max((y_max - y_min) * 0.02, 10)
+
+            for ri, unit in enumerate(present_units):
+                unit_df = img_df[img_df[unit_col] == unit]
+                unit_disp = (unit_display_map.get(unit, unit)
+                             if unit_display_map else unit)
+
+                for ci, ratio in enumerate(present_ratios):
+                    ax = axes[ri][ci]
+                    cell_df = unit_df[unit_df[ratio_col] == ratio].dropna(subset=[x_col, y_col, value_col])
+
+                    lims = _subplot_lims(unit, ratio)
+                    if lims is None and not cell_df.empty:
+                        lims = _lims(cell_df[value_col])
+                    elif lims is None:
+                        lims = (0.0, 1.0)
+
+                    vmin, vmax = lims
+                    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+
+                    # ── Raster background ─────────────────────────────
+                    if show_raster and not cell_df.empty:
+                        xs = cell_df[x_col].values.astype(float)
+                        ys = cell_df[y_col].values.astype(float)
+                        zs = cell_df[value_col].values.astype(float)
+
+                        # Build 2-D grid covering the full image extent
+                        x_edges = np.linspace(x_min - pad_x, x_max + pad_x, raster_bins + 1)
+                        y_edges = np.linspace(y_min - pad_y, y_max + pad_y, raster_bins + 1)
+
+                        # Bin indices for each point
+                        xi = np.clip(np.searchsorted(x_edges, xs, side='right') - 1,
+                                     0, raster_bins - 1)
+                        yi = np.clip(np.searchsorted(y_edges, ys, side='right') - 1,
+                                     0, raster_bins - 1)
+
+                        # Accumulate sum and count per bin
+                        sum_grid   = np.full((raster_bins, raster_bins), np.nan)
+                        count_grid = np.zeros((raster_bins, raster_bins), dtype=int)
+                        np.add.at(count_grid, (yi, xi), 1)
+                        tmp_sum = np.zeros((raster_bins, raster_bins), dtype=float)
+                        np.add.at(tmp_sum, (yi, xi), zs)
+
+                        mask = count_grid > 0
+                        sum_grid[mask] = tmp_sum[mask] / count_grid[mask]
+
+                        ax.imshow(
+                            sum_grid,
+                            origin='upper',
+                            extent=[x_min - pad_x, x_max + pad_x,
+                                    y_max + pad_y, y_min - pad_y],
+                            aspect='equal',
+                            cmap=cmap,
+                            norm=norm,
+                            interpolation='bilinear',
+                            zorder=1,
+                        )
+
+                    # ── Scatter dots ──────────────────────────────────
+                    if show_scatter and not cell_df.empty:
+                        sc = ax.scatter(
+                            cell_df[x_col],
+                            cell_df[y_col],
+                            c=cell_df[value_col],
+                            cmap=cmap,
+                            norm=norm,
+                            s=point_size,
+                            alpha=alpha,
+                            linewidths=0,
+                            zorder=2,
+                        )
+
+                    # ── Axes cosmetics ────────────────────────────────
+                    ax.set_xlim(x_min - pad_x, x_max + pad_x)
+                    ax.set_ylim(y_max + pad_y, y_min - pad_y)   # image-style: y inverted
+                    ax.set_aspect('equal')
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+                    ax.spines[['top', 'right', 'left', 'bottom']].set_visible(False)
+
+                    # Column header (only top row)
+                    if ri == 0:
+                        ratio_disp = (ratio_display_map.get(ratio, ratio)
+                                      if ratio_display_map else ratio)
+                        ax.set_title(ratio_disp, fontsize=9, fontweight='bold', pad=4)
+
+                    # Row label (only leftmost column)
+                    if ci == 0:
+                        ax.set_ylabel(unit_disp, fontsize=8, fontweight='bold',
+                                      rotation=0, ha='right', va='center',
+                                      labelpad=6)
+
+                    # Empty-data notice
+                    if cell_df.empty:
+                        ax.text(0.5, 0.5, 'no data', transform=ax.transAxes,
+                                ha='center', va='center', fontsize=7, color='grey')
+
+            # ── Shared colourbar (one per normalization scope) ────────────
+            # We place a single colourbar on the right side of the figure
+            import matplotlib.cm as cm
+            if normalize in ('global', 'unit', 'ratio', None):
+                # Use global limits for the shared colorbar label
+                cb_vmin, cb_vmax = global_lims
+                cb_norm = mcolors.Normalize(vmin=cb_vmin, vmax=cb_vmax)
+                cb_ax = fig.add_axes([0.92, 0.15, 0.015, 0.70])
+                cbar = fig.colorbar(
+                    cm.ScalarMappable(norm=cb_norm, cmap=cmap),
+                    cax=cb_ax,
+                    orientation='vertical',
+                )
+                cbar.set_label(value_col.replace('_', ' '), fontsize=9)
+                cbar.ax.tick_params(labelsize=7)
+
+            # ── Figure title ──────────────────────────────────────────────
+            norm_note = (
+                f" — colour normalised per {'unit (row)' if normalize == 'unit' else 'ratio (col)' if normalize == 'ratio' else 'global'}"
+                if normalize else ""
+            )
+            fig.suptitle(
+                f"Spatial Centroid Gradient  |  {image_name}{norm_note}",
+                fontsize=11, fontweight='bold', y=1.01,
+            )
+
+            plt.tight_layout(rect=[0, 0, 0.91, 1.0])
+
+            # ── Save / show ───────────────────────────────────────────────
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+                safe_name = str(image_name).replace(' ', '_').replace('/', '_').replace(':', '')
+                save_path = os.path.join(output_dir, f"centroid_gradient_{safe_name}.png")
+                plt.savefig(save_path, dpi=dpi, bbox_inches='tight')
+                print(f"  Saved: {save_path}")
+
+            if show_plots:
+                plt.show()
+            else:
+                plt.close(fig)
+
+    def plot_topographical_intensity_map(self, image,
+                                        downsample_factor=1, sigma=0, padding=0,
+                                        cmap='magma', alpha=1.0, elevation=40, azimuth=90, 
+                                        output_dir=None, show_plots=False):
+        """
+        Create a clean 3D topographical map based on image intensity.
+        
+        This treats the 2D image intensity as elevation (Z-axis) and renders a clean
+        surface without axes, grid, or unit markers.
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from scipy.ndimage import zoom
+        import os
+
+        # Crop by non-zero pixels
+        non_zero_mask = image != 0
+
+        # Calculate bounds of non-zero pixels
+        coords = np.argwhere(non_zero_mask)
+        min_y, min_x = coords.min(axis=0)
+        max_y, max_x = coords.max(axis=0)
+
+        # Add padding
+        min_x = max(0, min_x - padding)
+        max_x = min(image.shape[1], max_x + padding)
+        min_y = max(0, min_y - padding)
+        max_y = min(image.shape[0], max_y + padding)
+
+        img_crop = image[min_y:max_y, min_x:max_x].copy()
+            
+        # Apply smoothing if requested
+        if sigma > 0:
+            img_crop = ndi.gaussian_filter(img_crop.astype(float), sigma=sigma)
+
+        # Prepare image data for plotting
+        if downsample_factor > 1:
+            plot_image = zoom(img_crop, 1/downsample_factor, order=1)
+        else:
+            plot_image = img_crop
+                
+        h, w = plot_image.shape
+        x_mesh = np.arange(0, w)
+        y_mesh = np.arange(0, h)
+        X, Y = np.meshgrid(x_mesh, y_mesh)
+            
+        fig = plt.figure(figsize=(12, 10), facecolor='white')
+        ax = fig.add_subplot(111, projection='3d')
+            
+        # Use strides to handle large images efficiently
+        r_stride = max(1, h // 100)
+        c_stride = max(1, w // 100)
+        
+        rcount = 100
+        ccount = int(rcount * h/w)
+        # Plot the surface
+        surf = ax.plot_surface(X, Y, plot_image, 
+        rcount=rcount,
+        ccount=ccount,
+                               cmap=cmap, alpha=alpha, linewidth=0, 
+                               antialiased=True, shade=False)
+            
+        # Set view and aspect
+        ax.view_init(elev=elevation, azim=azimuth)
+        ax.set_box_aspect([1, h/w, 0.3])
+            
+        # REMOVE ALL AXES, GRID, AND SPINES
+        ax.set_axis_off()
+        ax.grid(False)
+            
+        # Remove pane backgrounds (make them transparent)
+        ax.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+        ax.yaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+        ax.zaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+            
+        plt.tight_layout()
+            
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = os.path.join(output_dir, f"topographical_map.png")
+            plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+            print(f"Saved topographical map to {output_path}")
+            
+        if show_plots:
+            plt.show()
+        else:
+            plt.close(fig)
+
 
     def generate_unit_heatmaps(self, df, value_col, grouping_col, output_dir, data_type='percentage',
                                figsize=(8, 6), show_plots=False, cmap=None, vmin=-2, vmax=2, display_name_map=None, unit_display_map=None, unit_order=None,
-                               units_to_display=None, top_n=20, groups_to_display=None, **kwargs):
+                               units_to_display=None, top_n=20, groups_to_display=None, remove_outliers=False, **kwargs):
         """
         Generate heatmaps showing each molecule across units (aggregating across Group_IDs).
         
@@ -1260,9 +2471,9 @@ class HSI_Visualizer:
         unique_groups = [group.strip() for group in unique_groups]
         unique_units = df['Unit'].unique()
         
-        # if len(unique_groups) < 2 or len(unique_units) < 2:
-        #     print(f"Insufficient data for unit heatmap: {len(unique_groups)} groups, {len(unique_units)} units")
-        #     return {}
+        if len(unique_groups) < 2 or len(unique_units) < 2:
+            print(f"Insufficient data for unit heatmap: {len(unique_groups)} groups, {len(unique_units)} units")
+            return {}
         
         # Check if secondary grouping column exists (e.g., Group_ID, Treatment)
         secondary_group_col = kwargs.get('secondary_group_col', 'Group_ID' if 'Group_ID' in df.columns else None)
@@ -1270,8 +2481,10 @@ class HSI_Visualizer:
         
         # Apply outlier filtration before aggregation to ensure stable Z-scores
         filter_groups = ['Unit', secondary_group_col, grouping_col] if has_Group_ID else ['Unit', grouping_col]
-        df_clean = df
-        # df_clean = self._apply_outlier_filtration(df, value_col, filter_groups)
+        if remove_outliers:
+            df_clean = self._apply_outlier_filtration(df, value_col, filter_groups)
+        else:
+            df_clean = df
         
         if has_Group_ID:
             # Calculate mean for each Unit-SecondaryGroup-Group combination
@@ -1287,9 +2500,9 @@ class HSI_Visualizer:
         agg_data = agg_data.replace([np.inf, -np.inf], np.nan)
         agg_data = agg_data.dropna(subset=['mean'])
         
-        # if len(agg_data) < 2:
-        #     print("Insufficient data after removing NaN/inf values")
-        #     return {}
+        if len(agg_data) < 2:
+            print("Insufficient data after removing NaN/inf values")
+            return {}
         
         # Calculate z-scores normalized to each group's own mean across all unit-Group_ID combinations
         # For each molecule/ratio, normalize to its mean across all units (and Group_IDs if present)
@@ -1400,11 +2613,30 @@ class HSI_Visualizer:
             fig, ax = plt.subplots(figsize=(fig_width, fig_height))
             ax.set_facecolor('black')
             
-            # Create heatmap with journal-quality styling
+            # Create heatmap without embedded colorbar
             sns.heatmap(heatmap_matrix, annot=False, cmap=cmap, 
                        center=0, vmin=vmin, vmax=vmax,
-                       cbar_kws={'label': 'Z-score (normalized to mean)', 'shrink': 0.8},
+                       cbar=False,
                        linewidths=0.5, linecolor='white', ax=ax, square=False)
+            
+            # --- Colorbar saved separately ---
+            import matplotlib.cm as cm
+            import matplotlib.colors as mcolors
+            cbar_fig, cbar_ax = plt.subplots(figsize=(1.2, max(3, n_rows * 0.35)))
+            norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax) if (vmin < 0 and vmax > 0) else mcolors.Normalize(vmin=vmin, vmax=vmax)
+            cbar = cbar_fig.colorbar(
+                cm.ScalarMappable(norm=norm, cmap=cmap),
+                cax=cbar_ax,
+                orientation='vertical',
+            )
+            cbar.set_label('Z-score (normalized to mean)', color='black', fontsize=14)
+            cbar.ax.yaxis.set_tick_params(color='black', labelcolor='black', labelsize=12)
+            cbar.outline.set_edgecolor('black')
+            cbar_fig.tight_layout()
+            cbar_path = os.path.join(output_dir, f"heatmap_unit_aggregated_{data_type}_colorbar.png")
+            cbar_fig.savefig(cbar_path, dpi=300, bbox_inches='tight', facecolor='white')
+            plt.close(cbar_fig)
+            print(f"  Saved colorbar: {cbar_path}")
             
             # Add visual separators between different units if showing grouping combinations
             if has_Group_ID:
@@ -1433,12 +2665,12 @@ class HSI_Visualizer:
                         # Apply unit display map
                         if unit_display_map and unit_part in unit_display_map:
                             unit_part = unit_display_map[unit_part]
-                        # Abbreviate Group_ID to first letter only
-                        Group_ID_abbrev = Group_ID_part.rstrip(')')[0] if Group_ID_part.rstrip(')') else Group_ID_part
-                        if Group_ID_abbrev in ['O', 'Other', '', None]:
+                        # Use full Group_ID name instead of abbreviation
+                        Group_ID_full = Group_ID_part.rstrip(')')
+                        if Group_ID_full in ['O', 'Other', '', None]:
                             new_labels.append(f"{unit_part}")
                         else:
-                            new_labels.append(f"{unit_part} ({Group_ID_abbrev})")
+                            new_labels.append(f"{unit_part} ({Group_ID_full})")
                     else:
                         # Apply unit display map to label without Group_ID
                         if unit_display_map and label in unit_display_map:
@@ -1489,13 +2721,13 @@ class HSI_Visualizer:
             
             # Save figure
             output_path = os.path.join(output_dir, 
-                                      f"heatmap_unit_aggregated_{data_type}.svg")
+                                      f"heatmap_unit_aggregated_{data_type}.png")
             plt.savefig(output_path, dpi=300, bbox_inches='tight')
             
             if show_plots:
                 plt.show()
             else:
-                plt.close()
+                plt.close(fig)
             
             print(f"\nGenerated unit-aggregated heatmap in {output_dir}")
             return heatmap_data
@@ -1507,82 +2739,57 @@ class HSI_Visualizer:
     def generate_unit_bubble_charts(self, df, value_col, grouping_col, output_dir, data_type='percentage',
                                    show_plots=False, cmap=None, vmin=-2, vmax=2,
                                    display_name_map=None, unit_display_map=None, unit_order=None,
-                                   units_to_display=None, top_n=20, groups_to_display=None, **kwargs):
+                                   units_to_display=None, top_n=20, groups_to_display=None, remove_outliers=False, **kwargs):
         """
         Generate a bubble chart showing each molecule across units (aggregating across Group_IDs).
 
         Mirrors generate_unit_heatmaps but renders bubbles instead of filled cells:
-          - Bubble size encodes the magnitude of the z-score (|z_score|)
-          - Bubble color encodes the sign/magnitude via the chosen colormap
-          - Black figure/axes background
-          - White text for all labels and ticks
+          - Bubble size encodes the magnitude of the significance (1-vs-rest T-test)
+          - Bubble color encodes the sign/magnitude via the chosen colormap (z-score)
+          - White figure/axes background
           - X-axis tick labels (molecules/ratios) are placed above the plot
 
-        Parameters
-        ----------
-        df : pandas.DataFrame
-        value_col : str
-        grouping_col : str
-        output_dir : str
-        data_type : str
-        show_plots : bool
-        cmap : str
-        vmin, vmax : float
-        display_name_map : dict, optional
-        unit_display_map : dict, optional
-        unit_order : list, optional
-        units_to_display : list, optional
-            List of unit names to include; all others are excluded.
-        top_n : int, optional
-            Maximum number of top molecules to display (by z-score magnitude) when
-            grouping_col is 'Molecule'. Default is 20. Ignored if groups_to_display is set.
-        groups_to_display : list, optional
-            Explicit list of molecule or ratio names to include. When provided, overrides
-            top_n filtering and shows only these specific entries.
-
-        Returns
-        -------
-        dict : {'matrix': heatmap_matrix, 'raw_data': agg_data}
+        Standardized logic:
+          - Statistics (bubble size) are always calculated on RAW data.
+          - Visuals (bubble color/z-scores) respect the remove_outliers toggle.
         """
         import matplotlib.colors as mcolors
+        from scipy.stats import ttest_ind
+        from matplotlib.lines import Line2D
 
         os.makedirs(output_dir, exist_ok=True)
 
         if cmap is None:
             cmap = SVG_BUBBLE_CMAP
 
-        # Filter to selected units if specified
+        # 1. Filter to selected units if specified
         if units_to_display is not None:
             df = df[df['Unit'].isin(units_to_display)].copy()
 
-        unique_groups = df[grouping_col].unique()
-        unique_groups = [g.strip() for g in unique_groups]
-        unique_units = df['Unit'].unique()
+        # 2. Prepare raw data for statistics (clean NaNs/infs but keep outliers)
+        df_stats = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[value_col]).copy()
 
-        # Check if secondary grouping column exists
+        # 3. Prepare filtered data for plotting (if requested)
         secondary_group_col = kwargs.get('secondary_group_col', 'Group_ID' if 'Group_ID' in df.columns else None)
         has_Group_ID = secondary_group_col is not None and df[secondary_group_col].notna().any()
-        
-        # Apply outlier filtration before aggregation
         filter_groups = ['Unit', secondary_group_col, grouping_col] if has_Group_ID else ['Unit', grouping_col]
-        # df_clean = self._apply_outlier_filtration(df, value_col, filter_groups)
-
-        df_clean = df
         
+        if remove_outliers:
+            df_plot = self._apply_outlier_filtration(df, value_col, filter_groups)
+        else:
+            df_plot = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[value_col]).copy()
+
+        # 4. Aggregate plotting data
         if has_Group_ID:
-            agg_data = df_clean.groupby(['Unit', secondary_group_col, grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
+            agg_data = df_plot.groupby(['Unit', secondary_group_col, grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
             agg_data['Unit_Group_Combo'] = agg_data['Unit'] + ' (' + agg_data[secondary_group_col].astype(str) + ')'
         else:
-            agg_data = df_clean.groupby(['Unit', grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
+            agg_data = df_plot.groupby(['Unit', grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
             agg_data['Unit_Group_Combo'] = agg_data['Unit']
 
-        agg_data = agg_data.replace([np.inf, -np.inf], np.nan)
         agg_data = agg_data.dropna(subset=['mean'])
 
-        # if len(agg_data) < 2:
-        #     print("Insufficient data after removing NaN/inf values")
-        #     return {}
-
+        # Calculate Z-scores across units for each molecule (using the plotting data)
         def normalize_group(group):
             group_mean = group['mean'].mean()
             group_std = group['mean'].std()
@@ -1595,27 +2802,21 @@ class HSI_Visualizer:
         agg_data = agg_data.groupby(grouping_col, group_keys=False).apply(normalize_group)
 
         try:
-            # --- same filtering/pivoting logic as generate_unit_heatmaps ---
+            # Filtering molecules
             if groups_to_display is not None:
                 agg_sub = agg_data[agg_data[grouping_col].isin(groups_to_display)]
             elif grouping_col == 'Molecule':
                 n_top = np.minimum(top_n, df[grouping_col].nunique())
-                top_molecules = agg_data.iloc[agg_data['z_score'].abs().nlargest(n_top, keep='all').index][grouping_col].unique()
+                # Use absolute z-score for top_n selection
+                top_molecules = agg_data.groupby(grouping_col)['z_score'].apply(lambda x: x.abs().max()).nlargest(n_top).index
                 agg_sub = agg_data[agg_data[grouping_col].isin(top_molecules)]
             else:
                 agg_sub = agg_data
 
-            # Standardized pivot logic: aggregate by mean to handle any potential duplicate Unit_Group_ID labels
+            # Create matrices for plotting
             heatmap_matrix = agg_sub.pivot_table(index='Unit_Group_Combo', columns=grouping_col, values='z_score', aggfunc='mean')
             mean_matrix = agg_sub.pivot_table(index='Unit_Group_Combo', columns=grouping_col, values='mean', aggfunc='mean')
             
-            # Ensure alignment
-            mean_matrix = mean_matrix.reindex(index=heatmap_matrix.index, columns=heatmap_matrix.columns)
-            
-            # Mask values with 0 mean or NaN
-            mask = (mean_matrix == 0) | mean_matrix.isna()
-            heatmap_matrix = heatmap_matrix.mask(mask, np.nan)
-
             # Sort columns
             if display_name_map:
                 current_columns = heatmap_matrix.columns.tolist()
@@ -1625,67 +2826,48 @@ class HSI_Visualizer:
             else:
                 heatmap_matrix = heatmap_matrix.sort_index(axis=1)
 
-            # Sort rows
+            # Sort rows based on unit_order if provided
             if unit_order is not None:
                 all_rows = heatmap_matrix.index.tolist()
                 ordered_rows = []
                 for unit in unit_order:
                     matching_rows = [r for r in all_rows if r.startswith(unit + ' (') or r == unit]
                     ordered_rows.extend(sorted(matching_rows))
-                # Only keep rows that match unit_order (exclude unlisted units)
                 heatmap_matrix = heatmap_matrix.reindex(ordered_rows).dropna(how='all')
             elif has_Group_ID:
+                # Default ordering matching barplots
                 all_rows = heatmap_matrix.index.tolist()
                 unit_group_map = {}
                 for row in all_rows:
-                    if ' (' in row:
-                        base_unit = row.split(' (')[0]
-                        unit_group_map.setdefault(base_unit, []).append(row)
-                    else:
-                        unit_group_map.setdefault(row, [row])
+                    base_unit = row.split(' (')[0] if ' (' in row else row
+                    unit_group_map.setdefault(base_unit, []).append(row)
+                
                 ordered_rows = []
-                for base_unit, rows in unit_group_map.items():
-                    if len(rows) > 1:
-                        ordered_rows.extend(sorted(rows))
-                for base_unit, rows in unit_group_map.items():
-                    if len(rows) == 1:
-                        ordered_rows.extend(rows)
+                # First units with multiple groups
+                for base_unit in sorted(unit_group_map.keys()):
+                    if len(unit_group_map[base_unit]) > 1:
+                        ordered_rows.extend(sorted(unit_group_map[base_unit]))
+                # Then units with single groups
+                for base_unit in sorted(unit_group_map.keys()):
+                    if len(unit_group_map[base_unit]) == 1:
+                        ordered_rows.extend(unit_group_map[base_unit])
                 heatmap_matrix = heatmap_matrix.reindex(ordered_rows)
 
-            # Build display labels for columns (x-axis / molecules)
-            col_labels = []
-            for col in heatmap_matrix.columns:
-                if display_name_map and col in display_name_map:
-                    col_labels.append(display_name_map[col])
-                else:
-                    col_labels.append(col.replace('_', ' '))
-
-            # Build display labels for rows (y-axis / units)
+            # Build display labels
+            col_labels = [self._apply_display_name(c, display_name_map) for c in heatmap_matrix.columns]
             row_labels = []
             for row in heatmap_matrix.index:
-                if has_Group_ID and ' (' in row:
+                if ' (' in row:
                     unit_part, Group_ID_part = row.split(' (', 1)
-                    if unit_display_map and unit_part in unit_display_map:
-                        unit_part = unit_display_map[unit_part]
-                    Group_ID_abbrev = Group_ID_part.rstrip(')')[0] if Group_ID_part.rstrip(')') else Group_ID_part
-                    if Group_ID_abbrev in ['O', 'Other', '', None]:
-                        row_labels.append(f"{unit_part}")
-                    else:
-                        row_labels.append(f"{unit_part} ({Group_ID_abbrev})")
+                    unit_disp = unit_display_map[unit_part] if unit_display_map and unit_part in unit_display_map else unit_part
+                    Group_ID_full = Group_ID_part.rstrip(')')
+                    row_labels.append(f"{unit_disp} ({Group_ID_full})" if Group_ID_full not in ['O', 'Other', ''] else f"{unit_disp}")
                 else:
-                    if unit_display_map and row in unit_display_map:
-                        row_labels.append(unit_display_map[row])
-                    else:
-                        row_labels.append(row.replace('_', ' '))
+                    row_labels.append(unit_display_map[row] if unit_display_map and row in unit_display_map else row.replace('_', ' '))
 
-            bubble_data = {'matrix': heatmap_matrix, 'raw_data': agg_data}
-
-            # --- Figure sizing and spacing ---
-            n_rows = heatmap_matrix.shape[0]
-            n_cols = heatmap_matrix.shape[1]
-            spacing = 0.5  # <1 brings bubbles closer together
-            
-            # Standardized scaling with heatmap: ~0.5 inches per row, ~1.0 inches per column
+            # Figure sizing
+            n_rows, n_cols = heatmap_matrix.shape
+            spacing = 0.5
             fig_width = max(6, 0.7 * n_cols + 2.5)
             fig_height = max(3, min(10, 0.35 * n_rows + 2.5))
             
@@ -1693,191 +2875,120 @@ class HSI_Visualizer:
             fig.patch.set_facecolor('white')
             ax.set_facecolor('white')
 
-            # --- Build scatter coordinates ---
             col_index = {col: i * spacing for i, col in enumerate(heatmap_matrix.columns)}
             row_index = {row: i * spacing for i, row in enumerate(heatmap_matrix.index)}
 
             xs, ys, sizes, color_vals = [], [], [], []
             xs_black, ys_black, sizes_black = [], [], []
-            all_z = heatmap_matrix.values.flatten()
-            max_abs_z = max(np.abs(all_z).max(), 0.1)
-            max_bubble_size = 250
             min_bubble_size = 50
 
-            # size/color calculations will use the synchronized heatmap_matrix and mean_matrix
-
-            # Size bubbles based on 1-vs-rest t-test significance
-            from scipy.stats import ttest_ind
-            
+            # 5. Loop through and calculate significance on RAW data
             for row_name in heatmap_matrix.index:
                 for col_name in heatmap_matrix.columns:
                     z = heatmap_matrix.loc[row_name, col_name]
                     mean_val = mean_matrix.loc[row_name, col_name]
-                    x_val = col_index[col_name]
-                    y_val = row_index[row_name]
+                    x_val, y_val = col_index[col_name], row_index[row_name]
                     
-                    # If the value is 0 or nan, force smallest bubble and color black
                     if pd.isna(mean_val) or mean_val == 0:
-                        xs_black.append(x_val)
-                        ys_black.append(y_val)
-                        sizes_black.append(min_bubble_size)
+                        xs_black.append(x_val); ys_black.append(y_val); sizes_black.append(min_bubble_size)
+                        continue
+                        
+                    # Extract unit and group info for stat lookup
+                    matching_agg = agg_data[(agg_data['Unit_Group_Combo'] == row_name) & (agg_data[grouping_col] == col_name)]
+                    if matching_agg.empty:
+                        xs_black.append(x_val); ys_black.append(y_val); sizes_black.append(min_bubble_size); continue
+                    
+                    unit_name = matching_agg.iloc[0]['Unit']
+                    secondary_val = matching_agg.iloc[0][secondary_group_col] if has_Group_ID else None
+                    
+                    # 1-vs-rest T-test on RAW data (df_stats)
+                    if has_Group_ID and secondary_val is not None:
+                        group_mask = (df_stats['Unit'] == unit_name) & (df_stats[secondary_group_col] == secondary_val) & (df_stats[grouping_col] == col_name)
+                        other_mask = (~((df_stats['Unit'] == unit_name) & (df_stats[secondary_group_col] == secondary_val))) & (df_stats[grouping_col] == col_name)
                     else:
-                        # Get the corresponding agg_data row to extract Unit and Group_ID
-                        matching_agg_rows = agg_data[(agg_data['Unit_Group_Combo'] == row_name) & 
-                                                      (agg_data[grouping_col] == col_name)]
-                        
-                        if len(matching_agg_rows) == 0:
-                            xs_black.append(x_val)
-                            ys_black.append(y_val)
-                            sizes_black.append(min_bubble_size)
-                            continue
-                        
-                        unit_name = matching_agg_rows.iloc[0]['Unit']
-                        secondary_val = matching_agg_rows.iloc[0][secondary_group_col] if has_Group_ID else None
-                        
-                        # Get data for this specific group combination from the already-filtered clean dataframe
-                        if has_Group_ID and secondary_val is not None:
-                            group_mask = (df_clean['Unit'] == unit_name) & (df_clean[secondary_group_col] == secondary_val) & (df_clean[grouping_col] == col_name)
-                            other_mask = (~((df_clean['Unit'] == unit_name) & (df_clean[secondary_group_col] == secondary_val))) & (df_clean[grouping_col] == col_name)
-                        else:
-                            group_mask = (df_clean['Unit'] == unit_name) & (df_clean[grouping_col] == col_name)
-                            other_mask = (df_clean['Unit'] != unit_name) & (df_clean[grouping_col] == col_name)
+                        group_mask = (df_stats['Unit'] == unit_name) & (df_stats[grouping_col] == col_name)
+                        other_mask = (df_stats['Unit'] != unit_name) & (df_stats[grouping_col] == col_name)
 
-                        this_vals = df_clean[group_mask][value_col].values
-                        other_vals = df_clean[other_mask][value_col].values
-                        
-                        # Filter outliers for the comparison group (rest of data for same molecule)
-                        # Note: Per-group filtration is already handled by df_clean
-                        
-                        # Calculate p-value via t-test
-                        if len(this_vals) >= 2 and len(other_vals) >= 2:
-                            t_stat, p_val = ttest_ind(this_vals, other_vals, equal_var=False)
-                            if pd.isna(p_val):
-                                p_val = 1.0
-                        else:
-                            p_val = 1.0
-                        
-                        # Size based on significance
-                        if p_val >= 0.05:
-                            size = min_bubble_size
-                        elif p_val < 0.05 and p_val >= 0.01:
-                            size = 125
-                        elif p_val < 0.01 and p_val >= 0.001:
-                            size = 200
-                        elif p_val < 0.001:
-                            size = 250
-                        
-                        xs.append(x_val)
-                        ys.append(y_val)
-                        sizes.append(size)
-                        color_vals.append(z)
+                    this_vals = df_stats[group_mask][value_col].values
+                    other_vals = df_stats[other_mask][value_col].values
+                    
+                    p_val = 1.0
+                    if len(this_vals) >= 2 and len(other_vals) >= 2:
+                        # Assuming equal variance as requested (Tukey-Kramer assumption)
+                        _, p_val = ttest_ind(this_vals, other_vals, equal_var=True)
+                        if pd.isna(p_val): p_val = 1.0
+                    
+                    # Size based on significance
+                    if p_val >= 0.05: size = min_bubble_size
+                    elif p_val >= 0.01: size = 125
+                    elif p_val >= 0.001: size = 200
+                    else: size = 250
+                    
+                    xs.append(x_val); ys.append(y_val); sizes.append(size); color_vals.append(z)
 
-            # Use TwoSlopeNorm only if vmin < 0 < vmax, otherwise use standard Norm
-            if vmin < 0 and vmax > 0:
-                norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
-            else:
-                norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
-            # Plot normal colored bubbles
+            # Normalization and Plotting
+            norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax) if vmin < 0 < vmax else mcolors.Normalize(vmin=vmin, vmax=vmax)
             if xs:
-                sc = ax.scatter(xs, ys, s=sizes, c=color_vals, cmap=cmap, norm=norm,
-                                edgecolors='none', zorder=3)
-            else:
-                # Dummy scatter for colorbar if no normal data
-                sc = ax.scatter([0], [0], s=[0], c=[0], cmap=cmap, norm=norm)
-                
-            # Plot black bubbles for NaN/0
+                ax.scatter(xs, ys, s=sizes, c=color_vals, cmap=cmap, norm=norm, edgecolors='none', zorder=3)
             if xs_black:
-                ax.scatter(xs_black, ys_black, s=sizes_black, c='black',
-                           edgecolors='none', zorder=3)
+                ax.scatter(xs_black, ys_black, s=sizes_black, c='black', edgecolors='none', zorder=3)
 
-            # --- Colorbar ---
-            cbar = fig.colorbar(sc, ax=ax, shrink=0.8, pad=0.02)
-            cbar.set_label('Z-score (normalized to mean)', color='black', fontsize=14)
-            cbar.ax.yaxis.set_tick_params(color='black', labelcolor='black', labelsize=12)
-            plt.setp(cbar.ax.yaxis.get_ticklabels(), color='black')
-            cbar.outline.set_edgecolor('black')
+            # Save colorbar
+            import matplotlib.cm as cm
+            cbar_fig, cbar_ax = plt.subplots(figsize=(1.2, max(3, n_rows * 0.35)))
+            cbar = cbar_fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), cax=cbar_ax, orientation='vertical')
+            cbar.set_label('Z-score (normalized)', color='black', fontsize=14)
+            cbar_fig.savefig(os.path.join(output_dir, f"bubble_unit_aggregated_{data_type}_colorbar.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            plt.close(cbar_fig)
 
-            # --- Horizontal separator lines between different base units ---
+            # Horizontal separators
             if has_Group_ID:
-                prev_unit_name = None
-                for ridx, row_name in enumerate(heatmap_matrix.index.tolist()):
-                    current_unit = row_name.split(' (')[0] if ' (' in row_name else row_name
-                    if prev_unit_name is not None and current_unit != prev_unit_name:
+                prev_u = None
+                for ridx, row_nm in enumerate(heatmap_matrix.index):
+                    curr_u = row_nm.split(' (')[0] if ' (' in row_nm else row_nm
+                    if prev_u is not None and curr_u != prev_u:
                         ax.axhline(y=ridx * spacing - spacing * 0.5, color='#aaaaaa', linewidth=1.0, zorder=2)
-                    prev_unit_name = current_unit
+                    prev_u = curr_u
 
-            # --- Subtle grid ---
+            # Formatting
             ax.set_xticks([i * spacing for i in range(n_cols)])
             ax.set_yticks([i * spacing for i in range(n_rows)])
             ax.grid(True, color='#dddddd', linewidth=0.5, zorder=1)
-            ax.set_axisbelow(True)
-
-            # --- X-tick labels above the plot ---
-            ax.xaxis.set_label_position('top')
-            ax.xaxis.tick_top()
+            ax.xaxis.set_label_position('top'); ax.xaxis.tick_top()
             ax.set_xticklabels(col_labels, rotation=45, ha='left', fontsize=14, color='black')
-
-            # --- Y-tick labels ---
             ax.set_yticklabels(row_labels, rotation=0, ha='right', fontsize=14, color='black')
-
-            # --- Axis labels ---
-            ylabel = 'Unit (Group_ID)' if has_Group_ID else 'Unit'
-            ax.set_ylabel(ylabel, fontweight='bold', fontsize=16, color='black')
-
-            # --- Title ---
-            title = 'Normalized Molecule Percentage' if data_type == 'percentage' else 'Normalized Ratio'
-            ax.set_title(title, fontweight='bold', fontsize=18, pad=20, color='black')
-
-            # --- Tick colors ---
-            ax.tick_params(colors='black', which='both')
-
-            # --- Spine colors ---
-            for spine in ax.spines.values():
-                spine.set_edgecolor('#cccccc')
-
-            # --- Axis limits ---
+            ax.set_ylabel('Unit (Group_ID)' if has_Group_ID else 'Unit', fontweight='bold', fontsize=16)
+            ax.set_title('Normalized Molecule Percentage' if data_type == 'percentage' else 'Normalized Ratio', fontweight='bold', fontsize=18, pad=20)
+            
+            for spine in ax.spines.values(): spine.set_edgecolor('#cccccc')
             ax.set_xlim(-spacing * 0.5, (n_cols - 1) * spacing + spacing * 0.5)
             ax.set_ylim(-spacing * 0.5, (n_rows - 1) * spacing + spacing * 0.5)
 
-
-            # --- Save significance legend as separate SVG ---
-            from matplotlib.lines import Line2D
-            significance_legend_elements = [
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=5,
-                label='p ≥ 0.05', markeredgecolor='black', linewidth=0.5),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=8,
-                label='p < 0.05', markeredgecolor='black', linewidth=0.5),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=10,
-                label='p < 0.01', markeredgecolor='black', linewidth=0.5),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=12,
-                label='p < 0.001', markeredgecolor='black', linewidth=0.5),
-            ]
+            # Significance Legend
             legend_fig, legend_ax = plt.subplots(figsize=(2.5, 1.2))
-            legend = legend_ax.legend(handles=significance_legend_elements, loc='center', frameon=True, fontsize=11, title='Significance', title_fontsize=12, ncol=2)
-            legend.get_frame().set_facecolor('white')
-            legend.get_frame().set_alpha(0.95)
+            sig_handles = [
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=5, label='p ≥ 0.05', markeredgecolor='black', linewidth=0.5),
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=8, label='p < 0.05', markeredgecolor='black', linewidth=0.5),
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=10, label='p < 0.01', markeredgecolor='black', linewidth=0.5),
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=12, label='p < 0.001', markeredgecolor='black', linewidth=0.5),
+            ]
+            legend_ax.legend(handles=sig_handles, loc='center', frameon=True, fontsize=11, title='Significance', ncol=2)
             legend_ax.axis('off')
-            legend_svg_path = os.path.join(output_dir, f"bubble_significance_legend.svg")
-            legend_fig.savefig(legend_svg_path, dpi=300, bbox_inches='tight', facecolor='white')
+            legend_fig.savefig(os.path.join(output_dir, "bubble_significance_legend.png"), dpi=300, bbox_inches='tight', facecolor='white')
             plt.close(legend_fig)
 
             plt.tight_layout()
-
-            # plt.tight_layout()
-
-            output_path = os.path.join(output_dir, f"bubble_unit_aggregated_{data_type}.svg")
+            output_path = os.path.join(output_dir, f"bubble_unit_aggregated_{data_type}.png")
             plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+            if show_plots: plt.show()
+            else: plt.close(fig)
 
-            if show_plots:
-                plt.show()
-            else:
-                plt.close()
-
-            print(f"\nGenerated unit-aggregated bubble chart in {output_dir}")
-            return bubble_data
+            return {'matrix': heatmap_matrix, 'raw_data': agg_data}
 
         except Exception as e:
             print(f"Error creating unit-aggregated bubble chart: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return {}
 
 
@@ -1885,32 +2996,13 @@ class HSI_Visualizer:
     def generate_raw_ratio_bubble_chart(self, df, value_col='Mean_Ratio', grouping_col='Ratio_Type', 
                                         output_dir=None, show_plots=True, cmap=None, vmin=None, vmax=None,
                                         display_name_map=None, unit_display_map=None, unit_order=None,
-                                        units_to_display=None, groups_to_display=None):
+                                        units_to_display=None, groups_to_display=None, remove_outliers=True):
         """
         Refactored raw ratio bubble chart aligning with generate_unit_bubble_charts logic.
         
-        Bubble size encodes 1-vs-rest t-test significance.
-        Bubble color encodes the raw mean value using RdBu_r colormap centered at global mean.
+        Bubble size encodes 1-vs-rest t-test significance (calculated on RAW data).
+        Bubble color encodes the mean value (calculated on outlier-filtered data).
         Styling matches the standardized unit bubble charts (white background, labels above).
-
-        Parameters
-        ----------
-        df : pandas.DataFrame
-        value_col : str
-        grouping_col : str
-        output_dir : str
-        show_plots : bool
-        cmap : str, optional
-        vmin, vmax : float, optional
-        display_name_map : dict, optional
-        unit_display_map : dict, optional
-        unit_order : list, optional
-        units_to_display : list, optional
-        groups_to_display : list, optional
-
-        Returns
-        -------
-        dict : {'matrix': raw_matrix, 'raw_data': agg_data}
         """
         import matplotlib.colors as mcolors
         from scipy.stats import ttest_ind
@@ -1924,41 +3016,36 @@ class HSI_Visualizer:
             cmap = 'RdBu_r'
 
         try:
-            # Filter to selected units if specified
+            # 1. Filter to selected units if specified
             if units_to_display is not None:
                 df = df[df['Unit'].isin(units_to_display)].copy()
 
-            # Remove NaN and infinite values
-            clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[value_col])
+            # 2. Prepare raw data for statistics (clean NaNs/infs but keep outliers)
+            df_stats = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[value_col]).copy()
             
-            # if len(clean_df) < 2:
-            #     print("Insufficient data for raw ratio bubble chart")
-            #     return {}
-
-            # Aggregation logic matching generate_unit_bubble_charts
-            has_Group_ID = 'Group_ID' in clean_df.columns and clean_df['Group_ID'].notna().any()
-            
-            # Apply outlier filtration before aggregation
+            # 3. Prepare filtered data for plotting (if requested)
+            has_Group_ID = 'Group_ID' in df.columns and df['Group_ID'].notna().any()
             filter_groups = ['Unit', 'Group_ID', grouping_col] if has_Group_ID else ['Unit', grouping_col]
-            clean_df_filtered = self._apply_outlier_filtration(clean_df, value_col, filter_groups)
             
-            if has_Group_ID:
-                agg_data = clean_df_filtered.groupby(['Unit', 'Group_ID', grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
-                agg_data['Unit_Group_Combo'] = agg_data['Unit'] + ' (' + agg_data['Group_ID'] + ')'
+            if remove_outliers:
+                df_plot = self._apply_outlier_filtration(df, value_col, filter_groups)
             else:
-                agg_data = clean_df_filtered.groupby(['Unit', grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
+                df_plot = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[value_col]).copy()
+            
+            # 4. Aggregate plotting data
+            if has_Group_ID:
+                agg_data = df_plot.groupby(['Unit', 'Group_ID', grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
+                agg_data['Unit_Group_Combo'] = agg_data['Unit'] + ' (' + agg_data['Group_ID'].astype(str) + ')'
+            else:
+                agg_data = df_plot.groupby(['Unit', grouping_col])[value_col].agg(['mean', 'std', 'count']).reset_index()
                 agg_data['Unit_Group_Combo'] = agg_data['Unit']
 
             # Filtering groups
             if groups_to_display is not None:
                 agg_data = agg_data[agg_data[grouping_col].isin(groups_to_display)]
 
-            # if len(agg_data) < 2:
-            #     print("Insufficient data for raw ratio bubble chart after filtering")
-            #     return {}
-
-            # Raw values for matrix (instead of Z-score)
-            raw_matrix = agg_data.pivot(index='Unit_Group_Combo', columns=grouping_col, values='mean')
+            # Create matrix for plotting
+            raw_matrix = agg_data.pivot_table(index='Unit_Group_Combo', columns=grouping_col, values='mean', aggfunc='mean')
             raw_matrix = raw_matrix.fillna(0)
 
             # Sort columns
@@ -1970,50 +3057,38 @@ class HSI_Visualizer:
             else:
                 raw_matrix = raw_matrix.sort_index(axis=1)
 
-            # Sort rows
+            # Sort rows based on unit_order
             if unit_order is not None:
                 all_rows = raw_matrix.index.tolist()
                 ordered_rows = []
                 for unit in unit_order:
                     matching_rows = [r for r in all_rows if r.startswith(unit + ' (') or r == unit]
                     ordered_rows.extend(sorted(matching_rows))
-                # Only keep rows that match unit_order (exclude unlisted units)
                 raw_matrix = raw_matrix.reindex(ordered_rows).dropna(how='all')
             elif has_Group_ID:
                 all_rows = raw_matrix.index.tolist()
-                unit_Group_ID_map = {}
+                unit_group_map = {}
                 for row in all_rows:
-                    if ' (' in row:
-                        base_unit = row.split(' (')[0]
-                        unit_Group_ID_map.setdefault(base_unit, []).append(row)
-                    else:
-                        unit_Group_ID_map.setdefault(row, [row])
+                    base_unit = row.split(' (')[0] if ' (' in row else row
+                    unit_group_map.setdefault(base_unit, []).append(row)
                 ordered_rows = []
-                for base_unit, rows in unit_Group_ID_map.items():
-                    if len(rows) > 1:
-                        ordered_rows.extend(sorted(rows))
-                for base_unit, rows in unit_Group_ID_map.items():
-                    if len(rows) == 1:
-                        ordered_rows.extend(rows)
+                for bu in sorted(unit_group_map.keys()):
+                    if len(unit_group_map[bu]) > 1: ordered_rows.extend(sorted(unit_group_map[bu]))
+                for bu in sorted(unit_group_map.keys()):
+                    if len(unit_group_map[bu]) == 1: ordered_rows.extend(unit_group_map[bu])
                 raw_matrix = raw_matrix.reindex(ordered_rows)
 
-            # Display labels
+            # Labels
             col_labels = [self._apply_display_name(c, display_name_map) for c in raw_matrix.columns]
             row_labels = []
             for row in raw_matrix.index:
-                if has_Group_ID and ' (' in row:
+                if ' (' in row:
                     unit_part, Group_ID_part = row.split(' (', 1)
-                    unit_display = unit_display_map[unit_part] if unit_display_map and unit_part in unit_display_map else unit_part
-                    Group_ID_abbrev = Group_ID_part.rstrip(')')[0] if Group_ID_part.rstrip(')') else Group_ID_part
-                    if Group_ID_abbrev in ['O', 'Other', '', None]:
-                        row_labels.append(f"{unit_display}")
-                    else:
-                        row_labels.append(f"{unit_display} ({Group_ID_abbrev})")
+                    unit_disp = unit_display_map[unit_part] if unit_display_map and unit_part in unit_display_map else unit_part
+                    Group_ID_full = Group_ID_part.rstrip(')')
+                    row_labels.append(f"{unit_disp} ({Group_ID_full})" if Group_ID_full not in ['O', 'Other', ''] else f"{unit_disp}")
                 else:
-                    if unit_display_map and row in unit_display_map:
-                        row_labels.append(unit_display_map[row])
-                    else:
-                        row_labels.append(row.replace('_', ' '))
+                    row_labels.append(unit_display_map[row] if unit_display_map and row in unit_display_map else row.replace('_', ' '))
 
             # Figure sizing
             n_rows, n_cols = raw_matrix.shape
@@ -2024,23 +3099,19 @@ class HSI_Visualizer:
             fig.patch.set_facecolor('white')
             ax.set_facecolor('white')
 
-            # Build coordinates and calculate significance
             col_index = {col: i * spacing for i, col in enumerate(raw_matrix.columns)}
             row_index = {row: i * spacing for i, row in enumerate(raw_matrix.index)}
             xs, ys, sizes, color_vals = [], [], [], []
             xs_black, ys_black, sizes_black = [], [], []
 
             global_mean = agg_data['mean'].mean()
-            global_max = max(agg_data['mean'].max(), global_mean + 0.1)
-            global_min = min(agg_data['mean'].min(), global_mean - 0.1)
-            
-            # Set dynamic limits if not provided
-            if vmin is None: vmin = global_min
-            if vmax is None: vmax = global_max
+            if vmin is None: vmin = agg_data['mean'].min()
+            if vmax is None: vmax = agg_data['mean'].max()
             vcenter = global_mean
 
             min_bubble_size = 50
 
+            # 5. Loop and calculate significance on RAW data
             for row_name in raw_matrix.index:
                 for col_name in raw_matrix.columns:
                     val = raw_matrix.loc[row_name, col_name]
@@ -2048,58 +3119,54 @@ class HSI_Visualizer:
                     
                     if pd.isna(val) or val == 0:
                         xs_black.append(x_val); ys_black.append(y_val); sizes_black.append(min_bubble_size)
+                        continue
+                        
+                    matching_agg = agg_data[(agg_data['Unit_Group_Combo'] == row_name) & (agg_data[grouping_col] == col_name)]
+                    if matching_agg.empty:
+                        xs_black.append(x_val); ys_black.append(y_val); sizes_black.append(min_bubble_size); continue
+                    
+                    unit_nm = matching_agg.iloc[0]['Unit']
+                    reg_nm = matching_agg.iloc[0]['Group_ID'] if has_Group_ID else None
+                    
+                    # 1-vs-rest T-test on RAW data
+                    if has_Group_ID and reg_nm:
+                        mask = (df_stats['Unit'] == unit_nm) & (df_stats['Group_ID'] == reg_nm) & (df_stats[grouping_col] == col_name)
+                        other = (~((df_stats['Unit'] == unit_nm) & (df_stats['Group_ID'] == reg_nm))) & (df_stats[grouping_col] == col_name)
                     else:
-                        # Significance test matching generate_unit_bubble_charts
-                        matching_agg = agg_data[(agg_data['Unit_Group_Combo'] == row_name) & (agg_data[grouping_col] == col_name)]
-                        if len(matching_agg) == 0:
-                            xs_black.append(x_val); ys_black.append(y_val); sizes_black.append(min_bubble_size); continue
-                        
-                        unit_nm = matching_agg.iloc[0]['Unit']
-                        reg_nm = matching_agg.iloc[0]['Group_ID'] if 'Group_ID' in matching_agg.columns else None
-                        
-                        # Get data from the already-filtered clean_df_filtered for per-group consistency
-                        if has_Group_ID and reg_nm:
-                            unit_Group_ID_mask = (clean_df_filtered['Unit'] == unit_nm) & (clean_df_filtered['Group_ID'] == reg_nm) & (clean_df_filtered[grouping_col] == col_name)
-                            other_mask = (~((clean_df_filtered['Unit'] == unit_nm) & (clean_df_filtered['Group_ID'] == reg_nm))) & (clean_df_filtered[grouping_col] == col_name)
-                        else:
-                            unit_Group_ID_mask = (clean_df_filtered['Unit'] == unit_nm) & (clean_df_filtered[grouping_col] == col_name)
-                            other_mask = (clean_df_filtered['Unit'] != unit_nm) & (clean_df_filtered[grouping_col] == col_name)
-                        
-                        this_vals = clean_df_filtered[unit_Group_ID_mask][value_col].values
-                        other_vals = clean_df_filtered[other_mask][value_col].values
+                        mask = (df_stats['Unit'] == unit_nm) & (df_stats[grouping_col] == col_name)
+                        other = (df_stats['Unit'] != unit_nm) & (df_stats[grouping_col] == col_name)
+                    
+                    this_v = df_stats[mask][value_col].values
+                    other_v = df_stats[other][value_col].values
+                    
+                    p_val = 1.0
+                    if len(this_v) >= 2 and len(other_v) >= 2:
+                        _, p_val = ttest_ind(this_v, other_v, equal_var=True)
+                        if pd.isna(p_val): p_val = 1.0
+                    
+                    if p_val >= 0.05: size = min_bubble_size
+                    elif p_val >= 0.01: size = 125
+                    elif p_val >= 0.001: size = 200
+                    else: size = 250
+                    
+                    xs.append(x_val); ys.append(y_val); sizes.append(size); color_vals.append(val)
 
-                        # Note: Per-group filtration is already handled by clean_df_filtered
-
-                        p_val = 1.0
-                        if len(this_vals) >= 2 and len(other_vals) >= 2:
-                            _, p_val = ttest_ind(this_vals, other_vals, equal_var=False)
-                            if pd.isna(p_val): p_val = 1.0
-                        
-                        # Size logic
-                        if p_val >= 0.05: size = min_bubble_size
-                        elif p_val >= 0.01: size = 125
-                        elif p_val >= 0.001: size = 200
-                        else: size = 250
-                        
-                        xs.append(x_val); ys.append(y_val); sizes.append(size); color_vals.append(val)
-
-            # Normalization and Scatter
-            norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
+            # Normalization and Plotting
+            norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax) if vmin < vcenter < vmax else mcolors.Normalize(vmin=vmin, vmax=vmax)
             if xs:
-                sc = ax.scatter(xs, ys, s=sizes, c=color_vals, cmap=cmap, norm=norm, edgecolors='none', zorder=3)
-            else:
-                sc = ax.scatter([0], [0], s=[0], c=[0], cmap=cmap, norm=norm)
-            
+                ax.scatter(xs, ys, s=sizes, c=color_vals, cmap=cmap, norm=norm, edgecolors='none', zorder=3)
             if xs_black:
                 ax.scatter(xs_black, ys_black, s=sizes_black, c='black', edgecolors='none', zorder=3)
 
             # Colorbar
-            cbar = fig.colorbar(sc, ax=ax, shrink=0.8, pad=0.02)
+            import matplotlib.cm as cm
+            cbar_fig, cbar_ax = plt.subplots(figsize=(1.2, max(3, n_rows * 0.35)))
+            cbar = cbar_fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), cax=cbar_ax, orientation='vertical')
             cbar.set_label('Mean Ratio', color='black', fontsize=14)
-            cbar.ax.yaxis.set_tick_params(color='black', labelcolor='black', labelsize=12)
-            cbar.outline.set_edgecolor('black')
+            cbar_fig.savefig(os.path.join(output_dir, "bubble_chart_raw_ratios_colorbar.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            plt.close(cbar_fig)
 
-            # Styling
+            # Formatting
             if has_Group_ID:
                 prev_u = None
                 for ridx, row_nm in enumerate(raw_matrix.index):
@@ -2121,21 +3188,21 @@ class HSI_Visualizer:
             ax.set_xlim(-spacing * 0.5, (n_cols - 1) * spacing + spacing * 0.5)
             ax.set_ylim(-spacing * 0.5, (n_rows - 1) * spacing + spacing * 0.5)
 
-            # Significance Legend SVG
+            # Significance Legend
             legend_fig, legend_ax = plt.subplots(figsize=(2.5, 1.2))
-            significance_legend_elements = [
+            sig_handles = [
                 Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=5, label='p ≥ 0.05', markeredgecolor='black', linewidth=0.5),
                 Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=8, label='p < 0.05', markeredgecolor='black', linewidth=0.5),
                 Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=10, label='p < 0.01', markeredgecolor='black', linewidth=0.5),
                 Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=12, label='p < 0.001', markeredgecolor='black', linewidth=0.5),
             ]
-            legend = legend_ax.legend(handles=significance_legend_elements, loc='center', frameon=True, fontsize=11, title='Significance', title_fontsize=12, ncol=2)
+            legend_ax.legend(handles=sig_handles, loc='center', frameon=True, fontsize=11, title='Significance', ncol=2)
             legend_ax.axis('off')
-            legend_fig.savefig(os.path.join(output_dir, "bubble_significance_legend_raw.svg"), dpi=300, bbox_inches='tight', facecolor='white')
+            legend_fig.savefig(os.path.join(output_dir, "bubble_significance_legend_raw.png"), dpi=300, bbox_inches='tight', facecolor='white')
             plt.close(legend_fig)
 
             plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, "bubble_chart_raw_ratios.svg"), dpi=300, bbox_inches='tight', facecolor='white')
+            plt.savefig(os.path.join(output_dir, "bubble_chart_raw_ratios.png"), dpi=300, bbox_inches='tight', facecolor='white')
             
             if show_plots: plt.show()
             else: plt.close()
@@ -2143,7 +3210,391 @@ class HSI_Visualizer:
             return {'matrix': raw_matrix, 'raw_data': agg_data}
         except Exception as e:
             print(f"Error creating raw ratio bubble chart: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return {}
+
+    def plot_subgroup_gradient_heatmap(self, df, value_col, grouping_col, subgroup_order,
+                                       output_dir=None, display_name_map=None,
+                                       unit_display_map=None, unit_order=None,
+                                       units_to_display=None, cmap='RdBu_r',
+                                       min_size_to_plot=10, remove_outliers=True,
+                                       show_values=True, cmap_scale=None):
+        """
+        Create a spatial gradient heatmap of ratios/molecules across ordered subgroups per unit.
+        Also runs 1-Way ANOVA to evaluate regional statistical variance.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+        value_col : str
+            The data column name ('Percentage' or 'Mean_Ratio')
+        grouping_col : str
+            The metric column name ('Molecule' or 'Ratio_Type')
+        subgroup_order : list
+            Ordered spatial segments (e.g. ['P', 'M', 'CM', 'C3', 'C2', 'C1'])
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import numpy as np
+        import os
+        from scipy.stats import f_oneway
+
+        if output_dir is None:
+            output_dir = 'subgroup_gradient_heatmaps'
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 1. Filter to selected units if specified
+        if units_to_display is not None:
+            df = df[df['Unit'].isin(units_to_display)].copy()
+
+        # 2. Remove NaN and infinite values
+        clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[value_col])
+        
+        if 'Group_ID' not in clean_df.columns:
+            print("  Error: 'Group_ID' column required to establish subgroup cohorts.")
+            return
+
+        # Filter strictly to targeted subgroups
+        clean_df = clean_df[clean_df['Group_ID'].isin(subgroup_order)].copy()
+
+        unique_items = clean_df[grouping_col].dropna().unique()
+
+        for item in unique_items:
+            item_data = clean_df[clean_df[grouping_col] == item].copy()
+            
+            # Outlier Filtration
+            if remove_outliers:
+                item_data = self._apply_outlier_filtration(item_data, value_col, ['Unit', 'Group_ID'])
+            
+            if item_data.empty:
+                continue
+
+            # Clean data (NaNs/infs) but keep outliers for stats
+            item_data_stats = clean_df[clean_df[grouping_col] == item].copy()
+            
+            # Outlier Filtration for plotting
+            if remove_outliers:
+                item_data_plot = self._apply_outlier_filtration(item_data_stats, value_col, ['Unit', 'Group_ID'])
+            else:
+                item_data_plot = item_data_stats
+            
+            if item_data_plot.empty:
+                continue
+
+            # Build Data Matrix (Plotting)
+            agg_data_plot = item_data_plot.groupby(['Unit', 'Group_ID'])[value_col].agg(['mean', 'count']).reset_index()
+            agg_data_plot = agg_data_plot[agg_data_plot['count'] >= min_size_to_plot]
+            
+            if agg_data_plot.empty:
+                continue
+
+            # Pivot
+            pivot_df = agg_data_plot.pivot(index='Unit', columns='Group_ID', values='mean')
+            valid_cols = [sg for sg in subgroup_order if sg in pivot_df.columns]
+            pivot_df = pivot_df[valid_cols]
+            
+            if pivot_df.empty:
+                continue
+
+            # Reindex Rows
+            if unit_order is not None:
+                ordered_units = [u for u in unit_order if u in pivot_df.index]
+                remaining_units = [u for u in pivot_df.index if u not in ordered_units]
+                pivot_df = pivot_df.reindex(ordered_units + remaining_units)
+            elif unit_display_map is not None:
+                ordered_units = [u for u in unit_display_map.keys() if u in pivot_df.index]
+                remaining_units = [u for u in pivot_df.index if u not in ordered_units]
+                pivot_df = pivot_df.reindex(ordered_units + remaining_units)
+            else:
+                pivot_df = pivot_df.sort_index()
+
+            # Statistical variations across subgroups (on RAW data)
+            anova_results = {}
+            spearman_results = {}
+            rank_map = {sg: i for i, sg in enumerate(subgroup_order)}
+            
+            for unit in pivot_df.index:
+                x_ranks = []
+                y_means_raw = []
+                
+                for sg in valid_cols:
+                    sg_vals_raw = item_data_stats[(item_data_stats['Unit'] == unit) & (item_data_stats['Group_ID'] == sg)][value_col].values
+                    if len(sg_vals_raw) >= 2:
+                        x_ranks.append(rank_map[sg])
+                        y_means_raw.append(np.mean(sg_vals_raw))
+                
+                # 1. Welch's ANOVA (using raw data)
+                unit_subset = item_data_stats[item_data_stats['Unit'] == unit]
+                if unit_subset['Group_ID'].nunique() >= 2:
+                    try:
+                        import pingouin as pg
+                        aov = pg.welch_anova(data=unit_subset, dv=value_col, between='Group_ID')
+                        p_val = aov['p-unc'].iloc[0] if 'p-unc' in aov.columns else aov['p_unc'].iloc[0]
+                        anova_results[unit] = p_val
+                    except Exception:
+                        anova_results[unit] = np.nan
+                
+                # 2. Spearman Correlation
+                if len(x_ranks) >= 3:
+                    from scipy.stats import spearmanr
+                    try:
+                        corr, s_p = spearmanr(x_ranks, y_means_raw)
+                        spearman_results[unit] = (corr, s_p)
+                    except Exception:
+                        spearman_results[unit] = (np.nan, np.nan)
+
+            # Rename indices and columns for display
+            display_rows = [unit_display_map.get(row, row) if unit_display_map else row for row in pivot_df.index]
+            right_side_labels = []
+            for row in pivot_df.index:
+                right_label = ""
+                p_val = anova_results.get(row, 1.0)
+                if p_val < 0.001: right_label += "***"
+                elif p_val < 0.01: right_label += "**"
+                elif p_val < 0.05: right_label += "*"
+                
+                if row in spearman_results:
+                    corr, s_p = spearman_results[row]
+                    if not np.isnan(corr):
+                        if right_label: right_label += " "
+                        right_label += f"(ρ={corr:.2f})"
+                right_side_labels.append(right_label)
+
+            # Plotting
+            fig_width = max(5, len(valid_cols) * 1.2 + 2)
+            fig_height = max(4, len(pivot_df) * 0.4 + 2)
+            fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+            display_item = display_name_map.get(item, item) if display_name_map else item
+
+            # Limits
+            vmin_p, vmax_p = pivot_df.min().min(), pivot_df.max().max()
+            if cmap_scale and item in cmap_scale:
+                s = cmap_scale[item]
+                if isinstance(s, (list, tuple)) and len(s) == 2: vmin_p, vmax_p = s
+
+            sns.heatmap(pivot_df, annot=show_values, fmt=".3f", cmap=cmap, cbar=False, linewidths=0.5, ax=ax,
+                        xticklabels=valid_cols, yticklabels=display_rows, vmin=vmin_p, vmax=vmax_p)
+            
+            # Right Y-axis
+            ax_r = ax.twinx()
+            ax_r.set_ylim(ax.get_ylim()); ax_r.set_yticks(ax.get_yticks())
+            ax_r.set_yticklabels(right_side_labels, rotation=0, ha='left', fontsize=10, color='black')
+            for s in ['right', 'top', 'left', 'bottom']: ax_r.spines[s].set_visible(False)
+            ax_r.tick_params(axis='y', which='both', length=0)
+            
+            ax.set_title(f"Subgroup Gradient: {display_item}", fontweight='bold', fontsize=14, pad=15)
+            ax.set_xlabel("Subgroup", fontweight='bold', fontsize=12)
+            ax.set_ylabel("Unit", fontweight='bold', fontsize=12)
+            plt.tight_layout()
+            
+            item_safe = str(item).replace(':', '').replace('/', '_').replace(' ', '_')
+            plt.savefig(os.path.join(output_dir, f"subgroup_gradient_{item_safe}.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            plt.close()
+
+            # Standalone colorbar
+            import matplotlib.cm as cm
+            import matplotlib.colors as mcolors
+            cb_fig, cb_ax = plt.subplots(figsize=(1.2, max(3, len(pivot_df) * 0.35)))
+            norm = mcolors.Normalize(vmin=vmin_p, vmax=vmax_p)
+            cbar = cb_fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), cax=cb_ax, orientation='vertical')
+            cbar.set_label('Relative Prob. %' if value_col == 'Percentage' else 'Mean Ratio', color='black', fontsize=12)
+            cb_fig.tight_layout()
+            cb_fig.savefig(os.path.join(output_dir, f"subgroup_gradient_{item_safe}_colorbar.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            plt.close(cb_fig)
+
+            print(f"  Generated subgroup gradient heatmap for {item}: {output_dir}")
+            print(f"  Generated colorbar: {output_dir}")
+
+    def plot_subgroup_gradient_heatmap_wide(self, wide_df, value_cols, subgroup_order,
+                                            output_dir=None, display_name_map=None,
+                                            unit_display_map=None, unit_order=None,
+                                            units_to_display=None, cmap='RdBu_r',
+                                            min_size_to_plot=10, remove_outliers=True,
+                                            show_values=True, cmap_scale=None,
+                                            cbar_label='Mean Ratio'):
+        """
+        Create a spatial gradient heatmap of ratios/molecules across ordered subgroups per unit,
+        taking a wide format DataFrame where metrics are separate columns.
+        Also runs 1-Way ANOVA to evaluate regional statistical variance.
+
+        Parameters
+        ----------
+        wide_df : pandas.DataFrame
+            Pivoted DataFrame containing metrics as columns.
+        value_cols : str or list of str
+            The column names in wide_df to plot (e.g. ['Lipid_to_Protein', 'Lipid_Unsaturation']).
+        subgroup_order : list
+            Ordered spatial segments (e.g. ['P', 'M', 'CM', 'C3', 'C2', 'C1'])
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import numpy as np
+        import os
+        from scipy.stats import f_oneway
+
+        if output_dir is None:
+            output_dir = 'subgroup_gradient_heatmaps'
+        os.makedirs(output_dir, exist_ok=True)
+
+        if isinstance(value_cols, str):
+            value_cols = [value_cols]
+
+        # 1. Filter to selected units if specified
+        if units_to_display is not None:
+            wide_df = wide_df[wide_df['Unit'].isin(units_to_display)].copy()
+
+        if 'Group_ID' not in wide_df.columns:
+            print("  Error: 'Group_ID' column required to establish subgroup cohorts.")
+            return
+
+        # Filter strictly to targeted subgroups
+        wide_df = wide_df[wide_df['Group_ID'].isin(subgroup_order)].copy()
+
+        for item in value_cols:
+            if item not in wide_df.columns:
+                print(f"  Warning: Column '{item}' not found in DataFrame.")
+                continue
+
+            # Clean data (NaNs/infs) but keep outliers for stats
+            item_data_stats = wide_df[['Unit', 'Group_ID', item]].replace([np.inf, -np.inf], np.nan).dropna(subset=[item]).copy()
+            
+            # Outlier Filtration for plotting
+            if remove_outliers:
+                item_data_plot = self._apply_outlier_filtration(item_data_stats, item, ['Unit', 'Group_ID'])
+            else:
+                item_data_plot = item_data_stats
+
+            if item_data_plot.empty:
+                continue
+
+            # Build Data Matrix (Plotting)
+            agg_data_plot = item_data_plot.groupby(['Unit', 'Group_ID'])[item].agg(['mean', 'count']).reset_index()
+            agg_data_plot = agg_data_plot[agg_data_plot['count'] >= min_size_to_plot]
+            
+            if agg_data_plot.empty:
+                continue
+
+            # Pivot
+            pivot_df = agg_data_plot.pivot(index='Unit', columns='Group_ID', values='mean')
+            valid_cols = [sg for sg in subgroup_order if sg in pivot_df.columns]
+            pivot_df = pivot_df[valid_cols]
+            
+            if pivot_df.empty:
+                continue
+
+            # Reindex Rows
+            if unit_order is not None:
+                ordered_units = [u for u in unit_order if u in pivot_df.index]
+                remaining_units = [u for u in pivot_df.index if u not in ordered_units]
+                pivot_df = pivot_df.reindex(ordered_units + remaining_units)
+            elif unit_display_map is not None:
+                ordered_units = [u for u in unit_display_map.keys() if u in pivot_df.index]
+                remaining_units = [u for u in pivot_df.index if u not in ordered_units]
+                pivot_df = pivot_df.reindex(ordered_units + remaining_units)
+            else:
+                pivot_df = pivot_df.sort_index()
+
+            # Save counts (using filtered data)
+            pivot_counts = agg_data_plot.pivot(index='Unit', columns='Group_ID', values='count')
+            pivot_counts = pivot_counts.reindex(index=pivot_df.index, columns=pivot_df.columns)
+            item_safe = str(item).replace(':', '').replace('/', '_').replace(' ', '_')
+            pivot_counts.to_csv(os.path.join(output_dir, f"subgroup_gradient_{item_safe}_counts.csv"))
+
+            # Statistical variations across subgroups (on RAW data)
+            anova_results = {}
+            spearman_results = {}
+            rank_map = {sg: i for i, sg in enumerate(subgroup_order)}
+
+            for unit in pivot_df.index:
+                x_ranks = []
+                y_means_raw = []
+
+                for sg in valid_cols:
+                    sg_vals_raw = item_data_stats[(item_data_stats['Unit'] == unit) & (item_data_stats['Group_ID'] == sg)][item].values
+                    if len(sg_vals_raw) >= 2:
+                        x_ranks.append(rank_map[sg])
+                        y_means_raw.append(np.mean(sg_vals_raw))
+
+                # 1. Welch's ANOVA (using raw data)
+                unit_subset = item_data_stats[item_data_stats['Unit'] == unit]
+                if unit_subset['Group_ID'].nunique() >= 2:
+                    try:
+                        import pingouin as pg
+                        aov = pg.welch_anova(data=unit_subset, dv=item, between='Group_ID')
+                        p_val = aov['p-unc'].iloc[0] if 'p-unc' in aov.columns else aov['p_unc'].iloc[0]
+                        anova_results[unit] = p_val
+                    except Exception:
+                        anova_results[unit] = np.nan
+
+                # 2. Spearman Correlation
+                if len(x_ranks) >= 3:
+                    from scipy.stats import spearmanr
+                    try:
+                        corr, s_p = spearmanr(x_ranks, y_means_raw)
+                        spearman_results[unit] = (corr, s_p)
+                    except Exception:
+                        spearman_results[unit] = (np.nan, np.nan)
+
+            # Labels and display rows
+            display_rows = [unit_display_map.get(row, row) if unit_display_map else row for row in pivot_df.index]
+            right_side_labels = []
+            for row in pivot_df.index:
+                right_label = ""
+                p_val = anova_results.get(row, 1.0)
+                if p_val < 0.001: right_label += "***"
+                elif p_val < 0.01: right_label += "**"
+                elif p_val < 0.05: right_label += "*"
+
+                if row in spearman_results:
+                    corr, s_p = spearman_results[row]
+                    if not np.isnan(corr):
+                        if right_label: right_label += " "
+                        right_label += f"(ρ={corr:.2f})"
+                right_side_labels.append(right_label)
+
+            # Plotting
+            fig_width = max(5, len(valid_cols) * 1.2 + 2)
+            fig_height = max(4, len(pivot_df) * 0.4 + 2)
+            fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+            display_item = display_name_map.get(item, item) if display_name_map else item
+
+            # Limits
+            vmin_p, vmax_p = pivot_df.min().min(), pivot_df.max().max()
+            if cmap_scale and item in cmap_scale:
+                s = cmap_scale[item]
+                if isinstance(s, (list, tuple)) and len(s) == 2: vmin_p, vmax_p = s
+
+            sns.heatmap(pivot_df, annot=show_values, fmt=".3f", cmap=cmap, cbar=False, linewidths=0.5, ax=ax,
+                        xticklabels=valid_cols, yticklabels=display_rows, vmin=vmin_p, vmax=vmax_p)
+
+            # Right Y-axis
+            ax_r = ax.twinx()
+            ax_r.set_ylim(ax.get_ylim()); ax_r.set_yticks(ax.get_yticks())
+            ax_r.set_yticklabels(right_side_labels, rotation=0, ha='left', fontsize=10, color='black')
+            for s in ['right', 'top', 'left', 'bottom']: ax_r.spines[s].set_visible(False)
+            ax_r.tick_params(axis='y', which='both', length=0)
+
+            ax.set_title(f"Subgroup Gradient: {display_item}", fontweight='bold', fontsize=14, pad=15)
+            ax.set_xlabel("Subgroup", fontweight='bold', fontsize=12)
+            ax.set_ylabel("Unit", fontweight='bold', fontsize=12)
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, f"subgroup_gradient_{item_safe}.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            plt.close()
+
+            # Colorbar
+            import matplotlib.cm as cm
+            import matplotlib.colors as mcolors
+            cb_fig, cb_ax = plt.subplots(figsize=(1.2, max(3, len(pivot_df) * 0.35)))
+            norm = mcolors.Normalize(vmin=vmin_p, vmax=vmax_p)
+            cbar = cb_fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), cax=cb_ax, orientation='vertical')
+            cbar.set_label(cbar_label, color='black', fontsize=12)
+            cb_fig.tight_layout()
+            cb_fig.savefig(os.path.join(output_dir, f"subgroup_gradient_{item_safe}_colorbar.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            plt.close(cb_fig)
+
+            print(f"  Generated subgroup gradient heatmap for {item}: {output_dir}")
+            print(f"  Generated colorbar: {output_dir}")
 
     def _save_standalone_legend(self, handles, title, save_path, ncol=1, fontsize=11, title_fontsize=12):
         """Save a standalone legend figure as a PNG.
@@ -2186,16 +3637,699 @@ class HSI_Visualizer:
         fig.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
         plt.close(fig)
 
+    # def create_individual_barplots(self, df, value_col, grouping_col, items_list=None,
+    #                                 output_dir=None, data_type='percentage',
+    #                                 show_plots=False, display_name_map=None,
+    #                                 unit_color_map=None, unit_display_map=None,
+    #                                 units_to_display=None,
+    #                                 consolidate_Group_IDs=False,
+    #                                 subgroup_list=None,
+    #                                 use_patterns=True,
+    #                                 compare_by="Group_ID",
+    #                                 show_empty_subgroups=False,
+    #                                 show_scatter=False,
+    #                                 plot_type='bar',
+    #                                 sig_style='brackets',
+    #                                 min_size_to_plot=3,
+    #                                 remove_outliers=True):
+    #     """
+    #     Create individual plots for publication.
+    #     Supports bar, box, or violin plots with optional Group_ID subgroup variants.
+        
+    #     Args:
+    #         df: DataFrame containing the measurements.
+    #         value_col: Column name for the values ('Percentage' or 'Mean_Ratio').
+    #         grouping_col: Column name for the items ('Molecule' or 'Ratio_Type').
+    #         items_list: List of molecules/ratios to plot.
+    #         output_dir: Directory to save plots.
+    #         consolidate_Group_IDs: If True, merges subgroups into base Units for cleaner comparison.
+    #         compare_by: Column name or list of column names used to define subgroups (default: "Group_ID").
+    #         plot_type: Plot style to render ('bar', 'box', or 'violin').
+    #         sig_style: Controls how statistical significance is shown on the plot.
+    #         min_size_to_plot: Minimum number of valid data points required to plot a unit (default: 3).
+    #             'brackets'   — (default) traditional bracket lines with * symbols above bars.
+    #                            Can get crowded when there are many significant pairs.
+    #             'stars_only' — compact mode: a small * / ** / *** label is placed directly
+    #                            above each bar in a significant pair.  No crossing lines.
+    #             'export_only'— no on-plot markers at all; results are only written to CSV.
+    #             A CSV of all significant pairs is always saved to output_dir (when set),
+    #             regardless of the chosen style.
+    #     """
+    #     import matplotlib.patches as mpatches
+    #     import matplotlib.pyplot as plt
+    #     from statsmodels.stats.multicomp import pairwise_tukeyhsd
+    #     from scipy.stats import f_oneway, ttest_ind
+
+    #     if output_dir is None:
+    #         output_dir = 'individual_barplots'
+    #     os.makedirs(output_dir, exist_ok=True)
+
+    #     plot_type = str(plot_type).lower().strip()
+    #     if plot_type not in {'bar', 'box', 'violin'}:
+    #         raise ValueError(f"Unsupported plot_type '{plot_type}'. Use 'bar', 'box', or 'violin'.")
+        
+    #     print(f"Units to display: {units_to_display if units_to_display else 'All'}")
+
+    #     # Filter units if specified
+    #     if units_to_display is not None:
+    #         df = df[df['Unit'].isin(units_to_display)].copy()
+        
+    #     # Consolidation check
+    #     if consolidate_Group_IDs:
+    #         df['Plot_Unit'] = df['Unit']
+    #     else:
+    #         # Create Unit_(Subgroup) labels based on compare_by columns
+    #         def make_unit_subgroup_label(row):
+    #             # Handle single string or list of columns
+    #             cols = [compare_by] if isinstance(compare_by, str) else compare_by
+                
+    #             label_parts = []
+    #             for col in cols:
+    #                 val = row.get(col)
+    #                 if not pd.isna(val) and val not in [None, '', 'Other', 'O']:
+    #                     label_parts.append(str(val))
+                
+    #             if not label_parts:
+    #                 return str(row['Unit'])
+                
+    #             # Combine multiple column values if necessary
+    #             subgroup_str = ", ".join(label_parts)
+    #             return f"{row['Unit']} ({subgroup_str})"
+            
+    #         df['Plot_Unit'] = df.apply(make_unit_subgroup_label, axis=1)
+
+    #         # --- IDENTIFY SUBGROUPS FOR DYNAMIC VISUALS ---
+    #         if subgroup_list is None:
+    #             all_groups = set()
+    #             for unit in df['Plot_Unit'].unique():
+    #                 if ' (' in unit:
+    #                     gid = unit.split(' (')[-1].rstrip(')')
+    #                     all_groups.add(gid)
+    #             # Sort alphabetically only when auto-detecting
+    #             subgroup_list = sorted(list(all_groups))
+    #         else:
+    #             # Use provided list as is (maintain order)
+    #             subgroup_list = list(subgroup_list)
+            
+    #         visual_type = "patterns" if use_patterns else "shading"
+    #         print(f"Subgroups identified for dynamic {visual_type}: {subgroup_list}")
+
+    #     if items_list == "All" or items_list is None:
+    #         items_list = sorted(df[grouping_col].unique())
+
+    #     # Iterate through items
+    #     for item_name in items_list:
+    #         item_data = df[df[grouping_col] == item_name].copy()
+    #         item_data.replace([np.inf, -np.inf], np.nan, inplace=True)
+    #         item_data = item_data.dropna(subset=[value_col])
+            
+    #         if len(item_data) == 0:
+    #             print(f"  Skipping {item_name}: no valid data")
+    #             continue
+
+    #         # 1. Determine base units to plot
+    #         if units_to_display is not None:
+    #             base_units = units_to_display
+    #         else:
+    #             # Extract unique base units from the data and sort them
+    #             all_raw_units = item_data['Plot_Unit'].unique()
+    #             base_units = sorted(list(set(pu.split(' (')[0] if ' (' in pu else pu for pu in all_raw_units)))
+
+    #         # 2. Build final ordered list of plot units
+    #         reordered_units = []
+    #         for bu in base_units:
+    #             if consolidate_Group_IDs:
+    #                 # Check if this base unit exists in data
+    #                 if any((pu.split(' (')[0] if ' (' in pu else pu) == bu for pu in item_data['Plot_Unit'].unique()):
+    #                     reordered_units.append(bu)
+    #             else:
+    #                 # Get existing units for this base
+    #                 existing_for_base = [pu for pu in item_data['Plot_Unit'].unique() if (pu.split(' (')[0] if ' (' in pu else pu) == bu]
+                    
+    #                 # For this base unit, iterate over subgroups in the requested order
+    #                 added_for_this_base = []
+    #                 for sg in subgroup_list:
+    #                     pu = f"{bu} ({sg})"
+    #                     if pu in existing_for_base:
+    #                         reordered_units.append(pu)
+    #                         added_for_this_base.append(pu)
+    #                     elif show_empty_subgroups:
+    #                         reordered_units.append(pu)
+    #                         added_for_this_base.append(pu)
+                    
+    #                 # Safety catch: Add any remaining units for this base (e.g. base unit without subgroup)
+    #                 for pu in existing_for_base:
+    #                     if pu not in added_for_this_base:
+    #                         reordered_units.append(pu)
+            
+    #         all_plot_units = reordered_units
+
+            
+    #         # Prepare data groups
+    #         bar_means = []
+    #         bar_stderrs = []
+    #         colors = []
+    #         hatches = []
+    #         positions = []
+    #         scatter_vals_per_pos = []  # list of (position, array_of_values) for scatter overlay
+    #         plot_vals_per_pos = []     # list of arrays used to draw box/violin plots
+
+    #         # Layout tuning knobs for individual barplots:
+    #         # - bar_width controls visual thickness of each bar
+    #         # - same_unit_spacing controls spacing between subgroup bars of the same base unit
+    #         # - between_unit_spacing controls spacing between different base units
+    #         bar_width = 0.3
+    #         same_unit_spacing = 0.4
+    #         between_unit_spacing = 1.1
+            
+    #         current_pos = 1.0
+    #         unit_tick_positions = []
+    #         unit_tick_labels = []
+    #         unit_position_map = {}     # Map unit name -> tick position
+    #         unit_significance = []     # List of (pos1, pos2, sig_symbol)
+    #         subgroup_data_by_base = {} # Map base_unit -> {group_id: (data, position)}
+    #         prev_base_unit = None
+            
+    #         for unit in all_plot_units:
+    #             unit_data = item_data[item_data['Plot_Unit'] == unit]
+                
+    #             # Skip units that do not have enough data to form a meaningful distribution
+    #             if unit_data[value_col].count() < min_size_to_plot:
+    #                 continue
+                
+    #             base_unit = unit.split(' (')[0] if ' (' in unit else unit
+
+    #             # Add tighter spacing within a base unit and larger gaps between base units
+    #             if prev_base_unit is not None:
+    #                 if base_unit == prev_base_unit:
+    #                     current_pos += same_unit_spacing
+    #                 else:
+    #                     current_pos += between_unit_spacing
+                
+    #             # Simple unit-based plot
+    #             # Remove outliers using shared IQR method for both bar heights and statistical tests
+    #             if remove_outliers:
+    #                 unit_data_filtered = self._apply_outlier_filtration(unit_data, value_col, ['Plot_Unit'])
+    #             else:
+    #                 unit_data_filtered = unit_data
+    #             filtered_vals = unit_data_filtered[value_col].values
+
+    #             if len(filtered_vals) > 0:
+    #                 bar_means.append(np.mean(filtered_vals))
+    #                 bar_stderrs.append(np.std(filtered_vals) / np.sqrt(len(filtered_vals)))
+    #             else:
+    #                 raw_vals = unit_data[value_col].values
+    #                 if len(raw_vals) > 0:
+    #                     bar_means.append(np.mean(raw_vals))
+    #                     bar_stderrs.append(np.std(raw_vals) / np.sqrt(len(raw_vals)))
+    #                 else:
+    #                     bar_means.append(0)
+    #                     bar_stderrs.append(0)
+                
+    #             # Store individual values for scatter overlay
+    #             vals_for_plot = filtered_vals if len(filtered_vals) > 0 else unit_data[value_col].values
+    #             scatter_vals_per_pos.append((current_pos, vals_for_plot))
+    #             plot_vals_per_pos.append(vals_for_plot if len(vals_for_plot) > 0 else np.array([np.nan]))
+
+    #             positions.append(current_pos)
+    #             # Use unit_color_map if provided, with color variation for Group_ID subgroups
+    #             base_color = unit_color_map.get(base_unit, '#888888') if unit_color_map else '#888888'
+                
+    #             # Extract Group_ID if present and apply dynamic visuals
+    #             hatch = None
+    #             if ' (' in unit:
+    #                 # Extract Group_ID (e.g., 'CortexInner' from 'Unit (CortexInner)')
+    #                 group_id = unit.split(' (')[-1].rstrip(')')
+                    
+    #                 if use_patterns:
+    #                     # Use hatch patterns instead of color adjustment
+    #                     hatch = self._get_hatch_for_group(group_id, subgroup_list=subgroup_list)
+    #                     color = base_color
+    #                 else:
+    #                     # Apply dynamic color variations (shading)
+    #                     color = self._adjust_color_for_group(base_color, group_id, subgroup_list=subgroup_list)
+    #             else:
+    #                 color = base_color
+                
+    #             colors.append(color)
+    #             hatches.append(hatch)
+                
+    #             unit_tick_positions.append(current_pos)
+    #             unit_position_map[unit] = current_pos
+
+    #             # Collect subgroup data for later intra-unit significance testing.
+    #             # Keep a fallback to raw values if filtering leaves too few points.
+    #             if not consolidate_Group_IDs and ' (' in unit:
+    #                 group_id = unit.split(' (')[-1].rstrip(')')
+    #                 subgroup_vals = filtered_vals if len(filtered_vals) >= 2 else unit_data[value_col].values
+    #                 if base_unit not in subgroup_data_by_base:
+    #                     subgroup_data_by_base[base_unit] = {}
+    #                 subgroup_data_by_base[base_unit][group_id] = (subgroup_vals, current_pos)
+
+
+    #             prev_base_unit = base_unit
+
+    #             # Map display name for unit
+    #             display_unit = unit
+    #             if unit_display_map:
+    #                 base_unit = unit.split(' (')[0] if ' (' in unit else unit
+    #                 if base_unit in unit_display_map:
+    #                     mapped = unit_display_map[base_unit]
+    #                     display_unit = unit.replace(base_unit, mapped)
+                
+                
+    #             unit_tick_labels.append(display_unit)
+
+    #         if not bar_means: continue
+            
+    #         # --- Intra-unit significance testing for subgroups (after all units processed) ---
+    #         if subgroup_data_by_base:
+    #             compare_by_label = ", ".join(compare_by) if isinstance(compare_by, list) else compare_by
+    #             sig_symbols = {0.001: '***', 0.01: '**', 0.05: '*', 1.0: 'ns'}
+    #             for base_unit, subgroup_dict in subgroup_data_by_base.items():
+    #                 if len(subgroup_dict) >= 2:
+    #                     # Get sorted group IDs to ensure consistent ordering (e.g., C vs M)
+    #                     group_ids = sorted(subgroup_dict.keys())
+    #                     if len(group_ids) == 2:
+    #                         # Extract data and positions
+    #                         data1, pos1 = subgroup_dict[group_ids[0]]
+    #                         data2, pos2 = subgroup_dict[group_ids[1]]
+                            
+    #                         # T-test for 2 subgroups
+    #                         t_stat, p_val = ttest_ind(data1, data2, equal_var=False)
+    #                         sig = 'ns'
+    #                         for thresh, symb in sorted(sig_symbols.items()):
+    #                             if p_val <= thresh: sig = symb; break
+                            
+    #                         if sig != 'ns':
+    #                             unit_significance.append((pos1, pos2, sig))
+    #                             print(f"    {compare_by_label} sig in {base_unit}: {group_ids[0]} vs {group_ids[1]}: p={p_val:.4f} ({sig})")
+                        
+    #                     elif len(group_ids) > 2:
+    #                         # Tukey HSD for 3+ subgroups
+    #                         records = []
+    #                         for gid in group_ids:
+    #                             vals, _ = subgroup_dict[gid]
+    #                             for v in vals:
+    #                                 records.append({'GID': gid, 'Value': v})
+                            
+    #                         if records:
+    #                             tukey_df = pd.DataFrame(records)
+    #                             try:
+    #                                 res = pairwise_tukeyhsd(endog=tukey_df['Value'], groups=tukey_df['GID'], alpha=0.05)
+                                    
+    #                                 # Process significant results
+    #                                 for row in res.summary().data[1:]:
+    #                                     gid1, gid2, p_adj = str(row[0]), str(row[1]), float(row[3])
+    #                                     if p_adj < 0.05:
+    #                                         sig = 'ns'
+    #                                         for thresh, symb in sorted(sig_symbols.items()):
+    #                                             if p_adj <= thresh: sig = symb; break
+                                            
+    #                                         if sig != 'ns':
+    #                                             pos1 = subgroup_dict[gid1][1]
+    #                                             pos2 = subgroup_dict[gid2][1]
+    #                                             unit_significance.append((pos1, pos2, sig))
+    #                                             print(f"    {compare_by_label} sig in {base_unit} (Tukey): {gid1} vs {gid2}: p={p_adj:.4f} ({sig})")
+    #                             except Exception as e:
+    #                                 print(f"    Warning: Intra-unit Tukey HSD failed for {base_unit}: {e}")
+
+    #         # Plotting
+    #         fig_height = 6
+            
+    #         # Scale width based on the total coordinate span to maintain consistent physical bar width.
+    #         # positions[-1] is the center of the last bar; we use it to calculate the total span.
+    #         # 0.8 inches per coordinate unit provides a consistent visual thickness.
+    #         fig_width = max(6, 2.5 + (positions[-1] + bar_width/2) * 0.8)
+
+    #         fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+    #         if plot_type == 'bar':
+    #             bars = ax.bar(positions, bar_means, width=bar_width, yerr=bar_stderrs,
+    #                         error_kw=dict(linestyle='-', elinewidth=1.5, capsize=5, capthick=1.5),
+    #                         color=colors, alpha=0.8, edgecolor='black', linewidth=2)
+
+    #             # Apply hatches to individual bars
+    #             for bar, h in zip(bars, hatches):
+    #                 if h:
+    #                     bar.set_hatch(h)
+    #         elif plot_type == 'box':
+    #             box = ax.boxplot(
+    #                 plot_vals_per_pos,
+    #                 positions=positions,
+    #                 widths=bar_width * 0.9,
+    #                 patch_artist=True,
+    #                 showfliers=False,
+    #             )
+    #             for patch, color, h in zip(box['boxes'], colors, hatches):
+    #                 patch.set_facecolor(color)
+    #                 patch.set_alpha(0.8)
+    #                 patch.set_edgecolor('black')
+    #                 patch.set_linewidth(1.5)
+    #                 if h:
+    #                     patch.set_hatch(h)
+    #             for key in ['whiskers', 'caps', 'medians']:
+    #                 for artist in box[key]:
+    #                     artist.set_color('black')
+    #                     artist.set_linewidth(1.2)
+    #         else:  # violin
+    #             # violinplot requires ≥2 data points per group (needs KDE).
+    #             # Split into multi-point groups (violin) and single-point groups (scatter dot).
+    #             violin_vals, violin_positions, violin_colors, violin_hatches = [], [], [], []
+    #             single_vals, single_positions, single_colors = [], [], []
+    #             for vv, vp, vc, vh in zip(plot_vals_per_pos, positions, colors, hatches):
+    #                 clean = vv[~np.isnan(vv)] if len(vv) > 0 else vv
+    #                 if len(clean) >= 2:
+    #                     violin_vals.append(vv)
+    #                     violin_positions.append(vp)
+    #                     violin_colors.append(vc)
+    #                     violin_hatches.append(vh)
+    #                 elif len(clean) == 1:
+    #                     single_vals.append(clean[0])
+    #                     single_positions.append(vp)
+    #                     single_colors.append(vc)
+
+    #             if violin_vals:
+    #                 violin = ax.violinplot(
+    #                     violin_vals,
+    #                     positions=violin_positions,
+    #                     widths=bar_width * 0.95,
+    #                     showmeans=False,
+    #                     showmedians=True,
+    #                     showextrema=True,
+    #                 )
+    #                 for body, color, h in zip(violin['bodies'], violin_colors, violin_hatches):
+    #                     body.set_facecolor(color)
+    #                     body.set_alpha(0.7)
+    #                     body.set_edgecolor('black')
+    #                     body.set_linewidth(1.2)
+    #                     if h:
+    #                         body.set_hatch(h)
+    #                 for key in ['cbars', 'cmins', 'cmaxes', 'cmedians']:
+    #                     if key in violin:
+    #                         violin[key].set_color('black')
+    #                         violin[key].set_linewidth(1.0)
+
+    #             # Single-point groups: render as a prominent scatter marker
+    #             if single_vals:
+    #                 ax.scatter(
+    #                     single_positions, single_vals,
+    #                     color=single_colors, edgecolors='black',
+    #                     linewidths=1.0, s=60, zorder=5, marker='D',
+    #                     label='_single_point'
+    #                 )
+
+    #         # --- Scatter overlay: individual data points jittered over each bar ---
+    #         if show_scatter:
+    #             rng = np.random.default_rng(seed=42)
+    #             scatter_jitter = bar_width * 0.30  # jitter within ±30% of half bar width
+    #             for (s_pos, s_vals), s_color in zip(scatter_vals_per_pos, colors):
+    #                 if len(s_vals) == 0:
+    #                     continue
+    #                 jitter = rng.uniform(-scatter_jitter, scatter_jitter, size=len(s_vals))
+    #                 ax.scatter(
+    #                     s_pos + jitter,
+    #                     s_vals,
+    #                     color=s_color,
+    #                     edgecolors='black',
+    #                     linewidths=0.5,
+    #                     s=18,
+    #                     alpha=0.65,
+    #                     zorder=4,
+    #                 )
+            
+    #         # Determine which display names have duplicates across units_to_display (if provided)
+    #         # This MUST be done BEFORE label cleaning so we can match against full display names
+    #         display_names_with_duplicates = set()
+            
+    #         if units_to_display is not None and unit_display_map:
+    #             # Map each base unit to its display name
+    #             unit_to_display_name = {}
+    #             for base_unit in units_to_display:
+    #                 if base_unit in unit_display_map:
+    #                     unit_to_display_name[base_unit] = unit_display_map[base_unit]
+    #                 else:
+    #                     unit_to_display_name[base_unit] = base_unit
+                
+    #             # Count how many base units map to each display name
+    #             from collections import Counter
+    #             display_name_counts = Counter(unit_to_display_name.values())
+    #             display_names_with_duplicates = {name for name, count in display_name_counts.items() if count > 1}
+                
+    #         # Add (N) suffixes to labels that have duplicates (BEFORE cleaning labels)
+    #         if display_names_with_duplicates:
+    #             # Directly check if label is in the duplicated names set
+    #             label_indices = {name: 0 for name in display_names_with_duplicates}
+    #             deduplicated_labels = []
+    #             for label in unit_tick_labels:
+    #                 if label in label_indices:
+    #                     label_indices[label] += 1
+    #                     deduplicated_labels.append(f"{label} (N{label_indices[label]})")
+    #                 else:
+    #                     deduplicated_labels.append(label)
+    #             unit_tick_labels = deduplicated_labels
+    #         else:
+    #             # Also check for duplicates within this plot as a fallback
+    #             from collections import Counter
+    #             label_counts = Counter(unit_tick_labels)
+    #             duplicate_labels = {label for label in label_counts if label_counts[label] > 1}
+                
+    #             if duplicate_labels:
+    #                 label_indices = {label: 0 for label in duplicate_labels}
+    #                 deduplicated_labels = []
+    #                 for label in unit_tick_labels:
+    #                     if label in label_indices:
+    #                         label_indices[label] += 1
+    #                         deduplicated_labels.append(f"{label} (N{label_indices[label]})")
+    #                     else:
+    #                         deduplicated_labels.append(label)
+    #                 unit_tick_labels = deduplicated_labels
+            
+    #         # Clean up labels: extract display name if pipe-delimited
+    #         # cleaned_labels = []
+    #         # for label in unit_tick_labels:
+    #         #     # If label contains "|", take only the part after it
+    #         #     if "|" in label:
+    #         #         label = label.split("|", 1)[1].strip()
+    #         #     cleaned_labels.append(label)
+    #         # unit_tick_labels = cleaned_labels
+
+    #         # Labels and styling
+    #         display_item = display_name_map.get(item_name, item_name) if display_name_map else item_name
+    #         y_label = 'Relative Prob. %' if data_type == 'percentage' else 'Mean Ratio'
+    #         ax.set_ylabel(y_label, fontweight='bold', fontsize=14)
+    #         ax.set_title(f"{display_item}", fontweight='bold', fontsize=16, pad=15)
+            
+    #         # Hide x-ticks and build legends
+    #         ax.set_xticks([])
+    #         ax.set_xticklabels([])
+
+    #         # Legend 1: base unit colors only (no subgroup suffixes)
+    #         unit_legend_patches = []
+    #         if units_to_display is not None:
+    #             base_units_for_legend = [u for u in units_to_display if any((pu.split(' (')[0] if ' (' in pu else pu) == u for pu in all_plot_units)]
+    #         else:
+    #             base_units_for_legend = []
+    #             seen_base_units = set()
+    #             for pu in all_plot_units:
+    #                 bu = pu.split(' (')[0] if ' (' in pu else pu
+    #                 if bu not in seen_base_units:
+    #                     seen_base_units.add(bu)
+    #                     base_units_for_legend.append(bu)
+
+    #         for base_unit in base_units_for_legend:
+    #             display_base = unit_display_map.get(base_unit, base_unit) if unit_display_map else base_unit
+    #             base_color = unit_color_map.get(base_unit, '#888888') if unit_color_map else '#888888'
+    #             unit_legend_patches.append(mpatches.Patch(color=base_color, label=display_base))
+
+    #         # Always refresh legend so colors stay in sync with current run settings.
+    #         unit_legend_path = os.path.join(output_dir, "unit_legend.png")
+    #         self._save_standalone_legend(unit_legend_patches, "Units", unit_legend_path)
+
+    #         # Legend 2: subgroup shading (lighter/darker) semantics
+    #         # Use subgroup_list for ordering, but only include those that actually appear in all_plot_units
+    #         subgroups_in_plot = set()
+    #         for pu in all_plot_units:
+    #             if ' (' in pu:
+    #                 subgroups_in_plot.add(pu.split(' (')[-1].rstrip(')'))
+            
+    #         subgroup_ids_present = [sg for sg in subgroup_list if sg in subgroups_in_plot]
+
+    #         if subgroup_ids_present:
+    #             subgroup_legend_patches = []
+    #             neutral_base = '#888888'
+                
+    #             if not use_patterns:
+    #                 neutral_luminance = np.mean(mcolors.to_rgb(neutral_base))
+
+    #             for gid in subgroup_ids_present:
+    #                 if use_patterns:
+    #                     hatch = self._get_hatch_for_group(gid, subgroup_list=subgroup_list)
+    #                     subgroup_legend_patches.append(
+    #                         mpatches.Patch(facecolor=neutral_base, hatch=hatch, edgecolor='black', label=f"{gid}")
+    #                     )
+    #                 else:
+    #                     shade_color = self._adjust_color_for_group(neutral_base, gid, subgroup_list=subgroup_list)
+    #                     shade_luminance = np.mean(mcolors.to_rgb(shade_color))
+    #                     shade_direction = 'lighter' if shade_luminance >= neutral_luminance else 'darker'
+    #                     subgroup_legend_patches.append(
+    #                         mpatches.Patch(color=shade_color, label=f"{gid} ({shade_direction})")
+    #                     )
+
+    #             legend_title = "Subgroup Patterns" if use_patterns else "Subgroup Shading"
+    #             subgroup_legend_filename = "subgroup_pattern_legend.png" if use_patterns else "subgroup_shading_legend.png"
+    #             subgroup_legend_path = os.path.join(output_dir, subgroup_legend_filename)
+    #             self._save_standalone_legend(subgroup_legend_patches, legend_title, subgroup_legend_path)
+
+    #         # Note: We will draw all significance markers (intra-unit and inter-unit) at the end
+    #         # to ensure proper vertical stacking.
+            
+    #         # Tukey HSD significance testing across units
+    #         # Skip if we're showing Group_ID subgroups (indicated by ' (' in unit names)
+    #         has_subgroup_variants = any(' (' in unit for unit in all_plot_units)
+            
+    #         if len(all_plot_units) > 1 and not has_subgroup_variants:
+    #             # Prepare data for Tukey HSD - only for base units without subgroups
+    #             if remove_outliers:
+    #                 item_data_filtered = self._apply_outlier_filtration(item_data, value_col, ['Plot_Unit'])
+    #             else:
+    #                 item_data_filtered = item_data
+    #             records = []
+    #             for _, row in item_data_filtered.iterrows():
+    #                 records.append({'Unit': row['Plot_Unit'], 'Value': row[value_col]})
+                
+    #             if records and len(item_data_filtered['Plot_Unit'].unique()) > 1:
+    #                 tukey_df = pd.DataFrame(records)
+    #                 try:
+    #                     tukey_result = pairwise_tukeyhsd(endog=tukey_df['Value'], groups=tukey_df['Unit'], alpha=0.05)
+                        
+    #                     sig_symbols = {0.001: '***', 0.01: '**', 0.05: '*', 1.0: 'ns'}
+    #                     for row in tukey_result.summary().data[1:]:
+    #                         unit1, unit2, p_adj = str(row[0]), str(row[1]), float(row[3])
+    #                         if p_adj < 0.05:
+    #                             sig = 'ns'
+    #                             for thresh, symb in sorted(sig_symbols.items()):
+    #                                 if p_adj <= thresh: sig = symb; break
+                                
+    #                             # Use centers for unit positions
+    #                             if unit1 in unit_position_map and unit2 in unit_position_map:
+    #                                 p1 = unit_position_map[unit1]
+    #                                 p2 = unit_position_map[unit2]
+    #                                 unit_significance.append((p1, p2, sig))
+    #                 except Exception as e:
+    #                     print(f"    Warning: Tukey HSD failed for {item_name}: {e}")
+            
+    #         # --- Save significance results to CSV (always, when output_dir is set) ---
+    #         if output_dir and unit_significance:
+    #             import csv
+    #             item_safe_sig = item_name.replace(':', '').replace('/', '_').replace(' ', '_')
+    #             sig_csv_path = os.path.join(output_dir, f"{item_safe_sig}_significance.csv")
+    #             # Build a reverse map: position -> unit label
+    #             pos_to_label = {pos: lbl for pos, lbl in zip(unit_tick_positions, unit_tick_labels)}
+    #             with open(sig_csv_path, 'w', newline='') as csvf:
+    #                 writer = csv.writer(csvf)
+    #                 writer.writerow(['Group_1', 'Group_2', 'Significance'])
+    #                 for x1, x2, sig_sym in unit_significance:
+    #                     lbl1 = pos_to_label.get(x1, str(x1))
+    #                     lbl2 = pos_to_label.get(x2, str(x2))
+    #                     writer.writerow([lbl1, lbl2, sig_sym])
+    #             print(f"  Saved significance table: {sig_csv_path}")
+
+    #         # --- Draw significance markers on the plot ---
+    #         _sig_style = str(sig_style).lower().strip()
+
+    #         if unit_significance and _sig_style != 'export_only':
+    #             y_max = ax.get_ylim()[1]
+
+    #             if _sig_style == 'stars_only':
+    #                 # ── Compact mode: accumulate the strongest symbol per bar position ──
+    #                 # For each position, collect all symbols it appears in, then pick the
+    #                 # strongest (most stars) and write it once above that bar.
+    #                 sym_rank = {'***': 3, '**': 2, '*': 1, 'ns': 0}
+    #                 bar_sym_rank = {}   # pos -> best rank seen so far
+    #                 bar_sym_label = {}  # pos -> best symbol
+    #                 for x1, x2, sig_sym in unit_significance:
+    #                     rank = sym_rank.get(sig_sym, 0)
+    #                     for pos in (x1, x2):
+    #                         if rank > bar_sym_rank.get(pos, -1):
+    #                             bar_sym_rank[pos] = rank
+    #                             bar_sym_label[pos] = sig_sym
+
+    #                 # Determine a consistent y position slightly above the tallest bar
+    #                 star_y = y_max * 1.04
+    #                 for pos, sym in bar_sym_label.items():
+    #                     ax.text(pos, star_y, sym,
+    #                             ha='center', va='bottom',
+    #                             fontsize=11, fontweight='bold', color='black')
+    #                 # Give a small headroom for the stars
+    #                 ax.set_ylim(top=y_max * 1.15)
+
+    #             else:  # 'brackets' (default)
+    #                 line_height = 0.08
+    #                 unit_significance.sort(key=lambda x: (abs(x[0]-x[1]), min(x[0], x[1])))
+    #                 drawn_markers = []  # list of ((x1, x2), level)
+
+    #                 for x1, x2, sig_sym in unit_significance:
+    #                     if x1 > x2: x1, x2 = x2, x1
+
+    #                     # Find first available stacking level
+    #                     level = 0
+    #                     while True:
+    #                         collision = False
+    #                         for (mx1, mx2), mlevel in drawn_markers:
+    #                             if mlevel == level:
+    #                                 if not (x2 + 0.2 < mx1 or x1 - 0.2 > mx2):
+    #                                     collision = True
+    #                                     break
+    #                         if not collision:
+    #                             break
+    #                         level += 1
+
+    #                     y_pos = y_max * (1.10 + level * line_height)
+    #                     ax.plot([x1, x2], [y_pos, y_pos], 'k-', linewidth=1.0)
+    #                     ax.text((x1 + x2) / 2, y_pos, sig_sym,
+    #                             ha='center', va='bottom', fontsize=10, fontweight='bold')
+    #                     drawn_markers.append(((x1, x2), level))
+
+    #                 max_level = max(m[1] for m in drawn_markers) if drawn_markers else 0
+    #                 ax.set_ylim(top=y_max * (1.20 + max_level * line_height))
+            
+
+    #         # Grid and spines
+    #         ax.grid(axis='y', linestyle='--', alpha=0.3)
+    #         for spine in ax.spines.values(): spine.set_edgecolor('#cccccc')
+            
+    #         plt.tight_layout()
+    #         # Save
+    #         item_safe = item_name.replace(':', '').replace('/', '_').replace(' ', '_')
+    #         save_path = os.path.join(output_dir, f"{data_type}_{item_safe}_{plot_type}plot.png")
+    #         # print(f" Generated individual bar plot in {save_path}")
+
+    #         plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            
+    #         if show_plots: plt.show()
+    #         else: plt.close(fig)
+
+
+
     def create_individual_barplots(self, df, value_col, grouping_col, items_list=None,
                                     output_dir=None, data_type='percentage',
                                     show_plots=False, display_name_map=None,
                                     unit_color_map=None, unit_display_map=None,
                                     units_to_display=None,
-                                    compare_by=None, compare_order=None,
-                                    consolidate_Group_IDs=False):
+                                    consolidate_Group_IDs=False,
+                                    subgroup_list=None,
+                                    compare_by="Group_ID",
+                                    show_empty_subgroups=False,
+                                    show_scatter=False,
+                                    plot_type='bar',
+                                    sig_style='brackets',
+                                    use_patterns=True,
+                                    min_size_to_plot=3,
+                                    remove_outliers=True):
         """
-        Create individual bar plots for publication, optionally comparing across sample types.
-        Shows mean ± standard error for each unit.
+        Create individual plots for publication.
+        Supports bar, box, or violin plots with optional Group_ID subgroup variants.
         
         Args:
             df: DataFrame containing the measurements.
@@ -2203,24 +4337,43 @@ class HSI_Visualizer:
             grouping_col: Column name for the items ('Molecule' or 'Ratio_Type').
             items_list: List of molecules/ratios to plot.
             output_dir: Directory to save plots.
-            compare_by: Column to compare within each unit (e.g., 'Sample_Type').
-            compare_order: Ordered list of groups for the comparison column.
-            consolidate_Group_IDs: If True, merges C/M Group_IDs into base Units for cleaner comparison.
+            consolidate_Group_IDs: If True, merges subgroups into base Units for cleaner comparison.
+            compare_by: Column name or list of column names used to define subgroups (default: "Group_ID").
+            plot_type: Plot style to render ('bar', 'box', or 'violin').
+            sig_style: Controls how statistical significance is shown on the plot.
+            min_size_to_plot: Minimum number of valid data points required to plot a unit (default: 3).
+                'brackets'   — (default) traditional bracket lines with * symbols above bars.
+                               Can get crowded when there are many significant pairs.
+                'stars_only' — compact mode: a small * / ** / *** label is placed directly
+                               above each bar in a significant pair.  No crossing lines.
+                'export_only'— no on-plot markers at all; results are only written to CSV.
+                A CSV of all significant pairs is always saved to output_dir (when set),
+                regardless of the chosen style.
         """
         import matplotlib.patches as mpatches
         import matplotlib.pyplot as plt
-        from statsmodels.stats.multicomp import pairwise_tukeyhsd
+        import matplotlib.cm as cm
+        import matplotlib.colors as mcolors
+
         from scipy.stats import f_oneway, ttest_ind
+        import pingouin as pg
+
+
+        # Layout tuning knobs for individual barplots:
+        # - bar_width controls visual thickness of each bar
+        # - same_unit_spacing controls spacing between subgroup bars of the same base unit
+        # - between_unit_spacing controls spacing between different base units
+        bar_width = 0.3
+        same_unit_spacing = 0.4
+        between_unit_spacing = 0.8
 
         if output_dir is None:
             output_dir = 'individual_barplots'
         os.makedirs(output_dir, exist_ok=True)
-        
-        # Prepare color palette for comparison groups
-        comparison_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
-        if compare_by == 'Group_ID':
-            # Specific colors for Cortex/Medulla if that's the comparison
-            group_colors = {'Cortex': '#4dabf7', 'Medulla': '#ff922b', 'C': '#4dabf7', 'M': '#ff922b'}
+
+        plot_type = str(plot_type).lower().strip()
+        if plot_type not in {'bar', 'box', 'violin'}:
+            raise ValueError(f"Unsupported plot_type '{plot_type}'. Use 'bar', 'box', or 'violin'.")
         
         print(f"Units to display: {units_to_display if units_to_display else 'All'}")
 
@@ -2229,212 +4382,203 @@ class HSI_Visualizer:
             df = df[df['Unit'].isin(units_to_display)].copy()
         
         # Consolidation check
-        if consolidate_Group_IDs or compare_by == 'Group_ID':
+        if consolidate_Group_IDs:
             df['Plot_Unit'] = df['Unit']
         else:
-            # Create Unit_Group_ID column if not consolidate
-            def make_unit_Group_ID(row):
-                Group_ID = row.get('Group_ID')
-                if pd.isna(Group_ID) or Group_ID in [None, '', 'Other', 'O']:
+            # Create Unit_(Subgroup) labels based on compare_by columns
+            def make_unit_subgroup_label(row):
+                # Handle single string or list of columns
+                cols = [compare_by] if isinstance(compare_by, str) else compare_by
+                
+                label_parts = []
+                for col in cols:
+                    val = row.get(col)
+                    if not pd.isna(val) and val not in [None, '', 'Other', 'O']:
+                        label_parts.append(str(val))
+                
+                if not label_parts:
                     return str(row['Unit'])
-                # Abbreviate Group_ID
-                reg_abbrev = str(Group_ID)[0] if len(str(Group_ID)) > 0 else ''
-                if reg_abbrev in ['O', '']: return str(row['Unit'])
-                return f"{row['Unit']} ({reg_abbrev})"
-            df['Plot_Unit'] = df.apply(make_unit_Group_ID, axis=1)
+                
+                # Combine multiple column values if necessary
+                subgroup_str = ", ".join(label_parts)
+                return f"{row['Unit']} ({subgroup_str})"
+            
+            df['Plot_Unit'] = df.apply(make_unit_subgroup_label, axis=1)
 
-        if items_list == "All" or items_list is None:
+            # --- IDENTIFY SUBGROUPS FOR DYNAMIC VISUALS ---
+            if subgroup_list is None:
+                all_groups = set()
+                for unit in df['Plot_Unit'].unique():
+                    if ' (' in unit:
+                        gid = unit.split(' (')[-1].rstrip(')')
+                        all_groups.add(gid)
+                # Sort alphabetically only when auto-detecting
+                subgroup_list = sorted(list(all_groups))
+            else:
+                # Use provided list as is (maintain order)
+                subgroup_list = list(subgroup_list)
+            
+            visual_type = "patterns" if use_patterns else "shading"
+            print(f"Subgroups identified for dynamic {visual_type}: {subgroup_list}")
+
+        is_wide = grouping_col is None
+        if is_wide and items_list is None:
+            raise Exception("Must have items_list if using wide dataframe version.")
+
+        elif items_list == "All" or items_list is None:
             items_list = sorted(df[grouping_col].unique())
+
 
         # Iterate through items
         for item_name in items_list:
-            item_data = df[df[grouping_col] == item_name].copy()
-            item_data.replace([np.inf, -np.inf], np.nan, inplace=True)
-            item_data = item_data.dropna(subset=[value_col])
+            if is_wide:
+                current_value_col = item_name
+                item_data = df.copy()
+            else:
+                current_value_col = value_col
+                item_data = df[df[grouping_col] == item_name].copy()
+        
+                # Clean data using the current value column
+                item_data.replace([np.inf, -np.inf], np.nan, inplace=True)
+                item_data = item_data.dropna(subset=[current_value_col])
             
             if len(item_data) == 0:
                 print(f"  Skipping {item_name}: no valid data")
                 continue
 
-            # Identify unique units to plot
-            all_plot_units = sorted(item_data['Plot_Unit'].unique())
-            
-            # Reorder all_plot_units to match units_to_display order if provided
+            # 1. Determine base units to plot
             if units_to_display is not None:
-                # Create a mapping of base unit -> list of all plot units for that base
-                plot_units_by_base = {}
-                for plot_unit in all_plot_units:
-                    base_unit = plot_unit.split(' (')[0] if ' (' in plot_unit else plot_unit
-                    if base_unit not in plot_units_by_base:
-                        plot_units_by_base[base_unit] = []
-                    plot_units_by_base[base_unit].append(plot_unit)
-                
-                # Reorder to match units_to_display
-                reordered_units = []
-                for base_unit in units_to_display:
-                    if base_unit in plot_units_by_base:
-                        # Sort subgroups by Group_ID to maintain consistent order
-                        subgroups = sorted(plot_units_by_base[base_unit])
-                        reordered_units.extend(subgroups)
-                
-                all_plot_units = reordered_units
+                base_units = units_to_display
+            else:
+                # Extract unique base units from the data and sort them
+                all_raw_units = item_data['Plot_Unit'].unique()
+                base_units = sorted(list(set(pu.split(' (')[0] if ' (' in pu else pu for pu in all_raw_units)))
 
+            # 2. Build final ordered list of plot units
+            if consolidate_Group_IDs:
+                source_map = set(item_data['Plot_Unit'].unique())
+                reordered_units = [bu   for bu in base_units if bu in source_map]
+            else: 
+                reordered_units = []
+                for bu in base_units:
+                    # Check if this base unit exists in data
+                    existing_for_base = [pu for pu in item_data['Plot_Unit'].unique() if (pu.split(' (')[0] if ' (' in pu else pu) == bu]
+                    
+                    # For this base unit, iterate over subgroups in the requested order
+                    added_for_this_base = []
+                    for sg in subgroup_list:
+                        pu = f"{bu} ({sg})"
+                        if pu in existing_for_base:
+                            reordered_units.append(pu)
+                            added_for_this_base.append(pu)
+                        elif show_empty_subgroups:
+                            reordered_units.append(pu)
+                            added_for_this_base.append(pu)
+                    
+                    # Safety catch: Add any remaining units for this base (e.g. base unit without subgroup)
+                    for pu in existing_for_base:
+                        if pu not in added_for_this_base:
+                            reordered_units.append(pu)
             
-            # Identify all unique comparison groups for this item to ensure consistency across units
-            all_item_groups = []
-            if compare_by and compare_by in item_data.columns:
-                if compare_order:
-                    # Use provided order but filter to what exists in this item's data
-                    all_item_groups = [g for g in compare_order if g in item_data[compare_by].unique()]
-                else:
-                    all_item_groups = sorted(item_data[compare_by].unique())
+            all_plot_units = reordered_units
 
             
             # Prepare data groups
             bar_means = []
             bar_stderrs = []
             colors = []
+            hatches = []
             positions = []
-            
-            current_pos = 1
+            scatter_vals_per_pos = []  # list of (position, array_of_values) for scatter overlay
+            plot_vals_per_pos = []     # list of arrays used to draw box/violin plots
+
+            # Prepare plot arrays
+            current_pos = 1.0
             unit_tick_positions = []
             unit_tick_labels = []
-            unit_group_positions = {}  # Map unit -> {group: position}
+            unit_position_map = {}     # Map unit name -> tick position
             unit_significance = []     # List of (pos1, pos2, sig_symbol)
+            subgroup_data_by_base = {} # Map base_unit -> {group_id: (data, position)}
+            prev_base_unit = None
             
             for unit in all_plot_units:
                 unit_data = item_data[item_data['Plot_Unit'] == unit]
-                unit_start_pos = current_pos
                 
-                if compare_by and compare_by in item_data.columns:
-                    # Iterate through all possible groups for this item to maintain consistent positions/colors
-                    for i, group in enumerate(all_item_groups):
-                        group_data = unit_data[unit_data[compare_by] == group]
+                # Skip units that do not have enough data to form a meaningful distribution
+                if unit_data[current_value_col].count() < min_size_to_plot:
+                    continue
+                
+                base_unit = unit.split(' (')[0] if ' (' in unit else unit
 
-                        if not group_data.empty:
-                            unit_group_positions.setdefault(unit, {})[group] = current_pos
-                            # Consistency: Remove outliers using IQR method for both bar heights and statistical tests
-                            filtered_group = self._apply_outlier_filtration(group_data, value_col, [compare_by])
-                            filtered_group_vals = filtered_group[value_col].values
-                            
-                            if len(filtered_group_vals) > 0:
-                                bar_means.append(np.mean(filtered_group_vals))
-                                bar_stderrs.append(np.std(filtered_group_vals) / np.sqrt(len(filtered_group_vals)))
-                            else:
-                                # Fallback if everything filtered (unlikely)
-                                raw_vals = group_data[value_col].values
-                                bar_means.append(np.mean(raw_vals))
-                                bar_stderrs.append(np.std(raw_vals) / np.sqrt(len(raw_vals)))
-                            
-                            positions.append(current_pos)
-                            
-                            # Use specific colors for Group_ID if available
-                            if compare_by == 'Group_ID' and group in group_colors:
-                                colors.append(group_colors[group])
-                            else:
-                                colors.append(comparison_palette[i % len(comparison_palette)])
-                                
-                        # Increment even if empty to leave a gap (keeps bars aligned across units)
-                        current_pos += 0.5 
-                    
-                    # Calculate center for unit label
-                    unit_tick_positions.append((unit_start_pos + current_pos - 0.55) / 2)
-                    
-                    # --- Intra-unit statistical analysis ---
-                    # Only collect groups that actually have data for this specific unit
-                    unit_groups_with_data = [g for g in all_item_groups if not unit_data[unit_data[compare_by] == g].empty]
-                    if compare_by is not None and len(unit_groups_with_data) >= 1:
-                        group_data_list = []
-                        group_labels = []
-                        for group in unit_groups_with_data:
-                            g_data = unit_data[unit_data[compare_by] == group]
-                            g_data_filtered = self._apply_outlier_filtration(g_data, value_col, [compare_by])
-                            if not g_data_filtered.empty:
-                                group_data_list.append(g_data_filtered[value_col].values)
-                                group_labels.append(group)
-                        
-                        if len(group_data_list) >= 2:
-                            # Perform local stats
-                            sig_symbols = {0.001: '***', 0.01: '**', 0.05: '*', 1.0: 'ns'}
-                            
-                            if len(group_data_list) == 2:
-                                # T-test for 2 groups
-                                t_stat, p_val = ttest_ind(group_data_list[0], group_data_list[1], equal_var=False)
-                                
-                                sig = 'ns'
-                                for thresh, symb in sorted(sig_symbols.items()):
-                                    if p_val <= thresh: sig = symb; break
-                                
-                                # Use same logic for positions regardless of significance level
-                                # but only draw the bar if it's NOT 'ns' (unless the user wants 'ns' bars too)
-                                # Currently we only append to unit_significance if it's NOT 'ns'
-                                if sig != 'ns':
-                                    pos1 = unit_group_positions[unit][group_labels[0]]
-                                    pos2 = unit_group_positions[unit][group_labels[1]]
-                                    unit_significance.append((pos1, pos2, sig))
-                            else:
-                                # ANOVA + Tukey for >2 groups
-                                try:
-                                    f_stat, p_val = f_oneway(*group_data_list)
-                                    if p_val < 0.05:
-                                        # Flatten for Tukey
-                                        tukey_records = []
-                                        for k, g_vals in enumerate(group_data_list):
-                                            for val in g_vals:
-                                                tukey_records.append({'G': group_labels[k], 'V': val})
-                                        tk_df = pd.DataFrame(tukey_records)
-                                        tk_res = pairwise_tukeyhsd(tk_df['V'], tk_df['G'])
-                                        
-                                        # Add all significant pairs
-                                        for row in tk_res.summary().data[1:]:
-                                            g1, g2, p_adj = row[0], row[1], row[3]
-                                            if p_adj < 0.05:
-                                                sig = 'ns'
-                                                for thresh, symb in sorted(sig_symbols.items()):
-                                                    if p_adj <= thresh: sig = symb; break
-                                                p1 = unit_group_positions[unit][str(g1)]
-                                                p2 = unit_group_positions[unit][str(g2)]
-                                                unit_significance.append((p1, p2, sig))
-                                                print(f"    SIGNIFICANT: {g1} vs {g2} in {unit}: p_adj={p_adj:.4f} ({sig})")
-                                except: pass
-                    
-                    current_pos += 1.0  # Gap between units
+                # Add tighter spacing within a base unit and larger gaps between base units
+                if prev_base_unit is not None:
+                    if base_unit == prev_base_unit:
+                        current_pos += same_unit_spacing
+                    else:
+                        current_pos += between_unit_spacing
+                
+                # Simple unit-based plot
+                # Remove outliers using shared IQR method for both bar heights and statistical tests
+                if remove_outliers:
+                    unit_data_filtered = self._apply_outlier_filtration(unit_data, current_value_col, ['Plot_Unit'])
                 else:
-                    # Simple unit-based plot
-                    # Remove outliers using shared IQR method for both bar heights and statistical tests
-                    unit_data_filtered = self._apply_outlier_filtration(unit_data, value_col, ['Plot_Unit'])
-                    filtered_vals = unit_data_filtered[value_col].values
+                    unit_data_filtered = unit_data
+                filtered_vals = unit_data_filtered[current_value_col].values
 
-                    if len(filtered_vals) > 0:
-                        bar_means.append(np.mean(filtered_vals))
-                        bar_stderrs.append(np.std(filtered_vals) / np.sqrt(len(filtered_vals)))
+                if len(filtered_vals) > 0:
+                    bar_means.append(np.mean(filtered_vals))
+                    bar_stderrs.append(np.std(filtered_vals) / np.sqrt(len(filtered_vals)))
+                else:
+                    raw_vals = unit_data[current_value_col].values
+                    if len(raw_vals) > 0:
+                        bar_means.append(np.mean(raw_vals))
+                        bar_stderrs.append(np.std(raw_vals) / np.sqrt(len(raw_vals)))
                     else:
-                        raw_vals = unit_data[value_col].values
-                        if len(raw_vals) > 0:
-                            bar_means.append(np.mean(raw_vals))
-                            bar_stderrs.append(np.std(raw_vals) / np.sqrt(len(raw_vals)))
-                        else:
-                            bar_means.append(0)
-                            bar_stderrs.append(0)
-                        
-                    positions.append(current_pos)
-                    # Use unit_color_map if provided, with color variation for Group_ID subgroups
-                    base_unit = unit.split(' (')[0] if ' (' in unit else unit
-                    base_color = unit_color_map.get(base_unit, '#888888') if unit_color_map else '#888888'
+                        bar_means.append(0)
+                        bar_stderrs.append(0)
+                
+                # Store individual values for scatter overlay
+                vals_for_plot = filtered_vals if len(filtered_vals) > 0 else unit_data[current_value_col].values
+                scatter_vals_per_pos.append((current_pos, vals_for_plot))
+                plot_vals_per_pos.append(vals_for_plot if len(vals_for_plot) > 0 else np.array([np.nan]))
+
+                positions.append(current_pos)
+                # Use unit_color_map if provided, with color variation for Group_ID subgroups
+                base_color = unit_color_map.get(base_unit, '#888888') if unit_color_map else '#888888'
+                
+                # Extract Group_ID if present and apply dynamic visuals
+                hatch = None
+                if ' (' in unit:
+                    # Extract Group_ID (e.g., 'CortexInner' from 'Unit (CortexInner)')
+                    group_id = unit.split(' (')[-1].rstrip(')')
                     
-                    # Extract Group_ID if present and apply color variation
-                    if ' (' in unit and not compare_by:
-                        # Extract Group_ID (e.g., 'C' or 'M' from 'Unit (C)')
-                        group_id = unit.split(' (')[-1].rstrip(')')
-                        # Apply subtle color variations: slightly darker for some IDs, lighter for others
-                        color = self._adjust_color_for_group(base_color, group_id)
-                    else:
+                    if use_patterns:
+                        # Use hatch patterns instead of color adjustment
+                        hatch = self._get_hatch_for_group(group_id, subgroup_list=subgroup_list)
                         color = base_color
-                    
-                    colors.append(color)
-                    
-                    unit_tick_positions.append(current_pos)
-                    current_pos += 1.0
+                    else:
+                        # Apply dynamic color variations (shading)
+                        color = self._adjust_color_for_group(base_color, group_id, subgroup_list=subgroup_list)
+                else:
+                    color = base_color
+                
+                colors.append(color)
+                hatches.append(hatch)
+                
+                unit_tick_positions.append(current_pos)
+                unit_position_map[unit] = current_pos
+
+                # Collect subgroup data for later intra-unit significance testing.
+                # Use raw values for stats even if plotting uses filtered values (per user request)
+                if not consolidate_Group_IDs and ' (' in unit:
+                    group_id = unit.split(' (')[-1].rstrip(')')
+                    raw_vals = unit_data[current_value_col].values
+                    if base_unit not in subgroup_data_by_base:
+                        subgroup_data_by_base[base_unit] = {}
+                    subgroup_data_by_base[base_unit][group_id] = (raw_vals, current_pos)
+
+
+                prev_base_unit = base_unit
 
                 # Map display name for unit
                 display_unit = unit
@@ -2449,214 +4593,944 @@ class HSI_Visualizer:
 
             if not bar_means: continue
 
+            # --- SIGNIFICANCE TESTING ---
+            unit_significance = []
+            sig_symbols = {0.001: '***', 0.01: '**', 0.05: '*', 1.0: 'ns'}
+            
+            # ALWAYS perform statistical tests on the RAW data (before outlier removal)
+            # while the visual bars/boxes will respect the remove_outliers flag.
+            stat_df = item_data
+
+            if consolidate_Group_IDs:
+                # 1. INTER-UNIT: Compare all base units across the plot
+                unique_units = [u for u in all_plot_units if u in unit_position_map]
+                # Filter to only units that have at least 2 samples AND non-zero variance (Welch's ANOVA requirement)
+                unique_units = [u for u in unique_units if len(stat_df[stat_df['Plot_Unit'] == u]) >= 2 
+                                and stat_df[stat_df['Plot_Unit'] == u][current_value_col].std() > 1e-9]
+
+                if len(unique_units) > 1:
+                    analysis_df = stat_df[stat_df['Plot_Unit'].isin(unique_units)]
+                    try:
+                        # 1. Welch's ANOVA
+                        aov = pg.welch_anova(data=analysis_df, dv=current_value_col, between='Plot_Unit')
+                        if not aov.empty and 'p_unc' in aov.columns and aov['p_unc'].iloc[0] < 0.05:
+                            # 2. Games-Howell Post-hoc
+                            ph = pg.pairwise_gameshowell(data=analysis_df, dv=current_value_col, between='Plot_Unit')
+                            for _, row in ph.iterrows():
+                                u1, u2, p = row['A'], row['B'], row['pval']
+                                if p < 0.05:
+                                    sig = next((s for t, s in sig_symbols.items() if p <= t), 'ns')
+                                    unit_significance.append((unit_position_map[u1], unit_position_map[u2], sig))
+                    except Exception as e: print(f"    Inter-unit Pingouin testing failed: {e}")
+            else:
+                # 2. INTRA-UNIT: Compare subgroups within each base unit
+                for b_unit, s_dict in subgroup_data_by_base.items():
+                    g_ids = sorted(s_dict.keys())
+                    if len(g_ids) == 2:
+                        # Welch's T-test for 2 subgroups
+                        d1, p1 = s_dict[g_ids[0]]
+                        d2, p2 = s_dict[g_ids[1]]
+                        _, p = ttest_ind(d1, d2, equal_var=False)
+                        if p < 0.05:
+                            sig = next((s for t, s in sig_symbols.items() if p <= t), 'ns')
+                            unit_significance.append((p1, p2, sig))
+                    elif len(g_ids) > 2:
+                        # 2b. Intra-unit Games-Howell using Pingouin
+                        try:
+                            unit_subset = stat_df[stat_df['Unit'] == b_unit]
+                            # Filter out groups with zero variance to avoid linalg errors in Games-Howell
+                            group_stds = unit_subset.groupby('Group_ID')[current_value_col].std()
+                            valid_groups = group_stds[group_stds > 1e-9].index
+                            unit_subset = unit_subset[unit_subset['Group_ID'].isin(valid_groups)]
+                            aov = pg.welch_anova(data=unit_subset, dv=current_value_col, between='Group_ID')
+                            if not aov.empty and 'p_unc' in aov.columns and aov['p_unc'].iloc[0] < 0.05:
+                                if unit_subset['Group_ID'].nunique() > 2:
+                                    ph = pg.pairwise_gameshowell(data=unit_subset, dv=current_value_col, between='Group_ID')
+                                    for _, row in ph.iterrows():
+                                        gid1, gid2, p = row['A'], row['B'], row['pval']
+                                        if p < 0.05:
+                                            sig = next((s for t, s in sig_symbols.items() if p <= t), 'ns')
+                                            unit_significance.append((s_dict[gid1][1], s_dict[gid2][1], sig))
+                        except Exception as e: print(f"    Intra-unit Pingouin testing failed for {b_unit}: {e}")
+
+
             # Plotting
             fig_height = 6
-            fig_width = 4
+            
+            # Scale width based on the total coordinate span to maintain consistent physical bar width.
+            # positions[-1] is the center of the last bar; we use it to calculate the total span.
+            # 0.8 inches per coordinate unit provides a consistent visual thickness.
+            fig_width = max(4, 2.5 + (positions[-1] + bar_width/2) * 0.8)
 
             fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-            
-            bars = ax.bar(positions, bar_means, width=0.5, yerr=bar_stderrs, 
-                        error_kw=dict(linestyle='-', elinewidth=1.5, capsize=5, capthick=1.5),
-                        color=colors, alpha=0.8, edgecolor='black', linewidth=2)
-            
-            # Determine which display names have duplicates across units_to_display (if provided)
-            # This MUST be done BEFORE label cleaning so we can match against full display names
-            display_names_with_duplicates = set()
-            
-            if units_to_display is not None and unit_display_map:
-                # Map each base unit to its display name
-                unit_to_display_name = {}
-                for base_unit in units_to_display:
-                    if base_unit in unit_display_map:
-                        unit_to_display_name[base_unit] = unit_display_map[base_unit]
-                    else:
-                        unit_to_display_name[base_unit] = base_unit
-                
-                # Count how many base units map to each display name
-                from collections import Counter
-                display_name_counts = Counter(unit_to_display_name.values())
-                display_names_with_duplicates = {name for name, count in display_name_counts.items() if count > 1}
-                
-            # Add (N) suffixes to labels that have duplicates (BEFORE cleaning labels)
-            if display_names_with_duplicates:
-                # Directly check if label is in the duplicated names set
-                label_indices = {name: 0 for name in display_names_with_duplicates}
-                deduplicated_labels = []
-                for label in unit_tick_labels:
-                    if label in label_indices:
-                        label_indices[label] += 1
-                        deduplicated_labels.append(f"{label} (N{label_indices[label]})")
-                    else:
-                        deduplicated_labels.append(label)
-                unit_tick_labels = deduplicated_labels
-            else:
-                # Also check for duplicates within this plot as a fallback
-                from collections import Counter
-                label_counts = Counter(unit_tick_labels)
-                duplicate_labels = {label for label in label_counts if label_counts[label] > 1}
-                
-                if duplicate_labels:
-                    label_indices = {label: 0 for label in duplicate_labels}
-                    deduplicated_labels = []
-                    for label in unit_tick_labels:
-                        if label in label_indices:
-                            label_indices[label] += 1
-                            deduplicated_labels.append(f"{label} (N{label_indices[label]})")
-                        else:
-                            deduplicated_labels.append(label)
-                    unit_tick_labels = deduplicated_labels
-            
-            # Clean up labels: extract display name if pipe-delimited
-            # cleaned_labels = []
-            # for label in unit_tick_labels:
-            #     # If label contains "|", take only the part after it
-            #     if "|" in label:
-            #         label = label.split("|", 1)[1].strip()
-            #     cleaned_labels.append(label)
-            # unit_tick_labels = cleaned_labels
+
+            if plot_type == 'bar':
+                bars = ax.bar(positions, bar_means, width=bar_width, yerr=bar_stderrs,
+                            error_kw=dict(linestyle='-', elinewidth=1.5, capsize=5, capthick=1.5),
+                            color=colors, alpha=0.8, edgecolor='black', linewidth=2)
+
+                # Apply hatches to individual bars
+                for bar, h in zip(bars, hatches):
+                    if h:
+                        bar.set_hatch(h)
+            elif plot_type == 'box':
+                box = ax.boxplot(
+                    plot_vals_per_pos,
+                    positions=positions,
+                    widths=bar_width * 0.9,
+                    patch_artist=True,
+                    showfliers=False,
+                )
+                for patch, color, h in zip(box['boxes'], colors, hatches):
+                    patch.set_facecolor(color)
+                    patch.set_alpha(0.8)
+                    patch.set_edgecolor('black')
+                    patch.set_linewidth(1.5)
+                    if h:
+                        patch.set_hatch(h)
+                for key in ['whiskers', 'caps', 'medians']:
+                    for artist in box[key]:
+                        artist.set_color('black')
+                        artist.set_linewidth(1.2)
+            else:  # violin
+                # violinplot requires ≥2 data points per group (needs KDE).
+                # Split into multi-point groups (violin) and single-point groups (scatter dot).
+                violin_vals, violin_positions, violin_colors, violin_hatches = [], [], [], []
+                single_vals, single_positions, single_colors = [], [], []
+                for vv, vp, vc, vh in zip(plot_vals_per_pos, positions, colors, hatches):
+                    clean = vv[~np.isnan(vv)] if len(vv) > 0 else vv
+                    if len(clean) >= 2:
+                        violin_vals.append(vv)
+                        violin_positions.append(vp)
+                        violin_colors.append(vc)
+                        violin_hatches.append(vh)
+                    elif len(clean) == 1:
+                        single_vals.append(clean[0])
+                        single_positions.append(vp)
+                        single_colors.append(vc)
+
+                if violin_vals:
+                    violin = ax.violinplot(
+                        violin_vals,
+                        positions=violin_positions,
+                        widths=bar_width * 0.95,
+                        showmeans=False,
+                        showmedians=True,
+                        showextrema=True,
+                    )
+                    for body, color, h in zip(violin['bodies'], violin_colors, violin_hatches):
+                        body.set_facecolor(color)
+                        body.set_alpha(0.7)
+                        body.set_edgecolor('black')
+                        body.set_linewidth(1.2)
+                        if h:
+                            body.set_hatch(h)
+                    for key in ['cbars', 'cmins', 'cmaxes', 'cmedians']:
+                        if key in violin:
+                            violin[key].set_color('black')
+                            violin[key].set_linewidth(1.0)
+
+                # Single-point groups: render as a prominent scatter marker
+                if single_vals:
+                    ax.scatter(
+                        single_positions, single_vals,
+                        color=single_colors, edgecolors='black',
+                        linewidths=1.0, s=60, zorder=5, marker='D',
+                        label='_single_point'
+                    )
+
+            # --- Scatter overlay: individual data points jittered over each bar ---
+            if show_scatter:
+                rng = np.random.default_rng(seed=42)
+                scatter_jitter = bar_width * 0.30  # jitter within ±30% of half bar width
+                for (s_pos, s_vals), s_color in zip(scatter_vals_per_pos, colors):
+                    if len(s_vals) == 0:
+                        continue
+                    jitter = rng.uniform(-scatter_jitter, scatter_jitter, size=len(s_vals))
+                    ax.scatter(
+                        s_pos + jitter,
+                        s_vals,
+                        color=s_color,
+                        edgecolors='black',
+                        linewidths=0.5,
+                        s=18,
+                        alpha=0.65,
+                        zorder=4,
+                    )
 
             # Labels and styling
             display_item = display_name_map.get(item_name, item_name) if display_name_map else item_name
             y_label = 'Relative Prob. %' if data_type == 'percentage' else 'Mean Ratio'
             ax.set_ylabel(y_label, fontweight='bold', fontsize=14)
-            
-            # Ensure output directory exists
-            os.makedirs(output_dir, exist_ok=True)
-            
-            title_suffix = f" by {compare_by.replace('_', ' ')}" if compare_by else ""
             ax.set_title(f"{display_item}", fontweight='bold', fontsize=16, pad=15)
             
-            if compare_by:
-                # --- X-tick labels on axis (compare_by mode) ---
-                ax.set_xticks(unit_tick_positions)
-                ax.set_xticklabels(unit_tick_labels, rotation=90, ha='center', fontsize=12)
+            # Hide x-ticks and build legends
+            ax.set_xticks([])
+            ax.set_xticklabels([])
 
-                # Use the same all_item_groups as used for the bars for legend consistency
-                legend_labels = [str(g).lower().capitalize() for g in all_item_groups]
-                
-                legend_patches = []
-                for i, label in enumerate(legend_labels):
-                    # Match label back to group_colors if possible
-                    color_found = False
-                    if compare_by == 'Group_ID':
-                        for k, v in group_colors.items():
-                            if k.upper() == label:
-                                legend_patches.append(mpatches.Patch(color=v, label=label))
-                                color_found = True
-                                break
-                    
-                    if not color_found:
-                        legend_patches.append(mpatches.Patch(color=comparison_palette[i % len(comparison_palette)], label=label))
-                
-                # Only save standalone legend once per call
-                legend_path = os.path.join(output_dir, "comparison_legend.png")
-                if not os.path.exists(legend_path):
-                    self._save_standalone_legend(legend_patches, "Comparison Groups", legend_path)
+            # Legend 1: base unit colors only (no subgroup suffixes)
+            unit_legend_patches = []
+            if units_to_display is not None:
+                base_units_for_legend = [u for u in units_to_display if any((pu.split(' (')[0] if ' (' in pu else pu) == u for pu in all_plot_units)]
             else:
-                # --- No compare_by: hide x-ticks, build unit-color legend instead ---
-                ax.set_xticks([])
-                ax.set_xticklabels([])
+                base_units_for_legend = []
+                seen_base_units = set()
+                for pu in all_plot_units:
+                    bu = pu.split(' (')[0] if ' (' in pu else pu
+                    if bu not in seen_base_units:
+                        seen_base_units.add(bu)
+                        base_units_for_legend.append(bu)
 
-                # Build legend patches from per-bar colors and display labels
-                unit_legend_patches = []
-                for lbl, clr in zip(unit_tick_labels, colors):
-                    unit_legend_patches.append(mpatches.Patch(color=clr, label=lbl))
+            for base_unit in base_units_for_legend:
+                display_base = unit_display_map.get(base_unit, base_unit) if unit_display_map else base_unit
+                base_color = unit_color_map.get(base_unit, '#888888') if unit_color_map else '#888888'
+                unit_legend_patches.append(mpatches.Patch(color=base_color, label=display_base))
 
-                # Save unit legend once per call (keyed to output_dir)
-                unit_legend_path = os.path.join(output_dir, "unit_legend.png")
-                if not os.path.exists(unit_legend_path):
-                    self._save_standalone_legend(unit_legend_patches, "Units", unit_legend_path)
+            # Always refresh legend so colors stay in sync with current run settings.
+            unit_legend_path = os.path.join(output_dir, "unit_legend.png")
+            self._save_standalone_legend(unit_legend_patches, "Units", unit_legend_path)
 
-            # Note: We will draw all significance markers (intra-unit and inter-unit) at the end
-            # to ensure proper vertical stacking.
+            # Legend 2: subgroup shading (lighter/darker) semantics
+            # Use subgroup_list for ordering, but only include those that actually appear in all_plot_units
+            subgroups_in_plot = set()
+            for pu in all_plot_units:
+                if ' (' in pu:
+                    subgroups_in_plot.add(pu.split(' (')[-1].rstrip(')'))
             
-            # Tukey HSD significance testing across units (only when not comparing subgroups to avoid clutter)
-            if not compare_by and len(all_plot_units) > 1:
-                # Prepare data for Tukey HSD
-                item_data_filtered = self._apply_outlier_filtration(item_data, value_col, ['Plot_Unit'])
-                records = []
-                for _, row in item_data_filtered.iterrows():
-                    records.append({'Unit': row['Plot_Unit'], 'Value': row[value_col]})
+            subgroup_ids_present = [sg for sg in subgroup_list if sg in subgroups_in_plot]
+
+            if subgroup_ids_present:
+                subgroup_legend_patches = []
+                neutral_base = '#888888'
                 
-                if records and len(item_data_filtered['Plot_Unit'].unique()) > 1:
-                    tukey_df = pd.DataFrame(records)
-                    try:
-                        tukey_result = pairwise_tukeyhsd(endog=tukey_df['Value'], groups=tukey_df['Unit'], alpha=0.05)
-                        
-                        sig_symbols = {0.001: '***', 0.01: '**', 0.05: '*', 1.0: 'ns'}
-                        for row in tukey_result.summary().data[1:]:
-                            unit1, unit2, p_adj = str(row[0]), str(row[1]), float(row[3])
-                            if p_adj < 0.05:
-                                sig = 'ns'
-                                for thresh, symb in sorted(sig_symbols.items()):
-                                    if p_adj <= thresh: sig = symb; break
-                                
-                                # Use centers for unit positions
-                                p1 = unit_tick_positions[all_plot_units.index(unit1)]
-                                p2 = unit_tick_positions[all_plot_units.index(unit2)]
-                                unit_significance.append((p1, p2, sig))
-                    except Exception as e:
-                        print(f"    Warning: Tukey HSD failed for {item_name}: {e}")
-            
-            # --- Draw ALL significance markers (Intra and Inter) ---
-            if unit_significance:
+                if not use_patterns:
+                    neutral_luminance = np.mean(mcolors.to_rgb(neutral_base))
+
+                for gid in subgroup_ids_present:
+                    if use_patterns:
+                        hatch = self._get_hatch_for_group(gid, subgroup_list=subgroup_list)
+                        subgroup_legend_patches.append(
+                            mpatches.Patch(facecolor=neutral_base, hatch=hatch, edgecolor='black', label=f"{gid}")
+                        )
+                    else:
+                        shade_color = self._adjust_color_for_group(neutral_base, gid, subgroup_list=subgroup_list)
+                        shade_luminance = np.mean(mcolors.to_rgb(shade_color))
+                        shade_direction = 'lighter' if shade_luminance >= neutral_luminance else 'darker'
+                        subgroup_legend_patches.append(
+                            mpatches.Patch(color=shade_color, label=f"{gid} ({shade_direction})")
+                        )
+
+                legend_title = "Subgroup Patterns" if use_patterns else "Subgroup Shading"
+                subgroup_legend_filename = "subgroup_pattern_legend.png" if use_patterns else "subgroup_shading_legend.png"
+                subgroup_legend_path = os.path.join(output_dir, subgroup_legend_filename)
+                self._save_standalone_legend(subgroup_legend_patches, legend_title, subgroup_legend_path)
+
+
+            # --- Save significance results to CSV ---
+            if output_dir and unit_significance:
+                import csv
+                item_safe_sig = item_name.replace(':', '').replace('/', '_').replace(' ', '_')
+                sig_csv_path = os.path.join(output_dir, f"{item_safe_sig}_significance.csv")
+                # Build a reverse map: position -> unit label
+                pos_to_label = {pos: lbl for pos, lbl in zip(unit_tick_positions, unit_tick_labels)}
+                with open(sig_csv_path, 'w', newline='') as csvf:
+                    writer = csv.writer(csvf)
+                    writer.writerow(['Group_1', 'Group_2', 'Significance'])
+                    for x1, x2, sig_sym in unit_significance:
+                        lbl1 = pos_to_label.get(x1, str(x1))
+                        lbl2 = pos_to_label.get(x2, str(x2))
+                        writer.writerow([lbl1, lbl2, sig_sym])
+                print(f"  Saved significance table: {sig_csv_path}")
+
+            # --- Draw significance markers on the plot ---
+            _sig_style = str(sig_style).lower().strip()
+            if unit_significance and _sig_style != 'export_only':
                 y_max = ax.get_ylim()[1]
-                line_height = 0.08  # Increased from 0.06 for better symbol clearance
-                # Sort by span (smaller spans first) then position
-                unit_significance.sort(key=lambda x: (abs(x[0]-x[1]), min(x[0], x[1])))
-                
-                # Adaptive stacking: Track occupied Y-ranges per X-interval
-                # We'll use a simple greedy stacking
-                drawn_markers = [] # List of (x_range, y_level)
-                
-                for x1, x2, sig in unit_significance:
-                    if x1 > x2: x1, x2 = x2, x1
+
+                if _sig_style == 'stars_only':
+                    # Compact mode: pick strongest symbol per bar position
+                    sym_rank = {'***': 3, '**': 2, '*': 1, 'ns': 0}
+                    bar_sym_rank = {}
+                    bar_sym_label = {}
+                    for x1, x2, sig_sym in unit_significance:
+                        rank = sym_rank.get(sig_sym, 0)
+                        for pos in (x1, x2):
+                            if rank > bar_sym_rank.get(pos, -1):
+                                bar_sym_rank[pos] = rank
+                                bar_sym_label[pos] = sig_sym
+
+                    star_y = y_max * 1.04
+                    for pos, sym in bar_sym_label.items():
+                        ax.text(pos, star_y, sym, ha='center', va='bottom',
+                                fontsize=11, fontweight='bold', color='black')
+                    ax.set_ylim(top=y_max * 1.15)
+
+                else:  # 'brackets' (default)
+                    line_height = 0.08
+                    unit_significance.sort(key=lambda x: (abs(x[0]-x[1]), min(x[0], x[1])))
+                    drawn_markers = []
+
+                    for x1, x2, sig_sym in unit_significance:
+                        if x1 > x2: x1, x2 = x2, x1
+
+                        # Find first available stacking level
+                        level = 0
+                        while True:
+                            collision = False
+                            for (mx1, mx2), mlevel in drawn_markers:
+                                if mlevel == level:
+                                    if not (x2 + 0.2 < mx1 or x1 - 0.2 > mx2):
+                                        collision = True
+                                        break
+                            if not collision:
+                                break
+                            level += 1
+
+                        y_pos = y_max * (1.10 + level * line_height)
+                        ax.plot([x1, x2], [y_pos, y_pos], 'k-', linewidth=1.0)
+                        ax.text((x1 + x2) / 2, y_pos, sig_sym,
+                                ha='center', va='bottom', fontsize=10, fontweight='bold')
+                        drawn_markers.append(((x1, x2), level))
+
+                    max_level = max(m[1] for m in drawn_markers) if drawn_markers else 0
+                    ax.set_ylim(top=y_max * (1.20 + max_level * line_height))
                     
-                    # Find first available y_level (above bars + padding)
-                    level = 0
-                    while True:
-                        collision = False
-                        for (mx1, mx2), mlevel in drawn_markers:
-                            if mlevel == level:
-                                # Check if intervals overlap
-                                if not (x2 + 0.2 < mx1 or x1 - 0.2 > mx2):
-                                    collision = True
-                                    break
-                        if not collision:
-                            break
-                        level += 1
-                    
-                    # Increased base gap from 1.05 to 1.10
-                    y_pos = y_max * (1.10 + level * line_height)
-                    ax.plot([x1, x2], [y_pos, y_pos], 'k-', linewidth=1.0)
-                    ax.text((x1 + x2) / 2, y_pos, sig, ha='center', va='bottom', fontsize=10, fontweight='bold')
-                    drawn_markers.append(((x1, x2), level))
-                
-                # Expand Y-limit properly for highest level
-                max_level = max([m[1] for m in drawn_markers]) if drawn_markers else 0
-                ax.set_ylim(top=y_max * (1.20 + max_level * line_height))
-            
-            # Fix aspect ratio
-            ax.set_box_aspect(4/2)
+                    # Dynamically increase figure height if we have many levels
+                    if max_level > 3:
+                        fig.set_figheight(fig_height + (max_level - 3) * 0.5)
 
             # Grid and spines
             ax.grid(axis='y', linestyle='--', alpha=0.3)
             for spine in ax.spines.values(): spine.set_edgecolor('#cccccc')
             
-            plt.tight_layout()
+            try:
+                plt.tight_layout()
+            except Exception:
+                # Fallback if decorations are too large for tight_layout
+                pass
             # Save
-            # Comprehensive sanitization to avoid Windows path/character issues
-            item_safe = item_name.replace(':', '_').replace('/', '_').replace(' ', '_')
-            item_safe = item_safe.replace('(', '').replace(')', '').replace("'", "").replace('"', '')
-            item_safe = item_safe.replace(',', '').replace(';', '').replace('&', 'and')
-            
-            if compare_by:
-                item_safe += f"_by_{compare_by}"
-
-            save_path = os.path.join(output_dir, f"{data_type}_{item_safe}_barplot.png")
+            item_safe = item_name.replace(':', '').replace('/', '_').replace(' ', '_')
+            save_path = os.path.join(output_dir, f"{data_type}_{item_safe}_{plot_type}plot.png")
             # print(f" Generated individual bar plot in {save_path}")
 
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             
             if show_plots: plt.show()
-            else: plt.close()
+            else: plt.close(fig)
+
+    def generate_spatial_value_maps(self, df, value_col, grouping_col, output_dir, 
+                                   grid_size=(1000, 1000), cmap='magma', show_plots=False,
+                                   vmin=None, vmax=None, selected_units=None):
+        """
+        Visualize the spatial distribution of a value (ratio or percentage) across an image.
+        Creates a matrix of size (grid_size, grid_size) by binning centroid locations.
+        
+        Args:
+            df: DataFrame containing the data (must have centroid_x, centroid_y)
+            value_col: Column name to visualize (e.g., 'Mean_Ratio' or 'Percentage')
+            grouping_col: Column name to group by (e.g., 'Ratio_Type' or 'Molecule')
+            output_dir: Directory to save plots
+            grid_size: Target dimension for the binned matrix. If None, uses 1:1 pixel mapping.
+            cmap: Colormap to use.
+            show_plots: Whether to display plots interactively.
+            vmin, vmax: Range for colormap normalization.
+            selected_units: Optional unit or list of units to filter by (e.g., 'Glomeruli').
+        """
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        if df is None or df.empty:
+            print("No data available for spatial visualization.")
+            return
+
+        # Use Image_Name if available, else Source_ID
+        img_col = 'Image_Name' if 'Image_Name' in df.columns else 'Source_ID'
+
+        # Store full dataframe to determine global bounds per image
+        full_df = df.copy()
+
+        # Filter by selected units if provided
+        if selected_units is not None:
+            if isinstance(selected_units, str):
+                selected_units = [selected_units]
+            df = df[df['Unit'].isin(selected_units)].copy()
+            if df.empty:
+                print(f"No data found for selected units: {selected_units}")
+                return
+            print(f"Filtering spatial mapping for units: {selected_units}")
+
+        # Iterate through unique images
+        for img_name in df[img_col].unique():
+            img_df = df[df[img_col] == img_name].copy()
+            
+            # Get global bounds for this image across ALL units to ensure alignment
+            img_full_df = full_df[full_df[img_col] == img_name].dropna(subset=['centroid_x', 'centroid_y'])
+            if img_full_df.empty:
+                continue
+                
+            global_min_x, global_max_x = img_full_df['centroid_x'].min(), img_full_df['centroid_x'].max()
+            global_min_y, global_max_y = img_full_df['centroid_y'].min(), img_full_df['centroid_y'].max()
+            
+            range_x = global_max_x - global_min_x
+            range_y = global_max_y - global_min_y
+            
+            # Decide on matrix dimensions based on global range
+            if grid_size is None:
+                width = int(range_x) + 1
+                height = int(range_y) + 1
+            elif isinstance(grid_size, (list, tuple)) and len(grid_size) == 1:
+                if range_x > range_y:
+                    width = grid_size[0]
+                    height = int((range_y / (range_x + 1e-8)) * grid_size[0])
+                else:
+                    height = grid_size[0]
+                    width = int((range_x / (range_y + 1e-8)) * grid_size[0])
+            elif isinstance(grid_size, (list, tuple)) and len(grid_size) == 2:
+                width, height = grid_size[0], grid_size[1]
+            else:
+                # Single integer grid_size
+                if range_x > range_y:
+                    width = grid_size
+                    height = int((range_y / (range_x + 1e-8)) * grid_size)
+                else:
+                    height = grid_size
+                    width = int((range_x / (range_y + 1e-8)) * grid_size)
+            
+            width = max(1, int(width))
+            height = max(1, int(height))
+            
+            for item_name in img_df[grouping_col].unique():
+                subset = img_df[img_df[grouping_col] == item_name].copy()
+                
+                # Filter out points without coordinates
+                subset = subset.dropna(subset=['centroid_x', 'centroid_y'])
+                if subset.empty:
+                    continue
+                
+                # Calculate bins relative to GLOBAL min/max
+                if grid_size is None:
+                    bin_x = (subset['centroid_x'] - global_min_x).astype(int)
+                    bin_y = (subset['centroid_y'] - global_min_y).astype(int)
+                else:
+                    bin_x = ((subset['centroid_x'] - global_min_x) / (range_x + 1e-8) * (width - 1)).astype(int)
+                    bin_y = ((subset['centroid_y'] - global_min_y) / (range_y + 1e-8) * (height - 1)).astype(int)
+                
+                # Create matrix
+                matrix = np.full((height, width), np.nan)
+                
+                # Group by bins and calculate mean
+                subset['bin_x'] = bin_x
+                subset['bin_y'] = bin_y
+                
+                binned_data = subset.groupby(['bin_y', 'bin_x'])[value_col].mean().reset_index()
+                
+                for _, row in binned_data.iterrows():
+                    by, bx = int(row['bin_y']), int(row['bin_x'])
+                    if 0 <= by < height and 0 <= bx < width:
+                        matrix[by, bx] = row[value_col]
+
+                # Save tiff
+                tifffile.imwrite(os.path.join(output_dir, f"{img_name}_{item_name}_{selected_units}.tif"), matrix, photometric='minisblack')
+                
+                # Plotting
+                fig, ax = plt.subplots(figsize=(12, 10))
+                
+                # Use a background color for NaN values (empty areas)
+                current_cmap = plt.get_cmap(cmap).copy()
+                current_cmap.set_bad(color='#111111') # Near-black for empty
+                
+                im = ax.imshow(matrix, cmap=current_cmap, interpolation='nearest', 
+                               origin='upper', vmin=vmin, vmax=vmax)
+                
+                # Add colorbar
+                cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+                cbar.set_label(f"Mean {value_col.replace('_', ' ')}", fontsize=12, fontweight='bold')
+                
+                # Styling
+                title_suffix = f" (Unit: {', '.join(selected_units)})" if selected_units else ""
+                ax.set_title(f"Spatial Distribution: {item_name}{title_suffix}\nImage: {img_name}", 
+                             fontweight='bold', fontsize=16, pad=20)
+                
+                if grid_size:
+                    ax.set_xlabel(f"Binned X (Grid: {width})", fontsize=12)
+                    ax.set_ylabel(f"Binned Y (Grid: {height})", fontsize=12)
+                else:
+                    ax.set_xlabel("X (pixels)", fontsize=12)
+                    ax.set_ylabel("Y (pixels)", fontsize=12)
+                
+                plt.tight_layout()
+                
+                # Save
+                item_safe = str(item_name).replace(':', '').replace('/', '_').replace(' ', '_')
+                img_safe = str(img_name).replace(':', '').replace('/', '_').replace(' ', '_')
+                save_path = os.path.join(output_dir, f"spatial_{value_col}_{item_safe}_{img_safe}_{selected_units}.png")
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                
+                if show_plots:
+                    plt.show()
+                else:
+                    plt.close(fig)
+                
+                print(f"Generated spatial map for {item_name} in {img_name}")
+
+    def generate_directional_profiles(self, df, value_col, grouping_col, output_dir, pixel_size_um=1.0, 
+                                     bin_ratio=10, normalize_auc=True, show_plots=False, 
+                                     selected_units=None, directions=['x', 'y'],
+                                     selected_items=None, combine_groups=True):
+        """
+        Visualize the variation of a value (ratio or percentage) across X and Y directions.
+        Generates line graphs showing binned means with optional AUC normalization.
+        
+        Args:
+            df: DataFrame containing the data (must have centroid_x, centroid_y)
+            value_col: Column name to visualize (e.g., 'Mean_Ratio' or 'Percentage')
+            grouping_col: Column name to group by (e.g., 'Ratio_Type' or 'Molecule')
+            output_dir: Directory to save plots
+            bin_ratio: The ratio of bin size to pixel size (e.g., 10 means 1 bin per 10 pixels).
+            normalize_auc: If True, each line is normalized such that its sum equals 1.
+            show_plots: Whether to display plots interactively.
+            selected_units: Optional unit or list of units to filter by.
+            directions: List of directions to plot ('x', 'y').
+            selected_items: Optional list of specific items in grouping_col to include.
+            combine_groups: If True, plots all groups in one figure. If False, creates separate figures.
+        """
+        os.makedirs(output_dir, exist_ok=True)
+
+        if df is None or df.empty:
+            print("No data available for directional profiles.")
+            return
+
+        # Use Image_Name if available, else Source_ID
+        img_col = 'Image_Name' if 'Image_Name' in df.columns else 'Source_ID'
+        full_df = df.copy()
+
+        # Filter by selected units if provided
+        if selected_units is not None:
+            if isinstance(selected_units, str):
+                selected_units = [selected_units]
+            df = df[df['Unit'].isin(selected_units)].copy()
+            if df.empty:
+                print(f"No data found for selected units: {selected_units}")
+                return
+
+        # Filter by selected items if provided
+        if selected_items is not None:
+            if isinstance(selected_items, (str, int, float)):
+                selected_items = [selected_items]
+            df = df[df[grouping_col].isin(selected_items)].copy()
+            if df.empty:
+                print(f"No data found for selected items: {selected_items}")
+                return
+
+        for img_name in df[img_col].unique():
+            img_df = df[df[img_col] == img_name].copy()
+            
+            # Get global bounds for this image
+            img_full_df = full_df[full_df[img_col] == img_name].dropna(subset=['centroid_x', 'centroid_y'])
+            if img_full_df.empty:
+                continue
+                
+            for direction in directions:
+                coord_col = 'centroid_x' if direction.lower() == 'x' else 'centroid_y'
+                
+                # Filter out points without coordinates
+                img_df_clean = img_df.dropna(subset=[coord_col]).copy()
+                if img_df_clean.empty:
+                    continue
+                
+                # Determine bin edges based on full image range
+                min_coord = img_full_df[coord_col].min()
+                max_coord = img_full_df[coord_col].max()
+                
+                if max_coord == min_coord:
+                    continue
+                
+                # Number of bins based on bin_ratio (pixels per bin)
+                num_bins = max(1, int((max_coord - min_coord) / bin_ratio))
+                
+                # Create consistent bin edges
+                bin_edges = np.linspace(min_coord, max_coord, num_bins + 1)
+                img_df_clean['bin_idx'] = pd.cut(img_df_clean[coord_col], bins=bin_edges, labels=False, include_lowest=True)
+                
+                # Calculate mean per bin and group
+                profile_data = img_df_clean.groupby(['bin_idx', grouping_col])[value_col].mean().reset_index()
+                
+                # Convert bin index to physical coordinates (microns)
+                bin_centers = bin_edges[:-1] + np.diff(bin_edges) / 2
+                profile_data['coord_um'] = profile_data['bin_idx'].map(lambda i: bin_centers[int(i)] * pixel_size_um)
+                
+                # Normalize AUC if requested
+                if normalize_auc:
+                    for group in profile_data[grouping_col].unique():
+                        mask = profile_data[grouping_col] == group
+                        total_sum = profile_data.loc[mask, value_col].sum()
+                        if total_sum > 0:
+                            profile_data.loc[mask, value_col] = profile_data.loc[mask, value_col] / total_sum
+                
+                # Determine which groups to plot in this iteration
+                unique_groups = profile_data[grouping_col].unique()
+                if combine_groups:
+                    group_sets = [unique_groups]
+                else:
+                    group_sets = [[g] for g in unique_groups]
+
+                for groups_to_plot in group_sets:
+                    plot_df = profile_data[profile_data[grouping_col].isin(groups_to_plot)]
+                    if plot_df.empty:
+                        continue
+                        
+                    # Plot
+                    fig = plt.figure(figsize=(14, 6))
+                    sns.lineplot(data=plot_df, x='coord_um', y=value_col, hue=grouping_col, linewidth=2.5, palette='viridis')
+                    
+                    # Formatting
+                    group_title = "" if combine_groups else f" - {groups_to_plot[0]}"
+                    plt.title(f"Spatial Profile Variation ({direction.upper()}): {img_name}{group_title}", 
+                              fontweight='bold', fontsize=16, pad=20)
+                    plt.xlabel(f"{direction.upper()} Distance (microns)", fontsize=14, fontweight='bold')
+                    
+                    y_label = f"Mean {value_col.replace('_', ' ')}"
+                    if normalize_auc:
+                        y_label += " (AUC Normalized)"
+                    plt.ylabel(y_label, fontsize=14, fontweight='bold')
+                    
+                    plt.legend(title=grouping_col.replace('_', ' '), bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0.)
+                    plt.grid(True, linestyle='--', alpha=0.4)
+                    
+                    # Save
+                    img_safe = str(img_name).replace(':', '').replace('/', '_').replace(' ', '_')
+                    item_safe = "" if combine_groups else f"_{str(groups_to_plot[0]).replace(':', '').replace('/', '_').replace(' ', '_')}"
+                    save_name = f"profile_{direction}_{img_safe}{item_safe}.png"
+                        
+                    save_path = os.path.join(output_dir, save_name)
+                    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                    
+                    if show_plots:
+                        plt.show()
+                    else:
+                        plt.close(fig)
+                    
+                    print(f"Generated {direction.upper()} directional profile for {img_name}{group_title}")
+
+    def plot_distance_variation_wide(self, wide_df, ratio_cols, distance_col='distance', 
+                                     unit_col='Unit', output_dir=None, 
+                                     display_name_map=None, unit_display_map=None,
+                                     show_plots=False, threshold_col=None, threshold_dict=None,
+                                     pixel_size_um=1.0, bin_size_um=5.0, min_points_per_bin=5):
+        """
+        Visualize how specific ratio values vary as a function of distance from a feature.
+        Separates plots by ratio type and overlays different threshold categories in the same figure.
+        
+        Args:
+            wide_df: DataFrame with one row per instance and ratio columns.
+            ratio_cols: List of column names in wide_df to plot.
+            distance_col: Column name representing distance (X-axis).
+            unit_col: Column name to group by (one figure per unit).
+            output_dir: Directory to save the resulting plots.
+            display_name_map: Optional mapping for ratio names in titles.
+            unit_display_map: Optional mapping for unit names in titles.
+            show_plots: Whether to display plots interactively.
+            threshold_col: Optional column name to use for grouping (e.g., 'thickness').
+            threshold_dict: Optional dict mapping category names to [min, max] bounds for threshold_col.
+            pixel_size_um: Multiplier to convert distance_col to microns.
+            bin_size_um: Size of bins for averaging distance values to smooth the plot.
+            min_points_per_bin: Minimum number of points required in a bin to keep it (clips the tail).
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import os
+        import pandas as pd
+        import numpy as np
+
+        if wide_df is None or wide_df.empty:
+            print("No data available for distance variation plotting.")
+            return
+
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+        # Scale distance to microns
+        df = wide_df.copy()
+        if pixel_size_um != 1.0:
+            df[distance_col] = df[distance_col] * pixel_size_um
+
+        # Iterate over unique units
+        unique_units = sorted(df[unit_col].dropna().unique())
+        for unit in unique_units:
+            unit_df = df[df[unit_col] == unit].copy()
+            if unit_df.empty:
+                continue
+
+            display_unit = unit_display_map.get(unit, unit) if unit_display_map else unit
+            
+            for ratio in ratio_cols:
+                if ratio not in unit_df.columns:
+                    continue
+                    
+                # Prepare plot data for this unit and ratio
+                plot_df = unit_df.dropna(subset=[ratio, distance_col]).copy()
+                if plot_df.empty:
+                    continue
+                
+                hue_col = None
+                hue_order = None
+                if threshold_dict and threshold_col:
+                    # Categorize rows by threshold bounds
+                    plot_df['Category'] = 'Other'
+                    for cat_name, bounds in threshold_dict.items():
+                        t_min, t_max = bounds
+                        mask = (plot_df[threshold_col] >= t_min) & (plot_df[threshold_col] <= t_max)
+                        plot_df.loc[mask, 'Category'] = cat_name
+                    
+                    # Remove points that don't fit any category
+                    plot_df = plot_df[plot_df['Category'] != 'Other'].copy()
+                    if plot_df.empty: 
+                        continue
+                    
+                    hue_col = 'Category'
+                    hue_order = list(threshold_dict.keys())
+                
+                # Binning for smoothing
+                plot_df['dist_bin'] = (plot_df[distance_col] // bin_size_um) * bin_size_um + (bin_size_um / 2)
+                
+                # Clipping: find the last bin with sufficient data to avoid noisy tails
+                bin_counts = plot_df.groupby('dist_bin').size()
+                valid_bins = bin_counts[bin_counts >= min_points_per_bin].index
+                if len(valid_bins) > 0:
+                    max_dist = valid_bins.max()
+                    plot_df = plot_df[plot_df['dist_bin'] <= max_dist].copy()
+                else:
+                    continue # Not enough data for any bin
+
+                # Generate Plot
+                display_ratio = display_name_map.get(ratio, ratio) if display_name_map else ratio
+                title = f"{display_unit}: {display_ratio}"
+                
+                fig = plt.figure(figsize=(12, 7))
+                # Set theme for consistency
+                sns.set_theme(style="whitegrid")
+                
+                sns.lineplot(data=plot_df, x='dist_bin', y=ratio, hue=hue_col, 
+                             hue_order=hue_order, linewidth=3, palette='viridis', 
+                             errorbar='se', marker='o', markersize=4)
+                
+                plt.title(f"Distance-Dependent Profile: {title}", fontweight='bold', fontsize=16, pad=20)
+                plt.xlabel("Distance to Feature (microns)", fontsize=14, fontweight='bold')
+                plt.ylabel(f"Mean {display_ratio}", fontsize=14, fontweight='bold')
+                
+                legend_title = threshold_col.replace('_', ' ').title() if threshold_col else None
+                plt.legend(title=legend_title, bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0., frameon=True)
+                plt.grid(True, linestyle='--', alpha=0.4)
+                plt.tight_layout()
+
+                if output_dir:
+                    safe_ratio = str(ratio).replace(' ', '_').replace('/', '_')
+                    safe_unit = str(unit).replace(' ', '_').replace('/', '_').replace(':', '')
+                    file_path = os.path.join(output_dir, f"variation_{safe_unit}_{safe_ratio}.png")
+                    plt.savefig(file_path, dpi=300, bbox_inches='tight')
+                    
+                if show_plots:
+                    plt.show()
+                else:
+                    plt.close(fig)
+        
+        print(f"Distance variation plots generated in {output_dir}")
+
+    def plot_distance_variation_heatmap(self, wide_df, ratio_cols, distance_col='distance', 
+                                         unit_col='Unit', output_dir=None, 
+                                         display_name_map=None, unit_display_map=None,
+                                         show_plots=False, threshold_col=None, threshold_dict=None,
+                                         pixel_size_um=1.0, n_bins=120, min_points_per_bin=3,
+                                         remove_outliers=False, selected_units=None, max_distance=None):
+        """
+        Visualize spatial gradients of ratios as a heatmap, with units and threshold categories as rows.
+        The X-axis represents distance bins from 0 to the maximum observed distance.
+        
+        Args:
+            wide_df: DataFrame with one row per instance and ratio columns.
+            ratio_cols: List of column names in wide_df to plot.
+            distance_col: Column name representing distance (X-axis).
+            unit_col: Column name for units (rows).
+            output_dir: Directory to save the resulting plots.
+            display_name_map: Optional mapping for ratio names in titles.
+            unit_display_map: Optional mapping for unit names in row labels.
+            show_plots: Whether to display plots interactively.
+            threshold_col: Optional column name for thickness/threshold grouping.
+            threshold_dict: Optional dict mapping category names to [min, max] bounds.
+            pixel_size_um: Multiplier to convert distance_col to microns.
+            n_bins: Number of bins along the distance axis (default 120).
+            min_points_per_bin: Minimum number of points required in a bin to keep it.
+            remove_outliers: Whether to apply IQR-based outlier filtration per group.
+            selected_units: Optional list of units to include in the heatmap.
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import os
+        import pandas as pd
+        import numpy as np
+
+        if wide_df is None or wide_df.empty:
+            print("No data available for distance variation heatmap.")
+            return
+
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+        df = wide_df.copy()
+
+        # 1. Filter by selected units
+        if selected_units:
+            if isinstance(selected_units, str):
+                selected_units = [selected_units]
+            df = df[df[unit_col].isin(selected_units)].copy()
+            if df.empty:
+                print(f"No data for selected units: {selected_units}")
+                return
+
+        # 2. Scale distance
+        if pixel_size_um != 1.0:
+            df[distance_col] = df[distance_col] * pixel_size_um
+
+        # 3. Categorize by threshold if provided
+        if threshold_dict and threshold_col:
+            df['Category'] = 'Other'
+            for cat_name, bounds in threshold_dict.items():
+                t_min, t_max = bounds
+                mask = (df[threshold_col] >= t_min) & (df[threshold_col] <= t_max)
+                df.loc[mask, 'Category'] = cat_name
+            df = df[df['Category'] != 'Other'].copy()
+
+        # 4. Iterate over Ratios
+        for ratio in ratio_cols:
+            if ratio not in df.columns:
+                continue
+                
+            ratio_df = df.dropna(subset=[ratio, distance_col]).copy()
+            if ratio_df.empty:
+                continue
+                
+            # 5. Optional Outlier Filtration
+            if remove_outliers:
+                group_cols = [unit_col]
+                if 'Category' in ratio_df.columns:
+                    group_cols.append('Category')
+                ratio_df = self._apply_outlier_filtration(ratio_df, ratio, group_cols)
+
+            if ratio_df.empty:
+                continue
+
+            # 6. Define Bins across the whole range for this ratio
+            if max_distance is not None:
+                max_dist = max_distance
+            else:
+                max_dist = ratio_df[distance_col].quantile(.95)
+            if max_dist == 0 or np.isnan(max_dist):
+                print(f"Warning: max_distance is 0 or NaN, setting to 80 for {ratio}")
+                max_dist = 80
+            
+            bin_edges = np.linspace(0, max_dist, n_bins + 1)
+            bin_centers = bin_edges[:-1] + np.diff(bin_edges)/2
+            
+            # Use cut to assign bins
+            ratio_df['dist_bin'] = pd.cut(ratio_df[distance_col], bins=bin_edges, labels=False, include_lowest=True)
+            
+            # 7. Aggregate
+            group_keys = [unit_col, 'dist_bin']
+            if 'Category' in ratio_df.columns:
+                group_keys.insert(1, 'Category')
+                
+            # Calculate mean and count per bin
+            agg_df = ratio_df.groupby(group_keys, observed=True).agg({
+                ratio: 'mean',
+                distance_col: 'count' 
+            }).reset_index()
+            
+            # 8. Apply Clipping for sparse bins
+            agg_df.loc[agg_df[distance_col] < min_points_per_bin, ratio] = np.nan
+            
+            # 9. Pivot for Heatmap
+            if 'Category' in ratio_df.columns:
+
+                
+                # Robust Row Ordering
+                row_order = []
+                # Filter units present in the current agg_df
+                units_present = agg_df[unit_col].unique()
+                
+                # Order units based on unit_display_map or alphabetical
+                if unit_display_map:
+                    ordered_units = [u for u in unit_display_map.keys() if u in units_present]
+                    # Add any units not in map
+                    remaining = sorted([u for u in units_present if u not in unit_display_map])
+                    ordered_units.extend(remaining)
+                else:
+                    ordered_units = sorted(units_present)
+
+                # Create row label
+                agg_df['display_unit'] = agg_df[unit_col].map(unit_display_map).fillna(agg_df[unit_col])
+
+                agg_df['Row_Label'] = agg_df['display_unit'].astype(str) + " (" + agg_df['Category'].astype(str) + ")"
+                pivot = agg_df.pivot(index='Row_Label', columns='dist_bin', values=ratio)
+
+
+                # Within each unit, order by threshold category
+                for u in ordered_units:
+                    disp_u = unit_display_map.get(u, u) if unit_display_map else u
+                    for cat in threshold_dict.keys():
+                        label = f"{disp_u} ({cat})"
+                        if label in pivot.index:
+                            row_order.append(label)
+                
+                if not row_order:
+                    # Fallback to current pivot index if reordering failed to find matches
+                    row_order = pivot.index.tolist()
+
+                pivot = pivot.reindex(row_order)
+            else:
+                pivot = agg_df.pivot(index=unit_col, columns='dist_bin', values=ratio)
+                if unit_display_map:
+                    ordered_units = [u for u in unit_display_map.keys() if u in pivot.index]
+                    pivot = pivot.reindex(ordered_units)
+                else:
+                    pivot = pivot.sort_index()
+
+            # 10. Visualization
+            if pivot is None or pivot.empty:
+                continue
+                
+            n_rows = len(pivot)
+            fig, ax = plt.subplots(figsize=(16, max(4, n_rows * 0.45)))
+            
+            # Mask NaNs implicitly by leaving them blank or using a specific color
+            sns.heatmap(pivot, cmap='coolwarm', ax=ax, 
+                        cbar_kws={'label': f'Mean {ratio}'}, 
+                        xticklabels=False, yticklabels=True)
+            
+            display_ratio = display_name_map.get(ratio, ratio) if display_name_map else ratio
+            plt.title(f"Distance Gradient Heatmap: {display_ratio}", fontweight='bold', fontsize=18, pad=20)
+            plt.xlabel(f"Distance to Feature (0 to {max_dist:.1f} microns)", fontsize=14, fontweight='bold')
+            plt.ylabel("Unit (Subdivision)", fontsize=14, fontweight='bold')
+            
+            # Add some X-axis labels for reference
+            n_ticks = 10
+            tick_indices = np.linspace(0, n_bins - 1, n_ticks, dtype=int)
+            ax.set_xticks(tick_indices + 0.5)
+            ax.set_xticklabels([f"{bin_centers[i]:.0f}" for i in tick_indices], rotation=0)
+            ax.tick_params(axis='x', which='both', length=5, width=1, labelsize=10)
+
+            plt.tight_layout()
+            
+            if output_dir:
+                safe_ratio = str(ratio).replace(' ', '_').replace('/', '_').replace(':', '')
+                save_path = os.path.join(output_dir, f"dist_heatmap_{safe_ratio}.png")
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                print(f"  Saved heatmap for {ratio}: {save_path}")
+                
+            if show_plots:
+                plt.show()
+            else:
+                plt.close(fig)
+        
+        print(f"Distance variation heatmaps generated in {output_dir}")
+
+

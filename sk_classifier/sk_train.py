@@ -30,6 +30,12 @@ def main():
         noise_multiplier=0.5
     )
 
+    # Visualize synthetic dataset averages (Mean ± Std) to check data quality
+    dataset.plot_class_averages(
+        n_samples_per_class=500, 
+        output_path='plots/dataset_class_averages.png'
+    )
+
 
     model_configurations = {
         'Random Forest': {

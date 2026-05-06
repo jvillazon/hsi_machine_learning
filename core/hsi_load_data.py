@@ -5,6 +5,7 @@ import pandas as pd
 import tifffile
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import glob
 
 def normalize(array, max_val=None, min_val=None, axis=None):
     """
@@ -283,16 +284,13 @@ class HSI_Loader:
         print(f"Silent region: First {self.ch_start} wavenumber")
         
         boolean = True  # Flag for first concatenation
-        data_list = os.listdir(data_dir)
+        data_list = glob.glob(data_dir + "*.tif")
         processed_count = 0
         
         for name in tqdm(data_list, desc="Processing images"):
-            # Skip hidden files
-            if name.startswith("."):
-                continue
                 
             # Load image
-            image = tifffile.imread(data_dir + name)
+            image = tifffile.imread(name)
             image = np.flip(image, axis=0)  # Flip to match coordinate convention
             
             # Baseline subtraction: remove mean of silent region per pixel
@@ -437,8 +435,8 @@ if __name__ == '__main__':
             'wavenumber_end': 3100,
             'num_samples': 61,
             'shift': 0,
-            'molecule_output': 'lipid_subtype_wn_61_test',
-            'params_output': 'srs_params_61',
+            'molecule_output': 'lipid_subtype_wn_61-04.23.26',
+            'params_output': 'srs_params_61-04.23.26',
             'exclude_molecules': None
         },
         # Add more molecule datasets here as needed

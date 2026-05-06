@@ -23,7 +23,7 @@ def main():
     # ========================================================================
     # Available profiles: 'kidney_clusters' (default), 'kidney_nephron'
     # Change this to switch between different configurations
-    PROFILE = 'kidney_maldi'  # Update with desired profile name (without .json extension)
+    PROFILE = 'kidney_ftu-regions'  # Update with desired profile name (without .json extension)
     
     # Print available profiles on first run
     print(f"Available configuration profiles:")
@@ -67,7 +67,7 @@ def main():
     # ========================================================================
 
     # Define dataset parameters (these could also be moved to the config if desired)
-    base_directory = r"D:\integrated_pipeline\HSI_data\processed_data"
+    base_directory = r"C:\Users\jvill\Documents\integrated_pipeline\WSI_data\WSI_data\data"
     wn_1 = 2700  # Starting wavenumber (inclusive)
     wn_2 = 3100  # Ending wavenumber (inclusive)
     num_samp = 61
@@ -93,8 +93,8 @@ def main():
         base_directory,
         ch_start,
         transform=None,
-        image_normalization=True,
-        min_max_normalization=False,
+        image_normalization=False,
+        min_max_normalization=True,
         num_samples=num_samp,
         wavenumber_start=wn_1,
         wavenumber_end=wn_2,
@@ -146,6 +146,15 @@ def main():
             # Run inference
             print(f"\nRunning RandomForest inference. Outputs: {output_base}")
             timing_stats = classifier.predict(alpha=10, generate_shap=True)  # Adjust alpha as needed for spectral weighting
+            
+            # Visualize predicted class averages to validate performance across the entire image
+            # This randomly selects predicted classes (excluding ignored ones) and shows mean ± std deviation
+            classifier.plot_predicted_class_averages(
+                n_classes=9, 
+                classes_to_ignore=['No Match', 'Kidney Background'], 
+                img_idx=0,
+                output_path=os.path.join(output_base, 'predicted_class_averages.png')
+            )
         else:
             print(f"No model found at {model_path}")
             # Just show some sample spectra without predictions
@@ -157,7 +166,8 @@ def main():
     # Logic for output files (will use specific timestamped dir if masking was performed)
     output_csv = os.path.join(masked_output_dir, 'masked_predictions_percentages.csv')
     output_ratio_csv = os.path.join(masked_output_dir, 'masked_ratio_means.csv')
-
+    output_ratio_wide_csv = os.path.join(masked_output_dir, 'masked_ratio_means-wide.csv')
+    
     if perform_masking:
         # Prepare output directory and save config info
         os.makedirs(masked_output_dir, exist_ok=True)
@@ -225,7 +235,6 @@ def main():
                 # Process ratio TIFFs with masks
                 if os.path.exists(ratio_folder):
                     ratio_tiff_paths = glob(os.path.join(ratio_folder, '*.tif'))
-                    ratio_tiff_paths = [f for f in ratio_tiff_paths if '_masked' not in os.path.basename(f)]
                     
                     for ratio_tiff_path in ratio_tiff_paths:
                         try:
@@ -249,6 +258,18 @@ def main():
         # Calculate percentages
         if predictions_per_unit:
             percentages_df = visualizer.quantify_unit_class_percentages_nested(predictions_per_unit, unit_mappings=unit_mappings)
+            
+            # --- Optional: Post-hoc Aggregation ---
+            # Aggregate specific molecules into supergroups (e.g., all Carnitines into one "Total Carnitines" group)
+            group_map = {
+                "Total Carnitines": ["C8 L-Carnitine", "C12 Carnitine", "C16 Carnitine", "C18 Carnitine (d9-cis)"],
+                "Total Ceramides": [
+                    "Cer 18:1-12:0", "Cer 18:1-18:0", "Cer 18:1-18:1", "Cer 18:1-22:0", 
+                    "Cer 18:1-24:0", "Cer 18:1-24:1", "Cer 18:0-14:0", "Cer 18:1-24:1(15Z)",
+                    "Cer m18:1-16:0", "Cer m18:1-24:1"
+                ]
+            }
+            percentages_df = visualizer.aggregate_molecule_groups(percentages_df, group_map)
         
             # Display summary
             print("\nPercentages DataFrame (first 10 rows):")
@@ -271,6 +292,20 @@ def main():
             # Save ratios to CSV
             ratios_df.to_csv(output_ratio_csv, index=False)
             print(f"\nSaved mean ratios DataFrame to {os.path.basename(output_ratio_csv)}")
+            group_cols = ['Image_Name', 'Unit', 'Instance_Label', 'Group_ID', 'Source_ID','centroid_x', 'centroid_y']
+            has_lipid_protein = ratios_df[ratios_df['Ratio_Type'] == 'Lipid_to_Protein'][group_cols].drop_duplicates()
+            has_unsaturation = ratios_df[ratios_df['Ratio_Type'] == 'Lipid_Unsaturation'][group_cols].drop_duplicates()
+            valid_instances = pd.merge(has_lipid_protein, has_unsaturation, on=group_cols)
+            df = pd.merge(ratios_df, valid_instances, on=group_cols, how='inner')
+
+            # 1. Pivot the dataframe
+            index_cols = ['Image_Name', 'Unit', 'Instance_Label', 'Source_ID', 'centroid_x', 'centroid_y'] 
+            if 'Group_ID' in df.columns:
+                index_cols.append('Group_ID')
+
+            wide_df = df.pivot(index=index_cols, columns='Ratio_Type', values='Mean_Ratio').reset_index()
+
+            wide_df.to_csv(output_ratio_wide_csv)
         else:
             print("\nNo masked ratio TIFFs found to quantify.")
     
@@ -327,6 +362,7 @@ def main():
         create_individual_plots = individual_plot_config.get('create_individual_plots', True)
         individual_molecules = individual_plot_config.get('selected_molecules', "All")
         individual_ratios = individual_plot_config.get('selected_ratios', "All")
+        compare_by = individual_plot_config.get('compare_by', 'Group_ID')
 
         if  percentages_df is None:
             try:
@@ -532,141 +568,66 @@ def main():
                                 unit_color_map=unit_colors,
                                 unit_display_map=unit_display_names,
                                 units_to_display=display_units_boxplots,
-                                compare_by=None,  # Consolidate: No compare_by for granularity subfolders
-                                compare_order=None,
-                                consolidate_Group_IDs=individual_plot_config.get('consolidate_Group_IDs', True)
+                                consolidate_Group_IDs=individual_plot_config.get('consolidate_Group_IDs', True),
+                                subgroup_list=subgroups,
+                                compare_by=compare_by
                             )
         else:
             print("\nSkipping granularity analysis (no levels defined in config)")
-    
-    # Generate individual box plots for selected molecules/ratios
-    print("\n================================================================================")
-    print("GENERATING INDIVIDUAL BOX PLOTS")
-    print("================================================================================")
-    
-    if create_individual_plots:
-
-        if percentages_df is not None and not percentages_df.empty and individual_molecules:
-            percentages_output_dir = os.path.join(plots_directory, f'individual_bar_plots_{display_units_boxplots_type}_percentages')
-
-            # percentages_individual_dir = os.path.join(plots_directory, 'individual_percentages')
-            # print("\nCreating individual plots for percentages...")
-            # visualizer.create_individual_boxplots(
-            #     df=percentages_df,
-            #     value_col='Percentage',
-            #     grouping_col='Molecule',
-            #     items_list=individual_molecules,
-            #     output_dir=percentages_individual_dir,
-            #     data_type='percentage',
-            #     figure_width=individual_figure_width,
-            #     figure_height=individual_figure_height,
-            #     show_plots=False,
-            #     display_name_map=display_names,
-            #     unit_color_map=unit_colors,
-            #     unit_display_map=unit_display_names,
-            #     units_to_display=display_units_boxplots,
-            #     compare_by='Sample_Type' if sample_compare_order else None,
-            #     compare_order=sample_compare_order if sample_compare_order else None,
-            #     consolidate_Group_IDs=True
-            # )
-            # print(f"\nGenerated individual box plots for percentages in {percentages_individual_dir}")
-
-            print("\nCreating individual bar plots for percentages...")
-            visualizer.create_individual_barplots(
-                df=percentages_df,
-                value_col='Percentage',
-                grouping_col='Molecule',
-                items_list=individual_molecules,
-                output_dir=percentages_output_dir,
-                data_type='percentage',
-                show_plots=False,
-                display_name_map=display_names,
-                unit_color_map=unit_colors,
-                unit_display_map=unit_display_names,
-                units_to_display=display_units_boxplots,
-                compare_by=individual_plot_config.get('compare_by', None),
-                compare_order=individual_plot_config.get('compare_order', None),
-                consolidate_Group_IDs=individual_plot_config.get('consolidate_Group_IDs', True)
-            )
-            visualizer.create_individual_barplots(
-                df=percentages_df,
-                value_col='Percentage',
-                grouping_col='Molecule',
-                items_list=individual_molecules,
-                output_dir=percentages_output_dir,
-                data_type='percentage',
-                show_plots=False,
-                display_name_map=display_names,
-                unit_color_map=unit_colors,
-                unit_display_map=unit_display_names,
-                units_to_display=display_units_boxplots,
-                compare_by=None,
-                compare_order=None,
-                consolidate_Group_IDs=individual_plot_config.get('consolidate_Group_IDs', True)
-            )
-            print(f"Generated individual bar plots for percentages")
         
-        if ratios_df is not None and not ratios_df.empty and individual_ratios:
-            ratios_output_dir = os.path.join(plots_directory, f'individual_bar_plots_{display_units_boxplots_type}_ratios')
-            # ratios_individual_dir = os.path.join(plots_directory, 'individual_ratios')
-            # print("\nCreating individual plots for ratios...")
-            # visualizer.create_individual_boxplots(
-            #     df=ratios_df,
-            #     value_col='Mean_Ratio',
-            #     grouping_col='Ratio_Type',
-            #     items_list=individual_ratios,
-            #     output_dir=ratios_individual_dir,
-            #     data_type='ratio',
-            #     figure_width=individual_figure_width,
-            #     figure_height=individual_figure_height,
-            #     show_plots=False,
-            #     display_name_map=display_names,
-            #     unit_color_map=unit_colors,
-            #     unit_display_map=unit_display_names,
-            #     units_to_display=display_units_boxplots,
-            #     compare_by='Sample_Type' if sample_compare_order else None,
-            #     compare_order=sample_compare_order if sample_compare_order else None,
-            #     consolidate_Group_IDs=True
-            # )
-            # print(f"\nGenerated individual box plots for ratios in {ratios_individual_dir}")
-            print("\nCreating individual bar plots for ratios...")
-            visualizer.create_individual_barplots(
-                df=ratios_df,
-                value_col='Mean_Ratio',
-                grouping_col='Ratio_Type',
-                items_list=individual_ratios,
-                output_dir=ratios_output_dir,
-                data_type='ratio',
-                show_plots=False,
-                display_name_map=display_names,
-                unit_color_map=unit_colors,
-                unit_display_map=unit_display_names,
-                units_to_display=display_units_boxplots,
-                compare_by=individual_plot_config.get('compare_by', None),
-                compare_order=individual_plot_config.get('compare_order', None),
-                consolidate_Group_IDs=individual_plot_config.get('consolidate_Group_IDs', True),
-                
-            )
-            visualizer.create_individual_barplots(
-                df=ratios_df,
-                value_col='Mean_Ratio',
-                grouping_col='Ratio_Type',
-                items_list=individual_ratios,
-                output_dir=ratios_output_dir,
-                data_type='ratio',
-                show_plots=False,
-                display_name_map=display_names,
-                unit_color_map=unit_colors,
-                unit_display_map=unit_display_names,
-                units_to_display=display_units_boxplots,
-                compare_by=None,
-                compare_order=None,
-                consolidate_Group_IDs=individual_plot_config.get('consolidate_Group_IDs', True),
-                
-            )
-            print(f"Generated individual bar plots for ratios")
-    else:
-        print("Individual plot configuration disabled")
+        # Generate individual box plots for selected molecules/ratios
+        print("\n================================================================================")
+        print("GENERATING INDIVIDUAL BOX PLOTS")
+        print("================================================================================")
+        
+        if create_individual_plots:
+
+            if percentages_df is not None and not percentages_df.empty and individual_molecules:
+                percentages_output_dir = os.path.join(plots_directory, f'individual_bar_plots_{display_units_boxplots_type}_percentages')
+                print("\nCreating individual bar plots for percentages...")
+
+                visualizer.create_individual_barplots(
+                    df=percentages_df,
+                    value_col='Percentage',
+                    grouping_col='Molecule',
+                    items_list=individual_molecules,
+                    output_dir=percentages_output_dir,
+                    data_type='percentage',
+                    show_plots=False,
+                    display_name_map=display_names,
+                    unit_color_map=unit_colors,
+                    unit_display_map=unit_display_names,
+                    units_to_display=display_units_boxplots,
+
+                    consolidate_Group_IDs=individual_plot_config.get('consolidate_Group_IDs', True),
+                    subgroup_list=subgroups,
+                    compare_by=compare_by
+                )
+                print(f"Generated individual bar plots for percentages")
+            
+            if ratios_df is not None and not ratios_df.empty and individual_ratios:
+                ratios_output_dir = os.path.join(plots_directory, f'individual_bar_plots_{display_units_boxplots_type}_ratios')
+
+                print("\nCreating individual bar plots for ratios...")
+                visualizer.create_individual_barplots(
+                    df=ratios_df,
+                    value_col='Mean_Ratio',
+                    grouping_col='Ratio_Type',
+                    items_list=individual_ratios,
+                    output_dir=ratios_output_dir,
+                    data_type='ratio',
+                    show_plots=False,
+                    display_name_map=display_names,
+                    unit_color_map=unit_colors,
+                    unit_display_map=unit_display_names,
+                    units_to_display=display_units_boxplots,
+                    consolidate_Group_IDs=individual_plot_config.get('consolidate_Group_IDs', True),
+                    subgroup_list=subgroups,
+                    compare_by=compare_by
+                )
+                print(f"Generated individual bar plots for ratios")
+        else:
+            print("Individual plot configuration disabled")
 
 if __name__ == "__main__":
     main()

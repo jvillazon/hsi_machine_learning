@@ -12,50 +12,97 @@ import tifffile
 from tqdm import tqdm
 
 
-def load_mask(mask_path: str) -> np.ndarray:
+def load_mask(mask_path: str, slice_idx: int = None) -> np.ndarray:
     """
     Load a .tif mask file (2D or 3D stack).
     
     Args:
         mask_path: Path to the .tif mask file
+        slice_idx: Optional index of the slice to load (for 3D stacks)
         
     Returns:
-        np.ndarray: Mask array (2D or 3D) with boolean values
+        np.ndarray: Mask array (2D) with binary uint8 values (0 or 1)
     """
     # Load the .tif file and return as numpy array
-    mask = tifffile.imread(mask_path)
+    if slice_idx is not None:
+        mask = tifffile.imread(mask_path, key=slice_idx)
+    else:
+        mask = tifffile.imread(mask_path)
 
     # Verify if 8-bit (0-255 value) or 32-bit (0-1 value)
     if mask.dtype != np.uint8 and mask.dtype != np.float32:
-        raise ValueError("Mask must be either 8-bit (uint8) or 32-bit (float32) format.")
+        # Some masks might be bool or other types, let's be more flexible but warn
+        if mask.dtype == np.bool_:
+            return mask.astype(np.uint8)
+        raise ValueError(f"Mask has unexpected dtype: {mask.dtype}. Expected uint8 or float32.")
     
     mask = mask > 0  # Convert to boolean mask
 
-    return mask
+    return mask.astype(np.uint8)
 
 def main():
     """
     Main execution function.
     """
     # ========== CONFIGURATION ==========
-    # TODO: Set your paths here
-    mask_dir = r"/Volumes/ADATA SE880/ADATA Backup/Lipid Reference Library/Mask"       # Directory containing mask files
-    image_dir = r"/Volumes/ADATA SE880/ADATA Backup/Lipid Reference Library/HSI_data"     # Directory containing images to be masked
+    mask_path = r"C:\Users\jvill\Documents\integrated_pipeline\WSI_data\WSI_data\mask_to_process\K21_198_3\K21_198_3-Clusters-transformed.ome.tiff"       # Directory containing mask files
+    image_dir = r"C:\Users\jvill\Documents\integrated_pipeline\WSI_data\WSI_data\mask_to_process\K21_198_3-collagen"     # Directory containing images to be masked
     output_dir = os.path.join(os.path.dirname(image_dir), "output_masks")  # Output directory for masked images
     os.makedirs(output_dir, exist_ok=True)
 
     # (Optional) Label 3D mask slices if needed
-    slice_labels = None
+    slice_labels = {
+        "20": "Cluster1",
+        "15": "Cluster2",
+        "19": "Cluster3",
+        "16": "Cluster4",
+        "9": "Cluster5",
+        "18": "Cluster6",
+        "26": "Cluster7",
+        "1": "Cluster8",
+        "0": "Cluster9",
+        "23": "Cluster10",
+        "25": "Cluster11",
+        "2": "Cluster12",
+        "3": "Cluster13",
+        "24": "Cluster14",
+        "12": "Cluster15",
+        "21": "Cluster16",
+        "17": "Cluster17",
+        "10": "Cluster18",
+        "4": "Cluster19",
+        "5": "Cluster20",
+        "14": "Cluster21",
+        "22": "Cluster22",
+        "8": "Cluster23",
+        "11": "Cluster24",
+        "13": "Cluster25",
+        "6": "Cluster26",
+        "7": "Cluster27",
+    }
+
     # slice_labels = {
-    #     0: "nuclei",
-    #     1: "cytoplasm",
-    #     2: "background"
+    #     "0" : "Vasc",
+    #     "1" : "DistNeph",
+    #     "2" : "DistTub",
+    #     "3" : "Glom",
+    #     "4" : "ProxTub",
+    #     "5" : "TAL",
+    #     "6" : "TDL"
     # }
+    # slice_labels = {
+    #     "0": "Glom",
+    #     "1": "ProxTub",
+    #     "2": "DistNeph",
+    #     "3": "TAL",
+    #     "4": "DistTub"
+    # }
+
     # ===================================
     
     # Validate inputs
-    if not os.path.isdir(mask_dir):
-        raise NotADirectoryError(f"Mask directory not found: {mask_dir}")
+    # if not os.path.isdir(mask_dir):
+    #     raise NotADirectoryError(f"Mask directory not found: {mask_dir}")
     
     if not os.path.isdir(image_dir):
         raise NotADirectoryError(f"Image directory not found: {image_dir}")
@@ -65,7 +112,6 @@ def main():
     for image_path in tqdm(glob.glob(os.path.join(image_dir, "*.tif")), desc="Processing images"):
         image_filename = os.path.basename(image_path)
         image_name = os.path.splitext(image_filename)[0]  # Get name without extension
-        mask_path = os.path.join(mask_dir, image_filename)
         
         # Check if corresponding mask exists
         if not os.path.isfile(mask_path):
@@ -76,39 +122,59 @@ def main():
         image_output_dir = os.path.join(output_dir, image_name)
         os.makedirs(image_output_dir, exist_ok=True)
         
-        # Load mask and image
-        mask = load_mask(mask_path)
+        # Get mask metadata without loading the whole array
+        with tifffile.TiffFile(mask_path) as tif:
+            # Handle both OME-TIFF and standard TIFF
+            series = tif.series[0]
+            mask_shape = series.shape
+            mask_ndim = len(mask_shape)
+            
         image_array = tifffile.imread(image_path)
         
-
-
         # Check if mask is 2D or 3D
-        if mask.ndim == 2:
+        if mask_ndim == 2:
             # Apply single 2D mask
+            mask = load_mask(mask_path)
             masked_array = np.where(mask, image_array, 0)
             output_path = os.path.join(image_output_dir, f"{image_name}.tif")
             tifffile.imwrite(output_path, masked_array)
             processed_count += 1
             
-        elif mask.ndim == 3:
-            if slice_labels is not None and mask.shape[0] != len(slice_labels):
-                print(f"Warning: Number of mask slices does not match number of labels for {image_filename}, skipping...")
+        elif mask_ndim == 3:
+            num_slices = mask_shape[0]
+            if slice_labels is not None and num_slices != len(slice_labels):
+                print(f"Warning: Number of mask slices ({num_slices}) does not match number of labels ({len(slice_labels)}) for {image_filename}, skipping...")
                 continue
 
-            # Apply each slice of 3D mask
-            for slice_idx in range(mask.shape[0]):
-                mask_slice = mask[slice_idx]
+            # Apply each slice of 3D mask one by one
+            for slice_idx in range(num_slices):
+                mask_slice = load_mask(mask_path, slice_idx=slice_idx)
+                
+                # Check if slice dimensions match image
+                if mask_slice.shape != image_array.shape[:2]:
+                    # Handle potential dimension mismatch (e.g. OME-TIFF metadata vs series shape)
+                    print(f"Warning: Mask slice {slice_idx} shape {mask_slice.shape} does not match image shape {image_array.shape[:2]}")
+                    continue
+
                 masked_array = np.where(mask_slice, image_array, 0)
+
+                if np.sum(masked_array)==0:
+                    continue
+                
                 if slice_labels is not None:
-                    label = slice_labels.get(slice_idx, f"slice{slice_idx:03d}")
-                    output_path = os.path.join(image_output_dir, f"{image_name}_{label}.tif")
+                    # The dictionary slice_labels uses string keys in the script, 
+                    # but slice_idx is an int. Let's handle both just in case.
+                    label = slice_labels.get(str(slice_idx), slice_labels.get(slice_idx, f"slice{slice_idx:03d}"))
+                    output_path = os.path.join(image_output_dir, f"CODEX-{label}_{image_name}-mask.tif")
                 else:
                     output_path = os.path.join(image_output_dir, f"{image_name}_slice{slice_idx:03d}.tif")
+                
                 tifffile.imwrite(output_path, masked_array)
+                
             processed_count += 1
-            print(f"Processed {image_filename} with {mask.shape[0]} slices")
+            print(f"Processed {image_filename} with {num_slices} slices")
         else:
-            print(f"Warning: Unexpected mask dimensions for {image_filename}, skipping...")
+            print(f"Warning: Unexpected mask dimensions ({mask_ndim}) for {image_filename}, skipping...")
             continue
     
     # Print summary

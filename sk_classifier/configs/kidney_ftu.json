@@ -8,10 +8,6 @@
   },
   "dataset_parameters": {
     "mask_type": "CODEX_FTUcells_masks",
-    "subgroups": [
-      "Cortex",
-      "Medulla"
-    ],
     "display_units_maps": [
       "Glomeruli",
       "Proximal Tubule",
@@ -40,6 +36,8 @@
       "18:1 Cholesterol Ester",
       "TAG 16:0",
       "TAG Mix",
+      "Cer 18:1-24:0",
+      "Cer 18:1-24:1",
       "C8 L-Carnitine",
       "C12 Carnitine",
       "C18 Carnitine (d9-cis)",
@@ -85,7 +83,7 @@
     "C8 L-Carnitine": "CAR 8:0",
     "C12 Carnitine": "CAR 12:0",
     "C16 Carnitine": "CAR 16:0",
-    "C18 Carnitine (d9-cis)": "CAR: 18:0-d9",
+    "C18 Carnitine (d9-cis)": "CAR 18:0-d9",
     "Stearic Acid": "FA 18:0",
     "Palmitic Acid": "FA 16:0",
     "Docosahexaenoic Acid": "FA 22:6",
@@ -106,13 +104,13 @@
     "vasc": "Vasculature"
   },
   "unit_colors": {
-    "Glomeruli": "#EC1411",
-    "Proximal Tubule": "#00A43D",
-    "Distal Tubule": "#EE3377",
-    "Thick Ascending Limb": "#339FEE",
-    "Distal Nephron": "#CCBB22",
-    "Thin Descending Limb": "#002BAA",
-    "Vasculature": "#EE7733"
+    "Glomeruli": "#eb2d13",
+    "Proximal Tubule": "#13eb28",
+    "Distal Tubule": "#ebd613",
+    "Thick Ascending Limb": "#f47ad2",
+    "Distal Nephron": "#1369eb",
+    "Thin Descending Limb": "#f4c37a",
+    "Vasculature": "#35eeee"
   },
   "unit_display_names": {
     "Glomeruli": "Glomeruli",

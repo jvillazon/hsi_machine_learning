@@ -1,3 +1,5 @@
+import matplotlib
+matplotlib.use('Agg')
 import os
 import shutil
 import numpy as np
@@ -876,7 +878,7 @@ class HSI_Classifier:
         ax2.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
         ax2.set_xlabel('Wavenumber (cm⁻¹)', fontsize=20)
         ax2.set_ylabel('SHAP Value', fontsize=20)
-        ax2.set_title(f'Feature Attribution for Class {cls}', fontsize=24)
+        ax2.set_title(f'Feature Attribution for Class {cls_name}', fontsize=24)
         ax2.tick_params(axis='both', labelsize=16)
         ax2.grid(True, alpha=0.3)
         
@@ -889,6 +891,154 @@ class HSI_Classifier:
         plt.show()
         
         return fig
+
+    def plot_representative_predictions(self, target_class, n_samples=9, img_idx=0, output_path=None):
+        """
+        Plot representative spectra that were predicted as target_class.
+        
+        Args:
+            target_class: str or int - name or index of the class to show
+            n_samples: int - number of samples to plot
+            img_idx: int - index of the image in the dataset to sample from
+            output_path: str - path to save the plot
+        """
+        if self.dataset is None or len(self.dataset.img_list) == 0:
+            print("No image data available in dataset.")
+            return
+
+        img_path = self.dataset.img_list[img_idx]
+        print(f"\nSampling predicted spectra from: {os.path.basename(img_path)}")
+        
+        # Load and process image spectra
+        image_spectra = self.dataset.load_and_process_image(img_path)
+        
+        # Perform inference
+        # Use small chunks if needed, but here we only do it once for visualization
+        probs = self.model.predict_proba(image_spectra)
+        preds = self.model.classes_[np.argmax(probs, axis=1)]
+        
+        # Resolve class label (integer index)
+        if isinstance(target_class, str):
+            if self.labeled_dataset is not None and target_class in self.labeled_dataset.molecule_names:
+                class_label = np.where(self.labeled_dataset.molecule_names == target_class)[0][0]
+            else:
+                print(f"Class '{target_class}' not found in labeled dataset.")
+                return
+        else:
+            class_label = target_class
+
+        # Find indices where prediction matches target class
+        matching_indices = np.where(preds == class_label)[0]
+        
+        if len(matching_indices) == 0:
+            print(f"No pixels found predicted as '{target_class}' in this image.")
+            return
+            
+        print(f"Found {len(matching_indices)} pixels predicted as '{target_class}'. Sampling {min(n_samples, len(matching_indices))}...")
+        
+        # Randomly sample
+        sample_size = min(n_samples, len(matching_indices))
+        selected_indices = np.random.choice(matching_indices, sample_size, replace=False)
+        selected_spectra = [image_spectra[i] for i in selected_indices]
+        
+        # Generate titles (coordinates and probability)
+        titles = []
+        stats = self.dataset.image_stats[img_path]
+        width = stats['width']
+        
+        # Find position of class_label in model.classes_ to index into probs
+        try:
+            class_prob_idx = np.where(self.model.classes_ == class_label)[0][0]
+        except IndexError:
+            class_prob_idx = None
+
+        for idx in selected_indices:
+            y = idx // width
+            x = idx % width
+            title = f"Pixel ({x}, {y})"
+            if class_prob_idx is not None:
+                p = probs[idx][class_prob_idx]
+                title += f" - p={p:.3f}"
+            titles.append(title)
+            
+        # Use visualizer to plot
+        return self.visualizer.plot_spectral_grid(
+            selected_spectra, class_label, 
+            titles=titles, output_path=output_path
+        )
+
+    def plot_predicted_class_averages(self, n_classes=9, classes_to_ignore=None, img_idx=0, output_path=None):
+        """
+        Plot the mean and standard deviation of spectra for randomly selected predicted classes.
+        
+        Args:
+            n_classes: int - number of classes to randomly select and plot
+            classes_to_ignore: list of str - class names to exclude from random selection
+            img_idx: int - index of the image in the dataset to sample from
+            output_path: str - path to save the plot
+        """
+        if self.dataset is None or len(self.dataset.img_list) == 0:
+            print("No image data available in dataset.")
+            return
+
+        if classes_to_ignore is None:
+            classes_to_ignore = ['No Match', 'Kidney Background']
+        
+        classes_to_ignore_set = {cls.strip() for cls in classes_to_ignore}
+
+        img_path = self.dataset.img_list[img_idx]
+        print(f"\nComputing class averages from: {os.path.basename(img_path)}")
+        
+        # Load and process image spectra
+        image_spectra = self.dataset.load_and_process_image(img_path)
+        
+        # Perform inference
+        probs = self.model.predict_proba(image_spectra)
+        preds = self.model.classes_[np.argmax(probs, axis=1)]
+        
+        # Identify all unique predicted classes
+        unique_preds = np.unique(preds)
+        
+        # Filter classes
+        selectable_classes = []
+        for cls_label in unique_preds:
+            cls_name = self.labeled_dataset.molecule_names[cls_label] if self.labeled_dataset else str(cls_label)
+            if cls_name.strip() not in classes_to_ignore_set:
+                selectable_classes.append(cls_label)
+        
+        if not selectable_classes:
+            print("No selectable classes found for plotting averages.")
+            return
+            
+        # Randomly select classes
+        n_to_select = min(n_classes, len(selectable_classes))
+        selected_classes = np.random.choice(selectable_classes, n_to_select, replace=False)
+        
+        print(f"Calculating averages for {n_to_select} randomly selected classes...")
+        
+        class_stats_list = []
+        for cls_label in selected_classes:
+            indices = np.where(preds == cls_label)[0]
+            spectra = image_spectra[indices]
+            
+            mean_spec = np.mean(spectra, axis=0)
+            std_spec = np.std(spectra, axis=0)
+            
+            cls_name = self.labeled_dataset.molecule_names[cls_label] if self.labeled_dataset else str(cls_label)
+            ref_spec = self.labeled_dataset.mol_spectra[cls_label].numpy() if self.labeled_dataset else None
+            
+            class_stats_list.append({
+                'name': cls_name,
+                'mean': mean_spec,
+                'std': std_spec,
+                'reference': ref_spec,
+                'n_pixels': len(indices)
+            })
+            
+        # Use visualizer to plot
+        return self.visualizer.plot_spectral_averages_grid(
+            class_stats_list, output_path=output_path
+        )
 
     def generate_shap_report(self, shap_results, wavenumbers=None, n_samples=500, 
                               background_samples=100, output_dir=None):

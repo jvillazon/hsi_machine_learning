@@ -112,6 +112,12 @@ class HSI_Labeled_Dataset(Dataset):
         print(f"  Total samples: {len(self)}")
         print(f"  Normalize per molecule (by max): {self.normalize_per_molecule}")
         print(f"  Min-Max normalization: {self.compute_min_max}")
+    
+    def _get_noise_multiplier(self, mol_idx):
+        """Check if molecule is 'No Match' and return increased noise multiplier if so."""
+        if self.molecule_names[mol_idx] == 'No Match':
+            return self.noise_multiplier * 5
+        return self.noise_multiplier
 
     
     def compute_molecule_max_values(self, num_samples=1000):
@@ -129,9 +135,13 @@ class HSI_Labeled_Dataset(Dataset):
                 # Sample experimental parameters (correlated index, same as __getitem__)
                 choice_idx = np.random.choice(len(self.ratio_scale_vec))
                 bg_amplitude = self.bg_scale_vec[choice_idx]
+                
+                # Get molecule-specific noise multiplier
+                current_noise_mult = self._get_noise_multiplier(mol_idx)
+                
                 snr_scale = max(self.ratio_scale_vec[choice_idx] * self.noise_param,
-                               self.noise_param * self.noise_multiplier * 5)
-                noise = torch.randn(self.n_wavenumbers) * self.noise_param * self.noise_multiplier
+                               self.noise_param * current_noise_mult * 5)
+                noise = torch.randn(self.n_wavenumbers) * self.noise_param * current_noise_mult
                 
                 # Synthesize spectrum (same logic as __getitem__)
                 spectrum = (self.mol_spectra[mol_idx] * snr_scale + 
@@ -157,23 +167,27 @@ class HSI_Labeled_Dataset(Dataset):
         # Sample experimental parameters (correlated index, same as HSI_Denoising_Dataset)
         choice_idx = np.random.choice(len(self.ratio_scale_vec))
         bg_amplitude = self.bg_scale_vec[choice_idx]
+        
+        # Get molecule-specific noise multiplier
+        current_noise_mult = self._get_noise_multiplier(mol_idx)
+        
         snr_scale = max(self.ratio_scale_vec[choice_idx] * self.noise_param,
-                       self.noise_param * self.noise_multiplier * 5)
+                       self.noise_param * current_noise_mult * 5)
         
         # Generate noise
-        noise = torch.randn(self.n_wavenumbers) * self.noise_param * self.noise_multiplier
+        noise = torch.randn(self.n_wavenumbers) * self.noise_param * current_noise_mult
         
         # Synthesize spectrum
         spectrum = (self.mol_spectra[mol_idx] * snr_scale + 
                    self.background * bg_amplitude + 
                    noise)
         
-        # Shift spectrum  to simulate Raman shift
-        shift_range = self.n_wavenumbers * 0.05  # Shift up to ±5% of the spectrum length
-        shift_int = int(round(shift_range))
+        # # Shift spectrum  to simulate Raman shift
+        # shift_range = self.n_wavenumbers * 0.05  # Shift up to ±5% of the spectrum length
+        # shift_int = int(round(shift_range))
 
-        # Roll the spectrum along the last dimension
-        spectrum = torch.roll(spectrum, shifts=shift_int, dims=-1)
+        # # Roll the spectrum along the last dimension
+        # spectrum = torch.roll(spectrum, shifts=shift_int, dims=-1)
 
         
         # Apply normalization
@@ -274,6 +288,60 @@ class HSI_Labeled_Dataset(Dataset):
         plt.savefig('dataset_visualization.png', dpi=150, bbox_inches='tight')
         print("\nDataset visualization saved to: dataset_visualization.png")
         plt.show()
+        
+    def plot_class_averages(self, n_samples_per_class=100, classes_to_ignore=None, output_path=None):
+        """
+        Generate average spectra (mean ± std) for each class in the dataset and plot them in a grid.
+        
+        Args:
+            n_samples_per_class: int - number of samples to generate per class for averaging
+            classes_to_ignore: list of str - class names to exclude from the plot
+            output_path: str - path to save the resulting plot
+        """
+        import numpy as np
+        from core.hsi_visualizer import HSI_Visualizer
+        
+        if classes_to_ignore is None:
+            classes_to_ignore = []
+        classes_to_ignore_set = {cls.strip() for cls in classes_to_ignore}
+
+        class_stats_list = []
+        
+        print(f"Generating averages from {n_samples_per_class} synthetic samples per class...")
+        
+        for mol_idx in range(self.n_molecules):
+            mol_name = self.molecule_names[mol_idx]
+            if mol_name.strip() in classes_to_ignore_set:
+                continue
+                
+            # Generate n samples for this molecule
+            samples = []
+            for _ in range(n_samples_per_class):
+                # Sample a random index within this class's range
+                sample_idx = mol_idx * self.num_samples_per_class + np.random.randint(self.num_samples_per_class)
+                spec, _ = self[sample_idx]
+                samples.append(spec.numpy())
+            
+            samples = np.array(samples)
+            mean_spec = np.mean(samples, axis=0)
+            std_spec = np.std(samples, axis=0)
+            ref_spec = self.mol_spectra[mol_idx].numpy()
+            
+            class_stats_list.append({
+                'name': mol_name,
+                'mean': mean_spec,
+                'std': std_spec,
+                'reference': ref_spec,
+                'n_pixels': n_samples_per_class
+            })
+
+        # Initialize visualizer to use its grid plotting logic
+        # Default wavenumbers are used if not provided (2700-3100)
+        visualizer = HSI_Visualizer(num_samples=self.n_wavenumbers)
+        
+        return visualizer.plot_spectral_averages_grid(
+            class_stats_list, output_path=output_path
+        )
 
     def get_reference(self):
         """
@@ -713,6 +781,12 @@ class HSI_Denoising_Dataset(Dataset):
             print("  Clean target: instance-matched (same SNR+bg, zero noise) [Fix 3]")
         else:
             print("  Clean target: pure molecule template × snr_scale (original)")
+
+    def _get_noise_multiplier(self, mol_idx):
+        """Check if molecule is 'No Match' and return increased noise multiplier if so."""
+        if self.molecule_names[mol_idx] == 'No Match':
+            return self.noise_multiplier * 5
+        return self.noise_multiplier
     
     def _create_mixture_classes(self, mol_spectra, molecule_names, mixture_pairs=None):
         """
@@ -818,11 +892,15 @@ class HSI_Denoising_Dataset(Dataset):
         # Sample experimental parameters
         choice_idx = np.random.choice(len(self.ratio_scale_vec))    
         bg_amplitude = self.bg_scale_vec[choice_idx]
+        
+        # Get molecule-specific noise multiplier
+        current_noise_mult = self._get_noise_multiplier(mol_idx)
+        
         snr_scale = max(self.ratio_scale_vec[choice_idx] * self.noise_param, 
-                       self.noise_param*self.noise_multiplier*5) # Ensure SNR scaling is at least proportional to noise level
+                       self.noise_param*current_noise_mult*5) # Ensure SNR scaling is at least proportional to noise level
         
         # Generate noise
-        noise = torch.randn(self.n_wavenumbers) * self.noise_param * self.noise_multiplier
+        noise = torch.randn(self.n_wavenumbers) * self.noise_param * current_noise_mult
         
         # Synthesize noisy spectrum
         noisy_spectrum = (self.mol_spectra[mol_idx] * snr_scale + 

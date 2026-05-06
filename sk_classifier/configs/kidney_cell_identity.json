@@ -3,12 +3,12 @@
   "description": "Configuration for kidney tissue analysis with Xenium cell identity classification",
   "processing_options": {
     "perform_RF_classification": false,
-    "perform_masking": false,
+    "perform_masking": true,
     "display_plots": true
   },
   "dataset_parameters": {
     "mask_type": "Xenium_cells_masks",
-    "regions": null,
+    "subgroups": null,
     "display_units_maps": [
       "POD",
       "PT",
@@ -56,6 +56,13 @@
       "REN",
       "VSM/P",
       "Unassigned"
+    ],
+    "display_units_boxplots": [
+      "POD",
+      "PT",
+      "PC",
+      "DCT",
+      "TAL"
     ],
     "molecules_to_display": [
       "16:0 Cardiolipin",
@@ -134,7 +141,7 @@
     "tal": "TAL",
     "unassigned": "Unassigned",
     "alttal": "altTAL",
-    "low_quality": "Low Quality",
+    "low,quality": "Low Quality",
     "pc": "PC",
     "ic": "IC",
     "pod": "POD",
@@ -180,7 +187,13 @@
     "DCT": "#ebd409",
     "PC": "#245bad"
   },
-  "unit_display_names": null,
+  "unit_display_names": {
+    "POD": "Podocytes",
+    "PT": "Proximal Tubule",
+    "TAL": "Thick Ascending Limb",
+    "DCT": "Distal Tubule",
+    "PC": "Principal Cells"
+  },
   "heatmap_unit_order": [
     "POD",
     "PT",
@@ -229,46 +242,23 @@
     "VSM/P",
     "Unassigned"
   ],
-  "multi_panel_config": {
-    "selected_molecules": [
-      "18:1 Cholesterol ester",
-      "AG 16:0",
-      "PC Mix",
-      "16:0 Cardiolipin"
-    ],
-    "selected_ratios": [
-      "Redox",
-      "Lipid_Unsaturation"
-    ]
-  },
   "sample_analysis_config": {
-    "per_sample_analysis": true,
-    "selected_samples": null,
-    "type_mapping": {
-      "ref": "ref",
-      "aki": "aki",
-      "ckd": "ckd"
-    },
-    "compare_order": [
-      "ref",
-      "aki",
-      "ckd"
-    ]
+    "granularity_levels": [
+      [
+        "Source_ID"
+      ],
+      [
+        "Group_ID"
+      ]
+    ],
+    "selected_values": null,
+    "filter_col": null
   },
   "individual_plot_config": {
     "create_individual_plots": true,
-    "selected_molecules": [
-      "16:0 Cardiolipin",
-      "C8 L-Carnitine",
-      "C12 Carnitine",
-      "C16 Carnitine",
-      "C18 Carnitine (d9-cis)"
-    ],
-    "selected_ratios": [
-      "Redox",
-      "Lipid_Unsaturation"
-    ],
-    "figure_width": 5.0,
-    "figure_height": 5.0
+    "selected_molecules": "All",
+    "selected_ratios": "All",
+    "compare_by": "Group_ID",
+    "consolidate_Group_IDs": false
   }
 }
