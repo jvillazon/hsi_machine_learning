@@ -1,5 +1,6 @@
 import os
 import re
+import tempfile
 import numpy as np
 import pandas as pd
 import tifffile
@@ -17,7 +18,7 @@ import matplotlib.colors as mcolors
 # =========================================================================
 CONFIG = {
     'spectra_csv': r'C:\Users\jvill\OneDrive\Documents\GitHub\hsi_machine_learning\unprocessed_data\averaged_spectra.csv',
-    'image_dir': r"C:\Users\jvill\Downloads\jorge_kidney_data_annotated_yang\jorge_kidney_data_annotated_yang\normalized",
+    'image_dir': r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\normalized",
     'wavenumber_start': 2700,
     'wavenumber_end': 3100,
     'num_samples': 61,
@@ -25,20 +26,9 @@ CONFIG = {
     'similarity_threshold': 0.85, # Min similarity (0-1) to be considered a match
     'chunk_size': 1_000_000, # Number of pixels per batch for large images
     'max_csv_pixels': 10_000_000, # Skip full CSV if image is larger than this
-    'exclude_molecules': [
-        'Sphingosine',
-        'Cer 18:1-12:0',
-        'Cer 18:1-18:0',
-        'Cer 18:1-18:1',
-        'Cer 18:1-22:0',
-        'Cer 18:1-24:0',
-        'Cer 18:1-24:1',
-        "Glucosylceramide (Gaucher's Spleen)",
-        'Cer 18:0-14:0',
-        'Cer 18:1-24:1(15Z)',
-        'Cer m18:1-16:0',
-        'Cer m18:1-24:1'
-    ],
+    'exclude_molecules': [],
+    'mol_groups': None,
+
         # 'mol_groups': {
     #     'Sterols': [
     #         '18:1 Cholesterol Ester', 
@@ -117,71 +107,71 @@ CONFIG = {
     #         'C18 Carnitine (d9-cis)'
     #         ],
     # },
-    'mol_groups': {
-        'Background': ['Kidney Background'],
-        'Sterols': [
-            '18:1 Cholesterol Ester', 
-            'Cholesterol (ovine)'
-            ],
-        'Phospholipids': [
-            '16:0 Cardiolipin', 
-            'PC Mix', 
-            'PE Mix', 
-            'PS Mix', 
-            'PI Mix', 
-            'PG Mix', 
-            'DOPC', 
-            'DOPE', 
-            'DSPC', 
-            '18:0 Lyso PA', 
-            '18:1 LPA'
-            ],
-        'Glycerols': [
-            '16:0 CDP DG',
-            'DAG 16:0',
-            'DAG 18:0 and 24:0 ',
-            'TAG Mix',
-            'TAG 16:0',
-            'TAG 18:1'
-        ],
-        'Sphingolipids': [
-            'Sphingosine',
-            'Cer 18:1-12:0',
-            'Cer 18:1-18:0',
-            'Cer 18:1-18:1',
-            'Cer 18:1-22:0',
-            'Cer 18:1-24:0',
-            'Cer 18:1-24:1',
-            "Glucosylceramide (Gaucher's Spleen)",
-            'Cer 18:0-14:0',
-            'Cer 18:1-24:1(15Z)',
-            'Cer m18:1-16:0',
-            'Cer m18:1-24:1'
-        ],
-        'Fatty Acids': [
-            'Stearic Acid',
-            'Palmitic Acid',
-            'Docosahexaenoic Acid',
-            'Tetracosapentaenoic Acid'
-        ],
-        'Carnitines': [
-            'C8 L-Carnitine',
-            'C12 Carnitine',
-            'C16 Carnitine',
-            'C18 Carnitine (d9-cis)'
-        ]
-    },
+    # 'mol_groups': {
+    #     'Background': ['Kidney Background'],
+    #     'Sterols': [
+    #         '18:1 Cholesterol Ester', 
+    #         'Cholesterol (ovine)'
+    #         ],
+    #     'Phospholipids': [
+    #         '16:0 Cardiolipin', 
+    #         'PC Mix', 
+    #         'PE Mix', 
+    #         'PS Mix', 
+    #         'PI Mix', 
+    #         'PG Mix', 
+    #         'DOPC', 
+    #         'DOPE', 
+    #         'DSPC', 
+    #         '18:0 Lyso PA', 
+    #         '18:1 LPA'
+    #         ],
+    #     'Glycerols': [
+    #         '16:0 CDP DG',
+    #         'DAG 16:0',
+    #         'DAG 18:0 and 24:0 ',
+    #         'TAG Mix',
+    #         'TAG 16:0',
+    #         'TAG 18:1'
+    #     ],
+    #     'Sphingolipids': [
+    #         'Sphingosine',
+    #         'Cer 18:1-12:0',
+    #         'Cer 18:1-18:0',
+    #         'Cer 18:1-18:1',
+    #         'Cer 18:1-22:0',
+    #         'Cer 18:1-24:0',
+    #         'Cer 18:1-24:1',
+    #         "Glucosylceramide (Gaucher's Spleen)",
+    #         'Cer 18:0-14:0',
+    #         'Cer 18:1-24:1(15Z)',
+    #         'Cer m18:1-16:0',
+    #         'Cer m18:1-24:1'
+    #     ],
+    #     'Fatty Acids': [
+    #         'Stearic Acid',
+    #         'Palmitic Acid',
+    #         'Docosahexaenoic Acid',
+    #         'Tetracosapentaenoic Acid'
+    #     ],
+    #     'Carnitines': [
+    #         'C8 L-Carnitine',
+    #         'C12 Carnitine',
+    #         'C16 Carnitine',
+    #         'C18 Carnitine (d9-cis)'
+    #     ]
+    # },
 }
 
 MASKING_CONFIG = {
-    'perform_masking': True,
+    'perform_masking': False,
     'mask_dir': r"C:\Users\jvill\Downloads\jorge_kidney_data_annotated_yang\jorge_kidney_data_annotated_yang\Mask",
     'min_instance_size': 100,
     'classes_to_ignore': ['No Match', 'Kidney Background'],
     'extract_similarity': True,
-    'dilations': 0,
+    'dilations': 2,
 
-    'count_lipid_droplets': True,
+    'count_lipid_droplets': False,
     'droplet_classes': [
         'Sterols', 'Phospholipids', 'Glycerols', 'Sphingolipids', 
         'Fatty Acids'
@@ -661,7 +651,7 @@ def main():
         norm_img_dir = os.path.join(base_dir, 'Normalized_Images')
 
 
-    output_dir = os.path.join(base_dir, 'sam_outputs-no-sm')
+    output_dir = os.path.join(base_dir, 'sam_outputs')
     os.makedirs(output_dir, exist_ok=True)
     
     all_mask_records = []
@@ -683,7 +673,6 @@ def main():
     mol_names = sorted(list(ref_dict.keys()))
     
     # Pre-calculate grouping mapping
-
     if len(CONFIG['exclude_molecules']) > 0:
         mol_names = [m for m in mol_names if m not in CONFIG['exclude_molecules']]
         ref_matrix = np.array([ref_dict[name] for name in mol_names])
@@ -771,46 +760,24 @@ def main():
             else:
                 shifted_ref_matrix[i] = ref_matrix[i]
         
-        # Stage 3 & 4: Batched SAM and Classification
+        # Batched SAM and Classification
         print(f"  Calculating SAM and maps in chunks of {CONFIG['chunk_size']} pixels...")
         
         # Prepare output paths
         sim_stack_path = os.path.normpath(os.path.join(img_out_dir, f"{img_base}_sam_similarity.tif"))
         class_map_path = os.path.normpath(os.path.join(img_out_dir, f"{img_base}_sam_classification.tif"))
         class_stack_path = os.path.normpath(os.path.join(img_out_dir, f"{img_base}_sam_class_stack.tif"))
-        
-        # Temp file paths
-        sim_stack_temp_path = os.path.normpath(os.path.join(img_out_dir, "temp_sim_stack.dat"))
-        class_stack_temp_path = os.path.normpath(os.path.join(img_out_dir, "temp_class_stack.dat"))
-        class_temp_path = os.path.normpath(os.path.join(img_out_dir, "temp_class.dat"))
-        sim_temp_path = os.path.normpath(os.path.join(img_out_dir, "temp_sim.dat"))
-        
-        # Cleanup any existing temp files from previous failed runs to avoid locks
-        for p in [sim_stack_temp_path, class_temp_path, sim_temp_path]:
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except:
-                    pass
-        
-        # Create memmaps - based on target_names (Groups or Individuals)
-        sim_stack_mmap = np.memmap(
-            sim_stack_temp_path, shape=(len(target_names), h, w), dtype='float32', mode='w+'
-        )
-        class_stack_mmap = np.memmap(
-            class_stack_temp_path, shape=(len(target_names), h, w), dtype='float32', mode='w+'
-        )
-        # Initialize class_stack_mmap with NaN
-        class_stack_mmap[:] = np.nan
-        
-        class_map_mmap = np.memmap(
-            class_temp_path, shape=(n_pixels,), dtype='uint16', mode='w+'
-        )
-        best_sim_mmap = np.memmap(
-            sim_temp_path, shape=(n_pixels,), dtype='float32', mode='w+'
-        )
 
-        # Pre-allocate for CSV/Parquet contenders
+        # Create TIFF-backed memmaps directly at the final output paths (avoid separate .dat temp files)
+        sim_best_path = os.path.normpath(os.path.join(img_out_dir, f"{img_base}_sam_best_similarity.tif"))
+
+        sim_stack_mmap = tifffile.memmap(sim_stack_path, shape=(len(target_names), h, w), dtype='float32', mode='w+')
+        class_stack_mmap = tifffile.memmap(class_stack_path, shape=(len(target_names), h, w), dtype='float32', mode='w+')
+        class_stack_mmap[:] = np.nan
+
+        class_map_mmap = tifffile.memmap(class_map_path, shape=(h, w), dtype='uint16', mode='w+')
+        best_sim_mmap = tifffile.memmap(sim_best_path, shape=(h, w), dtype='float32', mode='w+')
+
         top_k = 5
         all_top_indices = np.zeros((n_pixels, top_k), dtype=np.uint16)
         all_top_sims = np.zeros((n_pixels, top_k), dtype=np.float32)
@@ -819,29 +786,22 @@ def main():
         for start_p in tqdm(range(0, n_pixels, CONFIG['chunk_size']), desc="Processing batches"):
             end_p = min(start_p + CONFIG['chunk_size'], n_pixels)
             chunk = image_flat[start_p:end_p].astype(np.float32)
-            
-            # Baseline subtraction
+
             silent_baseline = np.mean(chunk[:, :CH_START], axis=1, keepdims=True)
             chunk_proc = chunk - silent_baseline
-            
-            # SAM similarity
+
             chunk_angles = calculate_sam(chunk_proc, shifted_ref_matrix)
-            
+
             if use_groups:
-                # Group angle is the minimum angle among its members
                 n_groups = len(target_names)
                 effective_angles = np.full((len(chunk_angles), n_groups), np.pi, dtype=np.float32)
                 for g_idx, m_indices in group_to_mols.items():
                     if m_indices:
                         effective_angles[:, g_idx] = np.min(chunk_angles[:, m_indices], axis=1)
-
             else:
                 effective_angles = chunk_angles
 
             chunk_similarity = 1.0 - (effective_angles / np.pi)
-        
-            
-            # Classification: 0 = No Match, 1..N = target indices
             chunk_best_idx = np.argmin(effective_angles, axis=1)
             chunk_best_sim = np.max(chunk_similarity, axis=1)
 
@@ -849,60 +809,48 @@ def main():
             all_top_indices[start_p:end_p] = top_k_indices
             all_top_sims[start_p:end_p] = 1.0 - (effective_angles[np.arange(len(effective_angles))[:, None], top_k_indices] / np.pi)
 
-            # Apply threshold
             no_match_mask = chunk_best_sim < CONFIG['similarity_threshold']
             chunk_best_idx = chunk_best_idx + 1
             chunk_best_idx[no_match_mask] = 0
 
-            class_map_mmap[start_p:end_p] = chunk_best_idx
-            best_sim_mmap[start_p:end_p] = chunk_best_sim
+            class_map_mmap.reshape(-1)[start_p:end_p] = chunk_best_idx
+            best_sim_mmap.reshape(-1)[start_p:end_p] = chunk_best_sim
 
-            # Write to similarity stack (C, H, W) and class stack
             class_stack_flat = class_stack_mmap.reshape(len(target_names), -1)
+            sim_stack_flat = sim_stack_mmap.reshape(len(target_names), -1)
             for t_idx in range(len(target_names)):
-                sim_stack_mmap.reshape(len(target_names), -1)[t_idx, start_p:end_p] = chunk_similarity[:, t_idx]
-                # Mark pixels where this target has the best match (before threshold) with 1.0
+                sim_stack_flat[t_idx, start_p:end_p] = chunk_similarity[:, t_idx]
                 best_match_mask = (chunk_best_idx - 1 == t_idx)
                 class_stack_flat[t_idx, start_p:end_p][best_match_mask] = 1.0
 
-        # Flush and save maps
         sim_stack_mmap.flush()
         class_stack_mmap.flush()
         class_map_mmap.flush()
         best_sim_mmap.flush()
-        
-        # Save similarity and classification TIFFs
-        tifffile.imwrite(sim_stack_path, sim_stack_mmap, resolution=res, imagej=True, 
-                         metadata={'axes': 'ZYX', 'Labels': target_names})
-        tifffile.imwrite(class_map_path, class_map_mmap.reshape(h, w), resolution=res, imagej=True, metadata=meta)
-        tifffile.imwrite(class_stack_path, class_stack_mmap, resolution=res, imagej=True, 
-                         metadata={'axes': 'ZYX', 'Labels': target_names})
-        
-        # Stage 4.3: Diagnostic Plots
-        # Sample pixels for diagnostics (we don't keep all similarity in RAM)
+
+        # TIFF memmaps written in-place; no separate imwrite necessary.
+
         indices, best_match_idx_sample, similarity_sample = plot_diagnostic_samples(
             img_out_dir, image_mmap, shifted_ref_matrix, mol_names
         )
-        
-        # Stage 4.4: Result Output (CSV or Parquet)
+
         print(f"  Generating summary result ({'CSV' if save_csv else 'Parquet'}) with Top 5 contenders...")
-        # Index 0 = No Match; indices 1..N map to target_names[0..N-1]
         mol_names_ext = ["No Match"] + target_names
         df_records = {
             'x': np.tile(np.arange(w), h),
             'y': np.repeat(np.arange(h), w),
-            'coords': [(int(y),int(x)) for y,x in zip(np.repeat(np.arange(h), w), np.tile(np.arange(w), h))],
-            'Best_Match': [mol_names_ext[idx] for idx in class_map_mmap],
-            'Best_Similarity': best_sim_mmap
+            'coords': [(int(y), int(x)) for y, x in zip(np.repeat(np.arange(h), w), np.tile(np.arange(w), h))],
+            'Best_Match': [mol_names_ext[idx] for idx in class_map_mmap.ravel()],
+            'Best_Similarity': best_sim_mmap.ravel()
         }
-        
+
         for k in range(top_k):
             k_indices = all_top_indices[:, k]
             df_records[f'Contender_{k+1}'] = [target_names[idx] for idx in k_indices]
             df_records[f'Contender_Similarity_{k+1}'] = all_top_sims[:, k]
-            
+
         summary_df = pd.DataFrame(df_records)
-        
+
         if save_csv:
             csv_out = os.path.join(img_out_dir, f"{img_base}_sam_predictions.csv")
             summary_df.to_csv(csv_out, index=False)
@@ -916,47 +864,38 @@ def main():
                 print("  Warning: pyarrow or fastparquet not found. Falling back to CSV (might be very large!).")
                 csv_out = os.path.join(img_out_dir, f"{img_base}_sam_predictions.csv")
                 summary_df.to_csv(csv_out, index=False)
-        
+
         del all_top_indices, all_top_sims, summary_df
 
-        # Stage 4.5: Summary Plot (using sampled data)
         plt.figure(figsize=(12, 5))
         cmap_colors = plt.cm.tab20(np.linspace(0, 1, len(target_names)))
         cmap_colors = np.vstack([cmap_colors, [0.5, 0.5, 0.5, 1.0]])
         cmap = mcolors.ListedColormap(cmap_colors)
-        
+
         plt.subplot(1, 2, 1)
-        plt.imshow(class_map_mmap.reshape(h, w), cmap=cmap, vmin=0, vmax=len(target_names))
+        plt.imshow(class_map_mmap, cmap=cmap, vmin=0, vmax=len(target_names))
         plt.title("SAM Classification Map\n(Grey = No Match)")
         plt.axis('off')
-        
+
         plt.subplot(1, 2, 2)
         wn = np.linspace(CONFIG['wavenumber_start'], CONFIG['wavenumber_end'], CONFIG['num_samples'])
         plt.plot(wn, image_mean_norm, 'k-', label='Image Mean', linewidth=2, alpha=0.5)
-        # Note: similarity_sample based on individual mols, plot for visualization only
         max_sim_per_mol = np.max(similarity_sample, axis=0)
         top_3_indices = np.argsort(max_sim_per_mol)[-3:][::-1]
         for idx in top_3_indices:
-            plt.plot(wn, shifted_ref_matrix[idx], color=cmap_colors[idx % len(target_names)], linestyle='--', 
-                     label=f"{mol_names[idx]} (max sim: {max_sim_per_mol[idx]:.3f})")
+            plt.plot(wn, shifted_ref_matrix[idx], color=cmap_colors[idx % len(target_names)], linestyle='--',
+                        label=f"{mol_names[idx]} (max sim: {max_sim_per_mol[idx]:.3f})")
         plt.title(f"Spectral Overlay (Shift: {best_shift})")
-        plt.legend(fontsize=8, loc='upper left'); plt.xlabel("Wavenumber (cm^-1)")
+        plt.legend(fontsize=8, loc='upper left')
+        plt.xlabel("Wavenumber (cm^-1)")
         plt.grid(True, alpha=0.2)
         plt.tight_layout()
-        plt.savefig(os.path.join(img_out_dir, f"{img_base}_sam_summary.png"), dpi=150); plt.close()
-        
-        # Cleanup temp files
-        del class_map_mmap, best_sim_mmap
+        plt.savefig(os.path.join(img_out_dir, f"{img_base}_sam_summary.png"), dpi=150)
+        plt.close()
+
+        del sim_stack_mmap, class_stack_mmap, class_map_mmap, best_sim_mmap
         import gc
-        gc.collect() # Force cleanup on Windows to release file handles
-        
-        try:
-            os.remove(os.path.join(img_out_dir, "temp_class.dat"))
-            os.remove(os.path.join(img_out_dir, "temp_sim.dat"))
-            os.remove(os.path.join(img_out_dir, "temp_sim_stack.dat"))
-            os.remove(os.path.join(img_out_dir, "temp_class_stack.dat"))
-        except Exception as e:
-            print(f"  Note: Could not remove temp files: {e}")
+        gc.collect()
 
         # Stage 5: Masking (Per Image)
         if MASKING_CONFIG['perform_masking']:

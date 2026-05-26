@@ -17,6 +17,7 @@ typing-extensions==4.15.0
 openpyxl==3.1.5
 shap==0.49.1
 optuna>=4.0.0
+pyarrow==20.0.0
 
 # GPU builds of PyTorch and related packages (CUDA 13.0)
 torch --index-url https://download.pytorch.org/whl/cu130

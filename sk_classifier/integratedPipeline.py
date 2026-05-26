@@ -24,7 +24,7 @@ from config_loader import load_config, apply_config, list_available_profiles, pr
 from umap_analysis import generate_ion_umaps
 
 # CONFIGURATION PROFILE SELECTION
-PROFILE = 'kidney_clusters-regions'  
+PROFILE = 'kidney_clusters-regions'  # Default profile
 
 # Load configuration from selected profile
 print(f"\nLoading configuration from profile: {PROFILE}")
@@ -150,9 +150,18 @@ if perform_masking:
                     res = visualizer.apply_rf_masking(ratio_tiff_path=r_tif, mask_list_path=mask_folder, subgroups=subgroups, img_name=img_name_no_ext, prefix=mask_prefix, min_instance_size=100,dilations=dilations)
                     for u, e in res.items(): ratios_per_unit.setdefault(u, []).extend(e)
     
+    index_cols = ['Image_Name', 'Unit', 'Instance_Label', 'Source_ID']
     if predictions_per_unit:
         percentages_df = visualizer.quantify_unit_class_percentages_nested(predictions_per_unit, unit_mappings=unit_mappings)
         percentages_df.to_csv(output_csv, index=False)
+
+
+        # 1. Pivot the dataframe
+        if 'Group_ID' in percentages_df.columns:
+            index_cols.append('Group_ID')
+
+        percentages_wide_df = percentages_df.pivot(index=index_cols, columns='Molecule', values='Percentage').reset_index()
+        percentages_wide_df.to_csv(output_ratio_wide_csv)
     
     if ratios_per_unit:
         ratios_df = visualizer.quantify_unit_ratio_means_nested(ratios_per_unit, unit_mappings=unit_mappings)
@@ -165,18 +174,22 @@ if perform_masking:
         df = pd.merge(ratios_df, valid_instances, on=group_cols, how='inner')
 
         # 1. Pivot the dataframe
-        index_cols = ['Image_Name', 'Unit', 'Instance_Label', 'Source_ID', 'centroid_x', 'centroid_y'] 
         if 'Group_ID' in df.columns:
             index_cols.append('Group_ID')
 
         ratios_wide_df = df.pivot(index=index_cols, columns='Ratio_Type', values='Mean_Ratio').reset_index()
-
         ratios_wide_df.to_csv(output_ratio_wide_csv)
+        
+        if percentages_df is not None:
+            wide_df = pd.merge(percentages_wide_df, ratios_wide_df, on=index_cols)
+        else:
+            wide_df = ratios_wide_df.copy()
 
-        if 'Unnamed: 0' in ratios_wide_df.columns:
-            ratios_wide_df.drop(columns="Unnamed: 0")
+
+
 else:
     print("Masking disabled")
+
 
 masked_output_dir = os.path.join(os.path.dirname(base_directory), f"{mask_type}_output_csv")
 os.makedirs(masked_output_dir, exist_ok=True)
@@ -199,11 +212,32 @@ else:
     print("No specific units designated - will default to all available units.")
 
 if display_plots:
-    if percentages_df is None and os.path.exists(output_csv): percentages_df = pd.read_csv(output_csv)
-    if ratios_df is None and os.path.exists(output_ratio_csv): ratios_df = pd.read_csv(output_ratio_csv)
-    ratios_wide_df = pd.read_csv(output_ratio_wide_csv) 
-    if 'Unnamed: 0' in ratios_wide_df.columns:
-        ratios_wide_df.drop(columns="Unnamed: 0")
+    if percentages_df is None and os.path.exists(output_csv): 
+        percentages_df = pd.read_csv(output_csv)
+    if ratios_df is None and os.path.exists(output_ratio_csv): 
+        ratios_df = pd.read_csv(output_ratio_csv)
+    
+    index_cols = ['Image_Name', 'Unit', 'Instance_Label', 'Source_ID']
+    
+    if percentages_df is not None:
+
+        # 1. Pivot the dataframe
+        if 'Group_ID' in percentages_df.columns:
+            index_cols.append('Group_ID')
+        percentages_wide_df = percentages_df.pivot(index=index_cols, columns='Molecule', values='Percentage').reset_index()
+        percentages_wide_df.to_csv(output_ratio_wide_csv)
+
+    if ratios_df is not None:
+        if 'Group_ID' in ratios_df.columns and 'Group_ID' not in index_cols:
+            index_cols.append('Group_ID')
+        
+        ratios_wide_df = ratios_df.pivot(index=index_cols, columns='Ratio_Type', values='Mean_Ratio').reset_index()
+        ratios_wide_df.to_csv(output_ratio_wide_csv)
+
+        if percentages_df is not None:
+            wide_df = pd.merge(percentages_wide_df, ratios_wide_df, on=index_cols)
+        else:
+            wide_df = ratios_wide_df.copy()
 else:  
     # Apply global filters
     if selected_values is not None and filter_col:
@@ -211,37 +245,192 @@ else:
             if df is not None and filter_col in df.columns:
                 df = df[df[filter_col].isin(selected_values)].copy()
 
+
+
+
+
+
+if 'Unnamed: 0' in wide_df.columns:
+    wide_df.drop(columns="Unnamed: 0")
 # Filter by size
-unit_sizes = ratios_wide_df.groupby('Unit').size()
-unit_group_sizes = ratios_wide_df.groupby(['Unit', 'Group_ID']).size()
+if 'Group_ID' in wide_df.columns and wide_df['Group_ID'].notna().any():
+    unit_sizes = wide_df.groupby('Unit').size()
+    unit_group_sizes = wide_df.groupby(['Unit', 'Group_ID']).size()
 
-df = ratios_wide_df.copy()
-df = df.merge(unit_group_sizes.rename('unit_group_size'), on=['Unit', 'Group_ID'])
-df = df.merge(unit_sizes.rename('unit_size'), on='Unit')
-df_filtered = df[df['unit_group_size'] / df['unit_size'] >= 0.00]
+    df = wide_df.copy()
+    df = df.merge(unit_group_sizes.rename('unit_group_size'), on=['Unit', 'Group_ID'])
+    df = df.merge(unit_sizes.rename('unit_size'), on='Unit')
+    if "clusters" in mask_type.lower():
+        df_filtered = df[df['unit_group_size'] / df['unit_size'] >= 0.01] # Keep groups that represent at least 5% of the unit's instances
+    else:
+        df_filtered = df
 
-df_dict = {}
-# Separate by source
-for source in df_filtered['Source_ID'].unique():
-    df_dict[source] = df_filtered[df_filtered['Source_ID']==source]
-    output_path = os.path.join(masked_output_dir, f'{source}_filtered-ratios.csv')
-    df_dict[source].to_csv(output_path, index=False)
-s21_df = df_dict['S21']
+    df = df_filtered.copy()
+    has_groups = True
+else:
+    has_groups = False
+    df = wide_df.copy()
+
+# df_dict = {}
+# # Separate by source
+# for source in df_filtered['Source_ID'].unique():
+#     if 'Unnamed: 0' in wide_df.columns:
+#         df_filtered.drop(columns="Unnamed: 0", inplace=True)
+#     df_dict[source] = df_filtered[df_filtered['Source_ID']==source]
+#     output_path = os.path.join(masked_output_dir, f'{source}_filtered-ratios.csv')
+#     df_dict[source].to_csv(output_path, index=False)
+# df = df_dict['S21']
 
 
 
-ratio_types = list(ratios_df['Ratio_Type'].unique())
+# df = pd.read_csv(os.path.join(masked_output_dir, 'S21_filtered-ratios.csv'))
+# print(df.head())
+
+
+
+plot_type = 'violin'
+
+
+if len(display_units_boxplots) != len(df['Unit'].unique()):
+    name_change = f"{display_units_boxplots[0]}_{display_units_boxplots[-1]}"
+else:
+    name_change = "all_units"
+
+values_to_plot = []
+if ratios_df is not None and 'Ratio_Type' in ratios_df.columns:
+    values_to_plot.append('Ratio_Type')
+if percentages_df is not None and 'Molecule' in percentages_df.columns: 
+    values_to_plot.append('Molecule')
+
+# if "Group_ID" in df.columns:
+#     df = df[df['Group_ID'].isin(subgroups)] if subgroups and has_groups else df
+
+for value in values_to_plot:
+    if value=="Ratio_Type":
+        ratio_types = list(ratios_df['Ratio_Type'].unique())
+        items_list = ratio_types
+        data_type = 'Mean_Ratio'
+        tmp_df = df[df['Source_ID']=='S21'].copy()
+    elif value=="Molecule":
+        molecules = list(percentages_df['Molecule'].unique())
+        items_list = molecules
+        data_type = 'Percentage'
+        tmp_df = df.copy()
+    
+    inter_unit_dir = os.path.join(plots_directory, f'{name_change}', f'{data_type}_inter-unit_{plot_type}-plots')
+    visualizer.create_individual_barplots(
+        df=tmp_df[tmp_df['Group_ID'].isin(subgroups)] if subgroups and has_groups else tmp_df,
+        value_col=None,        # Not needed for wide format
+        grouping_col=None,     # Signal that we are using Wide format
+        items_list=items_list, # The column names
+        output_dir=inter_unit_dir,
+        data_type=data_type,
+        units_to_display=display_units_boxplots,
+        consolidate_Group_IDs=True,
+        plot_type=plot_type,
+        sig_style='stars_only' if len(display_units_boxplots) > 6 else 'brackets',
+        show_plots=False,
+        display_name_map=display_names,
+        unit_color_map=unit_colors,
+        unit_display_map=unit_display_names,
+        subgroup_list = subgroups,
+        remove_outliers=True,
+        show_scatter=True,
+        show_empty_subgroups=True,
+        # orientation='horizontal'
+    )
+
+    # if subgroups:
+    #     intra_unit_dir = os.path.join(plots_directory, f'{name_change}', f'{data_type}_intra-unit_{plot_type}-plots')
+    #     visualizer.create_individual_barplots(
+    #         df=tmp_df[tmp_df['Group_ID'].isin(subgroups)] if subgroups and has_groups else tmp_df,
+    #         value_col=None,        # Not needed for wide format
+    #         grouping_col=None,     # Signal that we are using Wide format
+    #         items_list=items_list, # The column names
+    #         output_dir=intra_unit_dir,
+    #         data_type=data_type,
+    #         units_to_display=display_units_boxplots,
+    #         consolidate_Group_IDs=False,
+    #         plot_type=plot_type,
+    #         sig_style='stars_only' if len(display_units_boxplots) > 6  else 'brackets',
+    #         show_plots=False,
+    #         display_name_map=display_names,
+    #         unit_color_map=unit_colors,
+    #         unit_display_map=unit_display_names,
+    #         remove_outliers=True,
+    #         show_empty_subgroups=True,
+    #         subgroup_list=subgroups,
+    #         show_scatter=False,
+    #         # orientation='horizontal'
+    #     )
+    #     for group in tqdm(subgroups if subgroups else df['Group_ID'].unique()):
+    #         inter_unit_dir = os.path.join(plots_directory, f'{name_change}', f'{data_type}_inter-unit_{group}_{plot_type}-plots')
+    #         tmp_group_df = tmp_df[tmp_df['Group_ID']==group]
+    #         visualizer.create_individual_barplots(
+    #             df=tmp_group_df,
+    #             value_col=None,        # Not needed for wide format
+    #             grouping_col=None,     # Signal that we are using Wide format
+    #             items_list=items_list, # The column names
+    #             output_dir=inter_unit_dir,
+    #             data_type=data_type,
+    #             units_to_display=display_units_boxplots,
+    #             consolidate_Group_IDs=True,
+    #             plot_type=plot_type,
+    #             sig_style='stars_only' if len(display_units_boxplots) > 6  else 'brackets',
+    #             show_plots=False,
+    #             display_name_map=display_names,
+    #             unit_color_map=unit_colors,
+    #             subgroup_list=[group],
+    #             unit_display_map=unit_display_names,
+    #             remove_outliers=True,
+    #             show_scatter=False,
+    #             show_empty_subgroups=True,
+    #             # orientation='horizontal'
+    #         )
+
+
+
+# output_dir = os.path.join(plots_directory, 'regions_gradient_heatmaps')
+
+# visualizer.plot_subgroup_gradient_heatmap_wide(df, ratio_types , subgroups,
+#                                             output_dir=output_dir, display_name_map=display_names,
+#                                             unit_display_map=unit_display_names, unit_order=display_units_boxplots,
+#                                             units_to_display=display_units_boxplots, cmap='RdBu_r',
+#                                             min_size_to_plot=5, remove_outliers=True,
+#                                             show_values=False, 
+#                                             cmap_scale={
+#                                                 # 'Lipid_to_Protein': [0.2975, 0.3175],
+#                                                 # 'Lipid_Unsaturation' : [0.425, 0.465],
+#                                                 # 'Redox' : [0.12, 0.24]
+#                                             },
+#                                             cbar_label='Mean Value', display_significance=True
+#                                             )
+# visualizer.plot_subgroup_gradient_heatmap_wide_transposed(tmp_df[tmp_df['Group_ID'].isin(subgroups)] if subgroups and has_groups else tmp_df, ratio_types , subgroups,  
+#                                             output_dir=output_dir, display_name_map=display_names,unit_order=display_units_boxplots,
+#                                             unit_display_map=unit_display_names, units_to_display=display_units_boxplots, cmap='RdBu_r',
+#                                             show_values=False, cbar_label='Mean Value', remove_outliers=False)
+
+
 
 # plot_type = 'violin'
-# intra_unit_dir = os.path.join(plots_directory, f'intra-unit_{plot_type}-plots-outliers')
+# unit_group = [
+#     "Cluster2",
+#     "Cluster4",
+#     "Cluster5"
+# ]
+# ratio_types = list(ratios_df['Ratio_Type'].unique())
+
+# intra_unit_dir = os.path.join(plots_directory, f'intra-unit_{plot_type}-plots', f"{unit_group[0]}-{unit_group[-1]}")
+# os.makedirs(intra_unit_dir, exist_ok=True)
 # visualizer.create_individual_barplots(
-#     df=s21_df,
+#     df=df,
 #     value_col=None,        # Not needed for wide format
 #     grouping_col=None,     # Signal that we are using Wide format
 #     items_list=ratio_types, # The column names
 #     output_dir=intra_unit_dir,
+#     show_empty_subgroups=True,
 #     data_type='Mean_Ratio',
-#     units_to_display=display_units_boxplots,
+#     units_to_display=unit_group,
 #     consolidate_Group_IDs=False,
 #     plot_type=plot_type,
 #     sig_style='stars_only',
@@ -249,13 +438,181 @@ ratio_types = list(ratios_df['Ratio_Type'].unique())
 #     display_name_map=display_names,
 #     unit_color_map=unit_colors,
 #     unit_display_map=unit_display_names,
-#     remove_outliers=True
-
+#     remove_outliers=True,
+#     subgroup_list=subgroups,
+#     show_scatter=False,
 # )
 
-# for group in tqdm(s21_df['Group_ID'].unique()):
-#     inter_unit_dir = os.path.join(plots_directory, f'inter-unit_{group}_{plot_type}-plots')
-#     s21_group_df = s21_df[s21_df['Group_ID']==group]
+
+# unit_group = [
+#     "Cluster6",
+#     "Cluster7",
+# ]
+
+
+# intra_unit_dir = os.path.join(plots_directory, f'intra-unit_{plot_type}-plots', f"{unit_group[0]}-{unit_group[-1]}")
+# os.makedirs(intra_unit_dir, exist_ok=True)
+# visualizer.create_individual_barplots(
+#     df=df,
+#     value_col=None,        # Not needed for wide format
+#     grouping_col=None,     # Signal that we are using Wide format
+#     items_list=ratio_types, # The column names
+#     output_dir=intra_unit_dir,
+#     show_empty_subgroups=True,
+#     data_type='Mean_Ratio',
+#     units_to_display=unit_group,
+#     consolidate_Group_IDs=False,
+#     plot_type=plot_type,
+#     sig_style='stars_only',
+#     show_plots=False,
+#     display_name_map=display_names,
+#     unit_color_map=unit_colors,
+#     unit_display_map=unit_display_names,
+#     remove_outliers=True,
+#     subgroup_list=subgroups,
+#     show_scatter=False,
+# )
+
+
+# unit_group = [
+#     "Cluster8",
+#     "Cluster9",
+# ]
+
+
+# intra_unit_dir = os.path.join(plots_directory, f'intra-unit_{plot_type}-plots', f"{unit_group[0]}-{unit_group[-1]}")
+# os.makedirs(intra_unit_dir, exist_ok=True)
+# visualizer.create_individual_barplots(
+#     df=df,
+#     value_col=None,        # Not needed for wide format
+#     grouping_col=None,     # Signal that we are using Wide format
+#     items_list=ratio_types, # The column names
+#     output_dir=intra_unit_dir,
+#     show_empty_subgroups=True,
+#     data_type='Mean_Ratio',
+#     units_to_display=unit_group,
+#     consolidate_Group_IDs=False,
+#     plot_type=plot_type,
+#     sig_style='stars_only',
+#     show_plots=False,
+#     display_name_map=display_names,
+#     unit_color_map=unit_colors,
+#     unit_display_map=unit_display_names,
+#     remove_outliers=True,
+#     subgroup_list=subgroups,
+#     show_scatter=False,
+# )
+
+
+# unit_group = [
+#     "Cluster13",
+#     "Cluster15",
+#     "Cluster16",
+#     "Cluster17",
+# ]
+
+
+# intra_unit_dir = os.path.join(plots_directory, f'intra-unit_{plot_type}-plots', f"{unit_group[0]}-{unit_group[-1]}")
+# os.makedirs(intra_unit_dir, exist_ok=True)
+# visualizer.create_individual_barplots(
+#     df=df,
+#     value_col=None,        # Not needed for wide format
+#     grouping_col=None,     # Signal that we are using Wide format
+#     items_list=ratio_types, # The column names
+#     output_dir=intra_unit_dir,
+#     show_empty_subgroups=True,
+#     data_type='Mean_Ratio',
+#     units_to_display=unit_group,
+#     consolidate_Group_IDs=False,
+#     plot_type=plot_type,
+#     sig_style='stars_only',
+#     show_plots=False,
+#     display_name_map=display_names,
+#     unit_color_map=unit_colors,
+#     unit_display_map=unit_display_names,
+#     remove_outliers=True,
+#     subgroup_list=subgroups,
+#     show_scatter=False,
+# )
+
+
+# unit_group = [
+#     "Cluster18",
+#     "Cluster19",
+#     "Cluster20",
+#     "Cluster21",
+# ]
+
+
+# intra_unit_dir = os.path.join(plots_directory, f'intra-unit_{plot_type}-plots', f"{unit_group[0]}-{unit_group[-1]}")
+# os.makedirs(intra_unit_dir, exist_ok=True)
+# visualizer.create_individual_barplots(
+#     df=df,
+#     value_col=None,        # Not needed for wide format
+#     grouping_col=None,     # Signal that we are using Wide format
+#     items_list=ratio_types, # The column names
+#     output_dir=intra_unit_dir,
+#     show_empty_subgroups=True,
+#     data_type='Mean_Ratio',
+#     units_to_display=unit_group,
+#     consolidate_Group_IDs=False,
+#     plot_type=plot_type,
+#     sig_style='stars_only',
+#     show_plots=False,
+#     display_name_map=display_names,
+#     unit_color_map=unit_colors,
+#     unit_display_map=unit_display_names,
+#     remove_outliers=True,
+#     subgroup_list=subgroups,
+#     show_scatter=False,
+# )
+
+
+
+
+
+# Define your filters (None = use all)
+# display_units = [
+#     "Glomeruli",
+#     "Proximal Tubule",
+#     "Thin Descending Limb",
+#     "Thick Ascending Limb",
+#     "Distal Tubule",
+#     "Distal Nephron",
+#     "Vasculature"
+# ]
+# display_units = display_units_boxplots if display_units_boxplots else None
+# selected_units = display_units_boxplots
+
+# selected_groups = ['M','CM', 'C3', 'C2', 'C1']
+# selected_ratios = list(ratios_df['Ratio_Type'].unique())
+
+# # Define output directory
+# umap_output_dir = os.path.join(plots_directory, 'a-S21-regions_umaps')
+
+# # Execute the filtered UMAP analysis
+# generate_ion_umaps(
+#     df_wide=df, 
+#     unit_colors=unit_colors, 
+#     unit_names=unit_display_names, 
+#     plots_directory=plots_directory,
+#     output_dir=umap_output_dir,
+#     selected_units=selected_units,   
+#     selected_groups=selected_groups, 
+#     selected_ratios=selected_ratios,
+#     display_units=display_units  
+# )
+
+# unit_group = [
+#     "Cluster2",
+#     "Cluster4",
+#     "Cluster5"
+# ]
+
+# for group in df['Group_ID'].unique():
+#     inter_unit_dir = os.path.join(plots_directory, f'inter-unit_{group}_{plot_type}-plots, f"{unit_group[0]}-{unit_group[-1]}")')
+#     os.makedirs(inter_unit_dir, exist_ok=True)
+#     s21_group_df = df[df['Group_ID']==group]
 #     visualizer.create_individual_barplots(
 #         df=s21_group_df,
 #         value_col=None,        # Not needed for wide format
@@ -272,98 +629,67 @@ ratio_types = list(ratios_df['Ratio_Type'].unique())
 #         unit_color_map=unit_colors,
 #         subgroup_list=[group],
 #         unit_display_map=unit_display_names,
-
 #     )
-
-# inter_unit_dir = os.path.join(plots_directory, f'inter-unit_{plot_type}-plots')
+# intra_unit_dir = os.path.join(plots_directory, f'intra-unit_{plot_type}-plots', f"{unit_group[0]}-{unit_group[-1]}")
+# os.makedirs(intra_unit_dir, exist_ok=True)
 # visualizer.create_individual_barplots(
-#     df=s21_df,
+#     df=df,
 #     value_col=None,        # Not needed for wide format
 #     grouping_col=None,     # Signal that we are using Wide format
 #     items_list=ratio_types, # The column names
-#     output_dir=inter_unit_dir,
+#     output_dir=intra_unit_dir,
 #     data_type='Mean_Ratio',
 #     units_to_display=display_units_boxplots,
-#     consolidate_Group_IDs=True,
+#     consolidate_Group_IDs=False,
 #     plot_type=plot_type,
 #     sig_style='stars_only',
 #     show_plots=False,
 #     display_name_map=display_names,
 #     unit_color_map=unit_colors,
 #     unit_display_map=unit_display_names,
-#     subgroup_list = list(s21_df['Group_ID'].unique())
-# )
+#     remove_outliers=False
 
-# output_dir = os.path.join(plots_directory, 'S21-regions_gradient_heatmaps')
-# visualizer.plot_subgroup_gradient_heatmap_wide(s21_df, ratio_types , subgroups,
-#                                             output_dir=output_dir, display_name_map=display_names,
-#                                             unit_display_map=unit_display_names, unit_order=display_units_boxplots,
-#                                             units_to_display=display_units_boxplots, cmap='RdBu_r',
-#                                             min_size_to_plot=5, remove_outliers=True,
-#                                             show_values=True, 
-#                                             # cmap_scale={
-#                                             #     # 'Lipid_to_Protein': [0.2975, 0.3175],
-#                                             #     # 'Lipid_Unsaturation' : [0.425, 0.465],
-#                                             #     # 'Redox' : [0.12, 0.24]
-#                                             # },
-#                                             cbar_label='Mean Ratio')
-
-
-# # Define your filters (None = use all)
-# display_units = display_units_boxplots
-# selected_units = display_units_boxplots
-# selected_groups = list(s21_df['Group_ID'].unique()) 
-# selected_ratios = list(ratios_df['Ratio_Type'].unique())
-
-# # Define output directory
-# umap_output_dir = os.path.join(plots_directory, 'S21-regions_umaps')
-
-# # Execute the filtered UMAP analysis
-# generate_ion_umaps(
-#     df_wide=s21_df, 
-#     unit_colors=unit_colors, 
-#     unit_names=unit_display_names, 
-#     plots_directory=plots_directory,
-#     output_dir=umap_output_dir,
-#     selected_units=selected_units,   
-#     selected_groups=selected_groups, 
-#     selected_ratios=selected_ratios,
-#     display_units=display_units  
 # )
 
 
-# subgroups = list(s21_df['Group_ID'].unique())
+# # subgroups = list(df['Group_ID'].unique())
+# subgroups = [
+#     'CD3,CD4',
+#     'CD3,CD8',
+#     'CD45,CD206'
+# ]
+
 # N = len(subgroups)
-# # s21_df = s21_df[(s21_df['Group_ID']!="M2")]
+# # df = df[(df['Group_ID']!="M2")]
 # group_rank = {group: idx for idx, group in enumerate(subgroups)}
 # # Ensure you only process rows that belong to your known subgroups
-# valid_mask = s21_df['Group_ID'].isin(subgroups)
+# valid_mask = df['Group_ID'].isin(subgroups)
 # # 2. Scale coordinates to [0, 1] strictly within each Group per Image
-# s21_df.loc[valid_mask, 'x_in_group'] = s21_df[valid_mask].groupby(['Image_Name', 'Group_ID'])['centroid_x'].transform(
+# df.loc[valid_mask, 'x_in_group'] = df[valid_mask].groupby(['Image_Name', 'Group_ID'])['centroid_x'].transform(
 #     lambda x: (x - x.min()) / (x.max() - x.min()) if (x.max() - x.min()) != 0 else 0.5
 # )
-# s21_df.loc[valid_mask, 'y_in_group'] = s21_df[valid_mask].groupby(['Image_Name', 'Group_ID'])['centroid_y'].transform(
+# df.loc[valid_mask, 'y_in_group'] = df[valid_mask].groupby(['Image_Name', 'Group_ID'])['centroid_y'].transform(
 #     lambda x: (x - x.min()) / (x.max() - x.min()) if (x.max() - x.min()) != 0 else 0.5
 # )
 # # 3. Map Group_ID to its relative index (e.g., 'P' -> 0, 'C1' -> 5)
-# s21_df.loc[valid_mask, 'group_rank'] = s21_df.loc[valid_mask, 'Group_ID'].map(group_rank)
+# df.loc[valid_mask, 'group_rank'] = df.loc[valid_mask, 'Group_ID'].map(group_rank)
 # # 4. Project into sequential bins
 # # Global Scaled Coordinate = (Base Group Position) + (Within-Group Scaled Offset)
-# s21_df.loc[valid_mask, 'centroid_x_global'] = (s21_df.loc[valid_mask, 'group_rank'] / N) + (s21_df.loc[valid_mask, 'x_in_group'] / N)
-# s21_df.loc[valid_mask, 'centroid_y_global'] = (s21_df.loc[valid_mask, 'group_rank'] / N) + (s21_df.loc[valid_mask, 'y_in_group'] / N)
+# df.loc[valid_mask, 'centroid_x_global'] = (df.loc[valid_mask, 'group_rank'] / N) + (df.loc[valid_mask, 'x_in_group'] / N)
+# df.loc[valid_mask, 'centroid_y_global'] = (df.loc[valid_mask, 'group_rank'] / N) + (df.loc[valid_mask, 'y_in_group'] / N)
 
 
 # # 2. Choose the column you want to use to color the points (e.g., 'Image_Name' or 'Group_ID')
 # color_by_col = 'Group_ID' 
 
-# x_label = 'centroid_x_global'
-# y_label = 'Lipid_Unsaturation'
+# x_label = 'Collagen'
+# y_label = 'Redox'
 
-# stats_per_group = False
-
+# stats_per_group = True
+# df = df[df['Group_ID'].isin(subgroups)]
 # # Set seaborn style for nicer looking plots (optional but recommended!)
 # # sns.set_theme(style="whitegrid")
-# unique_groups = s21_df[color_by_col].dropna().unique()
+# unique_groups = df[color_by_col].dropna().unique()
 # palette = sns.color_palette("tab10", len(unique_groups))
 # color_map = dict(zip(unique_groups, palette))
 
@@ -372,9 +698,9 @@ ratio_types = list(ratios_df['Ratio_Type'].unique())
 # output_dir = os.path.join(plots_directory, f"{x_label}_by_{y_label}-scatter")
 # os.makedirs(output_dir, exist_ok=True)
 
-# for unit in s21_df['Unit'].unique():
+# for unit in df['Unit'].unique():
 #     print(f"\nUnit: {unit}")
-#     subset = s21_df[s21_df['Unit'] == unit].dropna(subset=['Lipid_Unsaturation', 'Lipid_to_Protein', 'Redox'])
+#     subset = df[df['Unit'] == unit].dropna(subset=['Lipid_Unsaturation', 'Lipid_to_Protein', 'Redox', 'Collagen'])  # Ensure no NaNs in key columns
     
 #     min_group_size = 1  # Adjust threshold here (e.g., 3, 5, or 10)
 #     group_counts = subset[color_by_col].value_counts()
@@ -518,18 +844,18 @@ ratio_types = list(ratios_df['Ratio_Type'].unique())
 #     plt.tight_layout()
 #     plt.savefig(os.path.join(output_dir, f"{unit}.png"))
 
-    # plt.show()
+#     # plt.show()
 
-img_path = r"C:\Users\jvill\Documents\integrated_pipeline\WSI_data\WSI_data\Ratio\S21-K21_198_3-Collagen-ratio.tif"
-img = tifffile.imread(img_path)
+# img_path = r"C:\Users\jvill\Documents\integrated_pipeline\WSI_data\WSI_data\Ratio\S21-K21_198_3-Collagen-ratio.tif"
+# img = tifffile.imread(img_path)
 
-# dataframe_path = r"C:\Users\jvill\Documents\integrated_pipeline\WSI_data\WSI_data\CODEX_clusters-regions_masks_output_csv\S21_filtered-ratios.csv"
-# df = pd.read_csv(dataframe_path)
-visualizer.plot_topographical_intensity_map(
-    img,  
-    sigma=5,              # Smooths the terrain
-    cmap='jet',           # Vibrant intensity map
-    elevation=40, 
-    azimuth=90, 
-    output_dir=output_path
-)
+# # dataframe_path = r"C:\Users\jvill\Documents\integrated_pipeline\WSI_data\WSI_data\CODEX_clusters-regions_masks_output_csv\S21_filtered-ratios.csv"
+# # df = pd.read_csv(dataframe_path)
+# visualizer.plot_topographical_intensity_map(
+#     img,  
+#     sigma=5,              # Smooths the terrain
+#     cmap='jet',           # Vibrant intensity map
+#     elevation=40, 
+#     azimuth=90, 
+#     output_dir=output_path
+# )

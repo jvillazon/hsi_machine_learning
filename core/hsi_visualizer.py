@@ -134,10 +134,17 @@ class HSI_Visualizer:
         Creates and saves a standalone legend image.
         """
         import matplotlib.pyplot as plt
+        import os
+        
+        # Create parent directory if it doesn't exist
+        parent_dir = os.path.dirname(output_path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+            
         fig = plt.figure(figsize=(3, 2))
         fig.legend(handles=patches, title=title, loc='center', frameon=True)
         plt.axis('off')
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.savefig(output_path, dpi=600, bbox_inches='tight')
         plt.close(fig)
         # print(f"    Saved standalone legend to {output_path}")
 
@@ -383,6 +390,24 @@ class HSI_Visualizer:
             title += f" from Image {img_idx+1}"
         if prediction is not None and self.molecule_names is not None:
             prob_str = f" (p={probabilities[prediction]:.3f})" if probabilities is not None else ""
+            title += f" ΓåÆ {self.molecule_names[prediction]}{prob_str}"
+        ax_spectrum.set_title(title, fontsize=11, fontweight='bold')
+        ax_spectrum.set_xlabel("Wavenumber (cmΓü╗┬╣)", fontsize=10)
+        ax_spectrum.set_ylabel("Normalized Intensity", fontsize=10)
+        ax_spectrum.grid(True, alpha=0.3)
+        
+        # Plot probabilities if provided
+        if probabilities is not None and prediction is not None:
+            sorted_indices = np.argsort(probabilities)[::-1][:5]
+            sorted_probs = probabilities[sorted_indices]
+            sorted_names = [self.molecule_names[i] for i in sorted_indices]
+            
+            colors = ['green' if i == prediction else 'gray' for i in sorted_indices]
+            ax_prob.barh(range(len(sorted_probs)), sorted_probs, color=colors)
+        if img_idx is not None:
+            title += f" from Image {img_idx+1}"
+        if prediction is not None and self.molecule_names is not None:
+            prob_str = f" (p={probabilities[prediction]:.3f})" if probabilities is not None else ""
             title += f" → {self.molecule_names[prediction]}{prob_str}"
         ax_spectrum.set_title(title, fontsize=11, fontweight='bold')
         ax_spectrum.set_xlabel("Wavenumber (cm⁻¹)", fontsize=10)
@@ -467,7 +492,7 @@ class HSI_Visualizer:
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         
         if output_path:
-            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            plt.savefig(output_path, dpi=600, bbox_inches='tight')
             print(f"Saved spectral grid plot to {output_path}")
             
         plt.show()
@@ -537,7 +562,7 @@ class HSI_Visualizer:
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         
         if output_path:
-            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            plt.savefig(output_path, dpi=600, bbox_inches='tight')
             print(f"Saved class averages grid plot to {output_path}")
             
         plt.show()
@@ -640,8 +665,68 @@ class HSI_Visualizer:
         except Exception as e:
             print(f"Warning: failed to save probability stack for {img_path}: {e}")
 
+
+
+    def _instance_masking(self, mask, dilations=2, min_instance_size=250):
+        """
+        Apply dilation and size filtering to an instance mask.
+        
+        Args:
+            mask: 2D numpy array of the instance mask (binary or labeled)
+            dilations: Number of dilation iterations to apply
+            min_instance_size: Minimum size (in pixels) for an instance to be kept
+
+        Returns:
+            List of dicts with instance metadata (label, padded_slice, instance_mask, centroid_x, centroid_y)
+        """
+        # Label mask for instance segmentation
+        labeled_mask, num_features = ndi.label(mask > 0)
+        if num_features == 0:
+            return None
+        
+        # Identify valid instances and pre-calculate their metadata
+        object_slices = ndi.find_objects(labeled_mask)
+        instance_metadata = []
+        
+        for label, obj_slice in enumerate(object_slices, start=1):
+            if obj_slice is None:
+                continue
+
+            y_slice, x_slice = obj_slice
+            y_start = max(0, y_slice.start - dilations)
+            y_end = min(labeled_mask.shape[0], y_slice.stop + dilations)
+            x_start = max(0, x_slice.start - dilations)
+            x_end = min(labeled_mask.shape[1], x_slice.stop + dilations)
+            
+            padded_slice = (slice(y_start, y_end), slice(x_start, x_end))
+            local_labels = labeled_mask[padded_slice]
+            instance_mask = local_labels == label
+
+            if int(np.sum(instance_mask)) < min_instance_size:
+                continue
+
+            # Dilate mask if requested (using original logic: dilations-1)
+            if dilations > 0:
+                instance_mask = ndi.binary_dilation(instance_mask, iterations=dilations-1)
+
+            # Centroids
+            rows, cols = np.nonzero(local_labels == label)
+            rows += padded_slice[0].start
+            cols += padded_slice[1].start
+            centroid_y = int(np.mean(rows))
+            centroid_x = int(np.mean(cols))
+
+            instance_metadata.append({
+                'label': label,
+                'padded_slice': padded_slice,
+                'instance_mask': instance_mask,
+                'centroid_x': centroid_x,
+                'centroid_y': centroid_y
+            })
+
     def apply_rf_masking(self, prediction_csv_path=None, ratio_tiff_path=None, mask_list_path=None, prefix='CODEX', results_per_unit=None, 
-                        subgroups=None, img_name=None, Source_ID=None, classes_to_ignore=None, group_subclasses=False,dilations=2, min_instance_size=250):
+                        subgroups=None, img_name=None, Source_ID=None, classes_to_ignore=None, group_subclasses=False,dilations=2, min_instance_size=250,
+                        mask_dict=None):
         """
         Apply masks and quantify predictions or ratios for each instance.
         
@@ -657,7 +742,9 @@ class HSI_Visualizer:
             Source_ID: Explicit source name (formerly sample_name)
             classes_to_ignore: List of class names to ignore in quantification (default: ['Masked', 'Kidney Background', 'No Match'])
             group_subclasses: If True, consolidates counts of subclasses into their overarching ' Mix' superclass
-            
+            mask_dict: Optional dictionary mapping unit names to mask stack slices (keys are indeces in mask_img)
+
+
         Returns:
             Dictionary with quantified data per unit and instance
         """
@@ -666,6 +753,9 @@ class HSI_Visualizer:
         
         if prediction_csv_path is not None and ratio_tiff_path is not None:
             raise ValueError("Provide only one of prediction_csv_path or ratio_tiff_path, not both")
+    
+
+
         # Determine mode
         is_prediction_mode = prediction_csv_path is not None
 
@@ -708,102 +798,156 @@ class HSI_Visualizer:
         
         # Process each mask file
         for mask_file in tqdm(mask_files, desc="Processing masks"):
+
             mask_basename = os.path.basename(mask_file)
-            
-            # --- EXTRACT NAMES FROM FILENAME FIRST ---
-            unit_name = mask_basename
-            if prefix and unit_name.startswith(f"{prefix}-"):
-                unit_name = unit_name[len(prefix)+1:]
-            
-            for suffix in ['-mask.tif', '-Mask.tif']:
-                if unit_name.endswith(suffix):
-                    unit_name = unit_name[:-len(suffix)]
-            
-            subgroup = None
-            if "_" in unit_name and subgroups is not None:
-                unit_parts = unit_name.split('_')
-                if len(unit_parts) == 2:
-                    match0 = next((s for s in subgroups if s.lower() == unit_parts[0].lower()), None)
-                    match1 = next((s for s in subgroups if s.lower() == unit_parts[1].lower()), None)
-                    if match0:
-                        subgroup = match0
-                        unit_name = unit_parts[1]
-                    elif match1:
-                        subgroup = match1
-                        unit_name = unit_parts[0]
-                
-                if subgroup is None:
-                    for i, part in enumerate(unit_parts):
-                        match = next((s for s in subgroups if s.lower() == part.lower()), None)
-                        if match:
-                            subgroup = match
-                            remaining = [p for j, p in enumerate(unit_parts) if i != j]
-                            unit_name = "_".join(remaining)
-                            break
-                
-            
-            if subgroups is not None and subgroup is None:
-                continue
 
             # Load mask
             mask_img = tifffile.imread(mask_file)
             if mask_img.ndim > 2:
                 mask_img = np.squeeze(mask_img)
             
-            if mask_img.ndim != 2:
-                print(f"Skipping {mask_basename}: expected 2D mask, got shape {mask_img.shape}")
-                continue
+            if mask_img.ndim == 3 and mask_img.shape[0] == 1:
+                mask_img = mask_img[0]
             
-            # Resize mask if needed
-            if mask_img.shape != target_shape:
-                print(f"  Resizing mask {mask_basename} from {mask_img.shape} to {target_shape} due to downsampling...")
-                zoom_factors = (target_shape[0] / mask_img.shape[0], target_shape[1] / mask_img.shape[1])
-                mask_img = ndi.zoom(mask_img, zoom_factors, order=0)
-            
-            # Label mask for instance segmentation
-            labeled_mask, num_features = ndi.label(mask_img > 0)
-            if num_features == 0:
-                continue
-            
-            # Identify valid instances and pre-calculate their metadata
-            object_slices = ndi.find_objects(labeled_mask)
-            instance_metadata = []
-            
-            for label, obj_slice in enumerate(object_slices, start=1):
-                if obj_slice is None:
-                    continue
+            if mask_img.ndim == 3 and mask_img.shape[0] > 1:
+                if mask_dict is None:
+                    raise Exception(f"Mask image {mask_basename} has multiple channels but no mask_dict provided for indexing.")
+                else:
+                    ## Extract names from dictionary keys and match to filename
+                    for idx, unit in mask_dict.items():
+                        mask_slice = mask_img[idx]
+                        if mask_slice.ndim != 2: 
+                            print(f"Skipping {mask_basename} channel {idx}: expected 2D mask, got shape {mask_slice.shape}")
+                            continue
 
-                y_slice, x_slice = obj_slice
-                y_start = max(0, y_slice.start - dilations)
-                y_end = min(labeled_mask.shape[0], y_slice.stop + dilations)
-                x_start = max(0, x_slice.start - dilations)
-                x_end = min(labeled_mask.shape[1], x_slice.stop + dilations)
+                        unit_name = unit
+                        if prefix and unit_name.startswith(f"{prefix}-"):
+                            unit_name = unit_name[len(prefix)+1:]
+                        for suffix in ['-mask.tif', '-Mask.tif']:
+                            if unit_name.endswith(suffix):
+                                unit_name = unit_name[:-len(suffix)]
+
+                        # Identify subgroup if applicable
+                        subgroup = None
+                        if "_" in unit_name and subgroups is not None:
+                            unit_parts = unit_name.split('_')
+                            if len(unit_parts) == 2:
+                                match0 = next((s for s in subgroups if s.lower() == unit_parts[0].lower()), None)
+                                match1 = next((s for s in subgroups if s.lower() == unit_parts[1].lower()), None)
+                                if match0:
+                                    subgroup = match0
+                                    unit_name = unit_parts[1]
+                                elif match1:
+                                    subgroup = match1
+                                    unit_name = unit_parts[0]
+                            
+                            if subgroup is None:
+                                for i, part in enumerate(unit_parts):
+                                    match = next((s for s in subgroups if s.lower() == part.lower()), None)
+                                    if match:
+                                        subgroup = match
+                                        remaining = [p for j, p in enumerate(unit_parts) if i != j]
+                                        unit_name = "_".join(remaining)
+                                        break
+                        # Convert mask to boolean
+                        mask_slice = mask_slice > 0
+                        if not np.any(mask_slice) or np.all(mask_slice == 0):
+                            print(f"Skipping {mask_basename} channel {idx} | {unit_name}")
+                            continue
+                        
+                        instance_metadata = self._instance_masking(
+                            mask_slice, 
+                            dilations=dilations, 
+                            min_instance_size=min_instance_size
+                            )
+                    
+
+            elif mask_img.ndim == 2:
+                # --- EXTRACT NAMES FROM FILENAME FIRST ---
+                unit_name = mask_basename
+                if prefix and unit_name.startswith(f"{prefix}-"):
+                    unit_name = unit_name[len(prefix)+1:]
                 
-                padded_slice = (slice(y_start, y_end), slice(x_start, x_end))
-                local_labels = labeled_mask[padded_slice]
-                instance_mask = local_labels == label
-
-                if int(np.sum(instance_mask)) < min_instance_size:
+                for suffix in ['-mask.tif', '-Mask.tif']:
+                    if unit_name.endswith(suffix):
+                        unit_name = unit_name[:-len(suffix)]
+                
+                subgroup = None
+                if "_" in unit_name and subgroups is not None:
+                    unit_parts = unit_name.split('_')
+                    if len(unit_parts) == 2:
+                        match0 = next((s for s in subgroups if s.lower() == unit_parts[0].lower()), None)
+                        match1 = next((s for s in subgroups if s.lower() == unit_parts[1].lower()), None)
+                        if match0:
+                            subgroup = match0
+                            unit_name = unit_parts[1]
+                        elif match1:
+                            subgroup = match1
+                            unit_name = unit_parts[0]
+                    
+                    if subgroup is None:
+                        for i, part in enumerate(unit_parts):
+                            match = next((s for s in subgroups if s.lower() == part.lower()), None)
+                            if match:
+                                subgroup = match
+                                remaining = [p for j, p in enumerate(unit_parts) if i != j]
+                                unit_name = "_".join(remaining)
+                                break
+                    
+                
+                if subgroups is not None and subgroup is None:
                     continue
+                
+                # # Resize mask if needed
+                # if mask_img.shape != target_shape:
+                #     print(f"  Resizing mask {mask_basename} from {mask_img.shape} to {target_shape} due to downsampling...")
+                #     zoom_factors = (target_shape[0] / mask_img.shape[0], target_shape[1] / mask_img.shape[1])
+                #     mask_img = ndi.zoom(mask_img, zoom_factors, order=0)
+                
+                # Label mask for instance segmentation
+                labeled_mask, num_features = ndi.label(mask_img > 0)
+                if num_features == 0:
+                    continue
+                
+                # Identify valid instances and pre-calculate their metadata
+                object_slices = ndi.find_objects(labeled_mask)
+                instance_metadata = []
+                
+                for label, obj_slice in enumerate(object_slices, start=1):
+                    if obj_slice is None:
+                        continue
 
-                # Dilate mask if requested (using original logic: dilations-1)
-                if dilations > 0:
-                    instance_mask = ndi.binary_dilation(instance_mask, iterations=dilations-1)
+                    y_slice, x_slice = obj_slice
+                    y_start = max(0, y_slice.start - dilations)
+                    y_end = min(labeled_mask.shape[0], y_slice.stop + dilations)
+                    x_start = max(0, x_slice.start - dilations)
+                    x_end = min(labeled_mask.shape[1], x_slice.stop + dilations)
+                    
+                    padded_slice = (slice(y_start, y_end), slice(x_start, x_end))
+                    local_labels = labeled_mask[padded_slice]
+                    instance_mask = local_labels == label
 
-                # Centroids
-                rows, cols = np.nonzero(local_labels == label)
-                rows += padded_slice[0].start
-                cols += padded_slice[1].start
-                centroid_y = int(np.mean(rows))
-                centroid_x = int(np.mean(cols))
+                    if int(np.sum(instance_mask)) < min_instance_size:
+                        continue
 
-                instance_metadata.append({
-                    'label': label,
-                    'padded_slice': padded_slice,
-                    'instance_mask': instance_mask,
-                    'centroid_x': centroid_x,
-                    'centroid_y': centroid_y
-                })
+                    # Dilate mask if requested (using original logic: dilations-1)
+                    if dilations > 0:
+                        instance_mask = ndi.binary_dilation(instance_mask, iterations=dilations-1)
+
+                    # Centroids
+                    rows, cols = np.nonzero(local_labels == label)
+                    rows += padded_slice[0].start
+                    cols += padded_slice[1].start
+                    centroid_y = int(np.mean(rows))
+                    centroid_x = int(np.mean(cols))
+
+                    instance_metadata.append({
+                        'label': label,
+                        'padded_slice': padded_slice,
+                        'instance_mask': instance_mask,
+                        'centroid_x': centroid_x,
+                        'centroid_y': centroid_y
+                    })
 
             if not instance_metadata:
                 continue
@@ -934,6 +1078,344 @@ class HSI_Visualizer:
                     })
         df = pd.DataFrame.from_records(records)
         return df
+
+
+    def _parse_mask_basename(self, basename, prefix, subgroups):
+        """Return cleaned unit_name and optional subgroup from a mask basename."""
+        unit_name = basename
+        if prefix and unit_name.startswith(f"{prefix}-"):
+            unit_name = unit_name[len(prefix) + 1:]
+
+        for suffix in ['-mask.tif', '-Mask.tif']:
+            if unit_name.endswith(suffix):
+                unit_name = unit_name[:-len(suffix)]
+
+        subgroup = None
+        if "_" in unit_name and subgroups is not None:
+            unit_parts = unit_name.split("_")
+            if len(unit_parts) == 2:
+                match0 = next((s for s in subgroups if s.lower() == unit_parts[0].lower()), None)
+                match1 = next((s for s in subgroups if s.lower() == unit_parts[1].lower()), None)
+                if match0:
+                    subgroup = match0
+                    unit_name = unit_parts[1]
+                elif match1:
+                    subgroup = match1
+                    unit_name = unit_parts[0]
+
+            if subgroup is None:
+                for i, part in enumerate(unit_parts):
+                    match = next((s for s in subgroups if s.lower() == part.lower()), None)
+                    if match:
+                        subgroup = match
+                        remaining = [p for j, p in enumerate(unit_parts) if i != j]
+                        unit_name = "_".join(remaining)
+                        break
+
+        return unit_name, subgroup
+
+
+    def apply_unified_masking(self, *, mode, data_path=None, mask_list_path, prefix='CODEX', mask_dict=None,
+                              subgroups=None, img_name=None, classes_to_ignore=None,
+                              group_subclasses=False, dilations=2, min_instance_size=100, output_flat_csv=None):
+        """
+        Unified masking quantification for three modes: 'predictions', 'ratios', 'sam_classmap'.
+
+        Returns a long-form pandas DataFrame with instance-level rows suitable for pivoting
+        into the same `wide_df` shape used by `integratedPipeline.py`.
+        """
+        if mode not in ('predictions', 'ratios', 'sam_classmap'):
+            raise ValueError("mode must be one of 'predictions', 'ratios', 'sam_classmap'")
+
+        if mask_list_path is None:
+            raise ValueError('mask_list_path is required')
+
+        if mode in ('predictions',) and data_path is None:
+            raise ValueError('data_path (CSV) required for predictions mode')
+
+        if mode == 'ratios' and data_path is None:
+            raise ValueError('data_path (ratio TIFF) required for ratios mode')
+
+        # Defaults
+        if classes_to_ignore is None:
+            classes_to_ignore = ['Masked', 'Kidney Background', 'No Match']
+        classes_to_ignore_set = {c.strip() for c in classes_to_ignore}
+
+        # Load data sources as needed
+        data_matrix = None
+        tif_ratios = None
+        sam_class_map = None
+        ratio_basename = None
+
+        if mode == 'predictions':
+            data_df = pd.read_csv(data_path, header=None, index_col=False)
+            data_matrix = data_df.values
+            if img_name is None:
+                img_name = os.path.basename(data_path).replace('_predictions.csv', '')
+
+        elif mode == 'ratios':
+            tif_ratios = tifffile.TiffFile(data_path)
+            num_pages = len(tif_ratios.pages)
+            ratio_basename = os.path.splitext(os.path.basename(data_path))[0]
+            if img_name is None:
+                img_name = os.path.splitext(os.path.basename(data_path))[0]
+                if '-ratio' in img_name:
+                    img_name = img_name.split('-')[0]
+
+        elif mode == 'sam_classmap':  # sam_classmap
+            sam_class_map = tifffile.imread(data_path)
+            if img_name is None:
+                img_name = os.path.splitext(os.path.basename(data_path))[0]
+
+        records = []
+
+        mask_files = glob(os.path.join(mask_list_path, '*-mask.tif'))
+        if not mask_files:
+            raise ValueError(f'No mask TIFF files found in {mask_list_path}')
+
+        for mask_file in tqdm(mask_files, desc='Processing masks (unified)'):
+            mask_basename = os.path.basename(mask_file)
+            mask_img = tifffile.imread(mask_file)
+            if mask_img.ndim > 2:
+                mask_img = np.squeeze(mask_img)
+
+            # Multi-channel mask handling
+            if mask_img.ndim == 3 and mask_img.shape[0] > 1:
+                if mask_dict is None:
+                    raise Exception(f"Mask image {mask_basename} has multiple channels but no mask_dict provided for indexing.")
+
+                for idx, unit in mask_dict.items():
+                    try:
+                        mask_slice = mask_img[idx]
+                    except Exception:
+                        print(f"Skipping {mask_basename} channel {idx}: index error")
+                        continue
+
+                    unit_name = unit
+                    # if prefix and unit_name.startswith(f"{prefix}-"):
+                    #     unit_name = unit_name[len(prefix) + 1:]
+
+                    unit_name, subgroup = self._parse_mask_basename(unit_name, prefix, subgroups)
+
+                    mask_slice = mask_slice > 0
+                    if not np.any(mask_slice):
+                        continue
+
+                    instance_metadata = self._instance_masking(mask_slice, dilations=dilations, min_instance_size=min_instance_size)
+
+                    for inst in instance_metadata:
+                        npx = int(np.sum(inst['instance_mask']))
+                        base_meta = {
+                            'Image_Name': img_name,
+                            'Unit': unit_name,
+                            'Instance_Label': f"{int(inst['label'])}",
+                            'Source_ID': img_name.split('-')[0] if img_name else None,
+                            'Group_ID': subgroup,
+                            'centroid_x': inst.get('centroid_x', None),
+                            'centroid_y': inst.get('centroid_y', None),
+                            'n_pixels': npx
+                        }
+
+                        if mode == 'predictions':
+                            preds = data_matrix[inst['padded_slice']][inst['instance_mask']]
+                            if preds.size == 0:
+                                continue
+                            unique, counts = np.unique(preds, return_counts=True)
+                            class_counts = {str(k).strip(): int(v) for k, v in zip(unique, counts)}
+                            for c in list(classes_to_ignore_set):
+                                if c in class_counts:
+                                    del class_counts[c]
+
+                            if group_subclasses:
+                                all_classes = self.molecule_names if hasattr(self, 'molecule_names') and self.molecule_names else list(class_counts.keys())
+                                mix_classes = [c.strip() for c in all_classes if isinstance(c, str) and 'Mix' in c]
+                                for mix_class in mix_classes:
+                                    superclass = mix_class.replace(' Mix', '')
+                                    subclasses = [c for c in class_counts.keys() if superclass in c and c != mix_class]
+                                    if subclasses:
+                                        combined = class_counts.get(mix_class, 0)
+                                        for sub in subclasses:
+                                            combined += class_counts.get(sub, 0)
+                                            class_counts.pop(sub, None)
+                                        class_counts[mix_class] = combined
+
+                            total = sum(class_counts.values())
+                            if total == 0:
+                                continue
+                            for mol, cnt in class_counts.items():
+                                pct = (cnt / total) * 100.0
+                                rec = base_meta.copy()
+                                rec.update({'Molecule': mol, 'Percentage': float(pct)})
+                                records.append(rec)
+
+                        elif mode == 'sam_classmap':
+                            if self.molecule_names is None:
+                                raise ValueError('HSI_Visualizer.molecule_names not set; required for sam_classmap mode')
+                            patch = sam_class_map[inst['padded_slice']][inst['instance_mask']]
+                            labels, counts = np.unique(patch, return_counts=True)
+                            mol_names_ext = ['No Match'] + list(self.molecule_names)
+                            name_counts = {mol_names_ext[int(lbl)]: int(cnt) for lbl, cnt in zip(labels, counts) if int(lbl) < len(mol_names_ext)}
+                            # Filter No Match
+                            name_counts.pop('No Match', None)
+                            total = sum(name_counts.values())
+                            if total == 0:
+                                continue
+                            for mol, cnt in name_counts.items():
+                                pct = (cnt / total) * 100.0
+                                rec = base_meta.copy()
+                                rec.update({'Molecule': mol, 'Percentage': float(pct)})
+                                records.append(rec)
+
+                        else:  # ratios
+                            # For ratios, handle each page separately
+                            for slice_idx in range(num_pages):
+                                data_slice = tif_ratios.pages[slice_idx].asarray()
+                                r_type_slice = f"{ratio_basename}_{slice_idx + 1}" if num_pages > 1 else ratio_basename
+                                masked_vals = data_slice[inst['padded_slice']][inst['instance_mask']]
+                                vals = masked_vals[(masked_vals > 0) & np.isfinite(masked_vals)]
+                                if vals.size == 0:
+                                    continue
+                                mean_ratio = float(np.nanmean(vals))
+                                rec = base_meta.copy()
+                                rec.update({'Ratio_Type': r_type_slice, 'Mean_Ratio': mean_ratio})
+                                records.append(rec)
+
+            else:
+                # Single-channel mask
+                unit_name, subgroup = self._parse_mask_basename(mask_basename, prefix, subgroups)
+                if subgroups is not None and subgroup is None:
+                    continue
+
+                mask_slice = mask_img > 0
+                labeled_mask, num_features = ndi.label(mask_slice)
+                if num_features == 0:
+                    continue
+
+                object_slices = ndi.find_objects(labeled_mask)
+                instance_metadata = []
+                for label, obj_slice in enumerate(object_slices, start=1):
+                    if obj_slice is None:
+                        continue
+                    y_slice, x_slice = obj_slice
+                    y_start = max(0, y_slice.start - dilations)
+                    y_end = min(labeled_mask.shape[0], y_slice.stop + dilations)
+                    x_start = max(0, x_slice.start - dilations)
+                    x_end = min(labeled_mask.shape[1], x_slice.stop + dilations)
+                    padded_slice = (slice(y_start, y_end), slice(x_start, x_end))
+                    local_labels = labeled_mask[padded_slice]
+                    instance_mask = local_labels == label
+                    if int(np.sum(instance_mask)) < min_instance_size:
+                        continue
+                    if dilations > 0:
+                        instance_mask = ndi.binary_dilation(instance_mask, iterations=dilations - 1)
+                    rows, cols = np.nonzero(local_labels == label)
+                    rows += padded_slice[0].start
+                    cols += padded_slice[1].start
+                    centroid_y = int(np.mean(rows))
+                    centroid_x = int(np.mean(cols))
+                    instance_metadata.append({'label': label, 'padded_slice': padded_slice, 'instance_mask': instance_mask, 'centroid_x': centroid_x, 'centroid_y': centroid_y})
+
+                for inst in instance_metadata:
+                    npx = int(np.sum(inst['instance_mask']))
+                    base_meta = {
+                        'Image_Name': img_name,
+                        'Unit': unit_name,
+                        'Instance_Label': f"{int(inst['label'])}",
+                        'Source_ID': (img_name.split('-')[0] if img_name else None),
+                        'Group_ID': subgroup,
+                        'centroid_x': inst.get('centroid_x', None),
+                        'centroid_y': inst.get('centroid_y', None),
+                        'n_pixels': npx
+                    }
+
+                    if mode == 'predictions':
+                        preds = data_matrix[inst['padded_slice']][inst['instance_mask']]
+                        if preds.size == 0:
+                            continue
+                        unique, counts = np.unique(preds, return_counts=True)
+                        class_counts = {str(k).strip(): int(v) for k, v in zip(unique, counts)}
+                        for c in list(classes_to_ignore_set):
+                            if c in class_counts:
+                                del class_counts[c]
+
+                        if group_subclasses:
+                            all_classes = self.molecule_names if hasattr(self, 'molecule_names') and self.molecule_names else list(class_counts.keys())
+                            mix_classes = [c.strip() for c in all_classes if isinstance(c, str) and 'Mix' in c]
+                            for mix_class in mix_classes:
+                                superclass = mix_class.replace(' Mix', '')
+                                subclasses = [c for c in class_counts.keys() if superclass in c and c != mix_class]
+                                if subclasses:
+                                    combined = class_counts.get(mix_class, 0)
+                                    for sub in subclasses:
+                                        combined += class_counts.get(sub, 0)
+                                        class_counts.pop(sub, None)
+                                    class_counts[mix_class] = combined
+
+                        total = sum(class_counts.values())
+                        if total == 0:
+                            continue
+                        for mol, cnt in class_counts.items():
+                            pct = (cnt / total) * 100.0
+                            rec = base_meta.copy()
+                            rec.update({'Molecule': mol, 'Percentage': float(pct)})
+                            records.append(rec)
+
+                    elif mode == 'sam_classmap':
+                        if self.molecule_names is None:
+                            raise ValueError('HSI_Visualizer.molecule_names not set; required for sam_classmap mode')
+                        patch = sam_class_map[inst['padded_slice']][inst['instance_mask']]
+                        labels, counts = np.unique(patch, return_counts=True)
+                        mol_names_ext = ['No Match'] + list(self.molecule_names)
+                        name_counts = {mol_names_ext[int(lbl)]: int(cnt) for lbl, cnt in zip(labels, counts) if int(lbl) < len(mol_names_ext)}
+                        name_counts.pop('No Match', None)
+                        total = sum(name_counts.values())
+                        if total == 0:
+                            continue
+                        for mol, cnt in name_counts.items():
+                            pct = (cnt / total) * 100.0
+                            rec = base_meta.copy()
+                            rec.update({'Molecule': mol, 'Percentage': float(pct)})
+                            records.append(rec)
+
+                    else:  # ratios
+                        for slice_idx in range(num_pages):
+                            data_slice = tif_ratios.pages[slice_idx].asarray()
+                            r_type_slice = f"{ratio_basename}_{slice_idx + 1}" if num_pages > 1 else ratio_basename
+                            masked_vals = data_slice[inst['padded_slice']][inst['instance_mask']]
+                            vals = masked_vals[(masked_vals > 0) & np.isfinite(masked_vals)]
+                            if vals.size == 0:
+                                continue
+                            mean_ratio = float(np.nanmean(vals))
+                            rec = base_meta.copy()
+                            rec.update({'Ratio_Type': r_type_slice, 'Mean_Ratio': mean_ratio})
+                            records.append(rec)
+
+        # Close tif handle if opened
+        if tif_ratios is not None:
+            tif_ratios.close()
+
+        if not records:
+            raise ValueError('No valid instances found across all masks.')
+
+        df_out = pd.DataFrame.from_records(records)
+        # Ensure consistent column ordering favorable for pivoting
+        index_cols = ['Image_Name', 'Unit', 'Instance_Label', 'Source_ID']
+        if 'Group_ID' in df_out.columns and df_out['Group_ID'].notna().any():
+            index_cols.append('Group_ID')
+
+        # Optionally write flat output as parquet when requested.
+        if output_flat_csv:
+            output_path = str(output_flat_csv)
+            if output_path.lower().endswith('.parquet'):
+                try:
+                    df_out.to_parquet(output_path, index=False)
+                except ImportError:
+                    fallback_path = output_path[:-8] + '.csv'
+                    df_out.to_csv(fallback_path, index=False)
+            else:
+                df_out.to_csv(output_path, index=False)
+
+        return df_out
 
 
     def quantify_unit_ratio_means_nested(self, units_dict, unit_mappings=None):
@@ -1136,7 +1618,7 @@ class HSI_Visualizer:
             safe_prefix = title_prefix.replace(' ', '_').replace(':', '').replace('/', '_').lower()
             safe_groups = "_".join(grouping_cols).lower()
             filename = f"{safe_prefix}_{safe_groups}_composition.png"
-            plt.savefig(os.path.join(output_dir, filename), dpi=300, bbox_inches='tight')
+            plt.savefig(os.path.join(output_dir, filename), dpi=600, bbox_inches='tight')
             
         if show_plots:
             plt.show()
@@ -1298,7 +1780,7 @@ class HSI_Visualizer:
             
             if output_dir:
                 mol_safe = str(molecule).replace(' ', '_').replace(':', '').replace('/', '_')
-                plt.savefig(os.path.join(unit_dir, f"{mol_safe}_across_images.png"), dpi=300, bbox_inches='tight')
+                plt.savefig(os.path.join(unit_dir, f"{mol_safe}_across_images.png"), dpi=600, bbox_inches='tight')
                 
             if show_plots:
                 plt.show()
@@ -1457,7 +1939,7 @@ class HSI_Visualizer:
 
             # Save the main heatmap (no colorbar embedded)
             save_path = os.path.join(output_dir, f"spatial_gradient_{mol_safe}.png")
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path, dpi=600, bbox_inches='tight')
             print(f"  Saved spatial gradient heatmap: {save_path}")
 
             # Save the colorbar as a separate image
@@ -1473,7 +1955,7 @@ class HSI_Visualizer:
             cbar.set_label(cbar_label, fontsize=10)
             cbar_fig.tight_layout()
             cbar_path = os.path.join(output_dir, f"spatial_gradient_{mol_safe}_colorbar.png")
-            cbar_fig.savefig(cbar_path, dpi=300, bbox_inches='tight')
+            cbar_fig.savefig(cbar_path, dpi=600, bbox_inches='tight')
             plt.close(cbar_fig)
             print(f"  Saved colorbar: {cbar_path}")
 
@@ -1702,7 +2184,7 @@ class HSI_Visualizer:
 
             # Save main heatmap (no embedded colorbar)
             save_path = os.path.join(output_dir, f"spatial_gradient_multi_{mol_safe}.png")
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path, dpi=600, bbox_inches='tight')
             print(f"  Saved spatial gradient heatmap: {save_path}")
 
             # Save standalone colorbar
@@ -1719,7 +2201,7 @@ class HSI_Visualizer:
             cbar.set_label(cbar_label, fontsize=10)
             cbar_fig.tight_layout()
             cbar_path = os.path.join(output_dir, f"spatial_gradient_multi_{mol_safe}_colorbar.png")
-            cbar_fig.savefig(cbar_path, dpi=300, bbox_inches='tight')
+            cbar_fig.savefig(cbar_path, dpi=600, bbox_inches='tight')
             plt.close(cbar_fig)
             print(f"  Saved colorbar: {cbar_path}")
 
@@ -1973,7 +2455,7 @@ class HSI_Visualizer:
                 mol_safe = '_'.join(str(m).replace(' ', '_').replace(':', '').replace('/', '_') for m in query_list)
                 spatial_safe = spatial_col.replace(' ', '_')
                 save_path = os.path.join(output_dir, f"spatial_gradient_centroid_{img_file_label}_{spatial_safe}_{mol_safe}.png")
-                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                plt.savefig(save_path, dpi=600, bbox_inches='tight')
                 
                 # Colorbar
                 cbar_fig, cbar_ax = plt.subplots(figsize=(1.2, max(3, n_rows * 0.05)))
@@ -1982,7 +2464,7 @@ class HSI_Visualizer:
                 cbar.set_label(cbar_label, fontsize=10)
                 cbar_fig.tight_layout()
                 cbar_path = os.path.join(output_dir, f"spatial_gradient_centroid_{img_file_label}_{spatial_safe}_{mol_safe}_colorbar.png")
-                cbar_fig.savefig(cbar_path, dpi=300, bbox_inches='tight')
+                cbar_fig.savefig(cbar_path, dpi=600, bbox_inches='tight')
                 plt.close(cbar_fig)
 
             if show_plots:
@@ -2260,7 +2742,7 @@ class HSI_Visualizer:
                     # ── Axes cosmetics ────────────────────────────────
                     ax.set_xlim(x_min - pad_x, x_max + pad_x)
                     ax.set_ylim(y_max + pad_y, y_min - pad_y)   # image-style: y inverted
-                    ax.set_aspect('equal')
+                    # ax.set_aspect('equal')
                     ax.set_xticks([])
                     ax.set_yticks([])
                     ax.spines[['top', 'right', 'left', 'bottom']].set_visible(False)
@@ -2403,7 +2885,7 @@ class HSI_Visualizer:
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
             output_path = os.path.join(output_dir, f"topographical_map.png")
-            plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+            plt.savefig(output_path, dpi=600, bbox_inches='tight', facecolor='white')
             print(f"Saved topographical map to {output_path}")
             
         if show_plots:
@@ -2603,11 +3085,11 @@ class HSI_Visualizer:
             n_cols = heatmap_matrix.shape[1]  # Number of molecules/ratios
             
             # Increased scaling: ~0.5 inches per row, ~1.0 inches per column for better readability
-            fig_width = max(6, 1.0 * n_cols + 2.5)  # Increased from 0.7 to 1.0
-            fig_height = max(3, min(14, 0.5 * n_rows + 2.5))  # Increased from 0.35 to 0.5, increased max height
+            fig_width = max(3, 1.0 * n_cols + 2.5)  # Increased from 0.7 to 1.0
+            fig_height = max(3, min(10, 0.5 * n_rows + 2.5))  # Increased from 0.35 to 0.5, increased max height
 
-            fig_width = max(6, 0.7 * n_cols + 2.5)
-            fig_height = max(3, min(10, 0.35 * n_rows + 2.5))
+            # fig_width = max(6, 0.7 * n_cols + 2.5)
+            # fig_height = max(3, min(10, 0.35 * n_rows + 2.5))
             
             # Create heatmap visualization
             fig, ax = plt.subplots(figsize=(fig_width, fig_height))
@@ -2634,7 +3116,7 @@ class HSI_Visualizer:
             cbar.outline.set_edgecolor('black')
             cbar_fig.tight_layout()
             cbar_path = os.path.join(output_dir, f"heatmap_unit_aggregated_{data_type}_colorbar.png")
-            cbar_fig.savefig(cbar_path, dpi=300, bbox_inches='tight', facecolor='white')
+            cbar_fig.savefig(cbar_path, dpi=600, bbox_inches='tight', facecolor='white')
             plt.close(cbar_fig)
             print(f"  Saved colorbar: {cbar_path}")
             
@@ -2722,7 +3204,7 @@ class HSI_Visualizer:
             # Save figure
             output_path = os.path.join(output_dir, 
                                       f"heatmap_unit_aggregated_{data_type}.png")
-            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            plt.savefig(output_path, dpi=600, bbox_inches='tight')
             
             if show_plots:
                 plt.show()
@@ -2938,7 +3420,7 @@ class HSI_Visualizer:
             cbar_fig, cbar_ax = plt.subplots(figsize=(1.2, max(3, n_rows * 0.35)))
             cbar = cbar_fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), cax=cbar_ax, orientation='vertical')
             cbar.set_label('Z-score (normalized)', color='black', fontsize=14)
-            cbar_fig.savefig(os.path.join(output_dir, f"bubble_unit_aggregated_{data_type}_colorbar.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            cbar_fig.savefig(os.path.join(output_dir, f"bubble_unit_aggregated_{data_type}_colorbar.png"), dpi=600, bbox_inches='tight', facecolor='white')
             plt.close(cbar_fig)
 
             # Horizontal separators
@@ -2974,12 +3456,12 @@ class HSI_Visualizer:
             ]
             legend_ax.legend(handles=sig_handles, loc='center', frameon=True, fontsize=11, title='Significance', ncol=2)
             legend_ax.axis('off')
-            legend_fig.savefig(os.path.join(output_dir, "bubble_significance_legend.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            legend_fig.savefig(os.path.join(output_dir, "bubble_significance_legend.png"), dpi=600, bbox_inches='tight', facecolor='white')
             plt.close(legend_fig)
 
             plt.tight_layout()
             output_path = os.path.join(output_dir, f"bubble_unit_aggregated_{data_type}.png")
-            plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+            plt.savefig(output_path, dpi=600, bbox_inches='tight', facecolor='white')
             if show_plots: plt.show()
             else: plt.close(fig)
 
@@ -3163,7 +3645,7 @@ class HSI_Visualizer:
             cbar_fig, cbar_ax = plt.subplots(figsize=(1.2, max(3, n_rows * 0.35)))
             cbar = cbar_fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), cax=cbar_ax, orientation='vertical')
             cbar.set_label('Mean Ratio', color='black', fontsize=14)
-            cbar_fig.savefig(os.path.join(output_dir, "bubble_chart_raw_ratios_colorbar.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            cbar_fig.savefig(os.path.join(output_dir, "bubble_chart_raw_ratios_colorbar.png"), dpi=600, bbox_inches='tight', facecolor='white')
             plt.close(cbar_fig)
 
             # Formatting
@@ -3198,11 +3680,11 @@ class HSI_Visualizer:
             ]
             legend_ax.legend(handles=sig_handles, loc='center', frameon=True, fontsize=11, title='Significance', ncol=2)
             legend_ax.axis('off')
-            legend_fig.savefig(os.path.join(output_dir, "bubble_significance_legend_raw.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            legend_fig.savefig(os.path.join(output_dir, "bubble_significance_legend_raw.png"), dpi=600, bbox_inches='tight', facecolor='white')
             plt.close(legend_fig)
 
             plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, "bubble_chart_raw_ratios.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            plt.savefig(os.path.join(output_dir, "bubble_chart_raw_ratios.png"), dpi=600, bbox_inches='tight', facecolor='white')
             
             if show_plots: plt.show()
             else: plt.close()
@@ -3383,13 +3865,13 @@ class HSI_Visualizer:
             for s in ['right', 'top', 'left', 'bottom']: ax_r.spines[s].set_visible(False)
             ax_r.tick_params(axis='y', which='both', length=0)
             
-            ax.set_title(f"Subgroup Gradient: {display_item}", fontweight='bold', fontsize=14, pad=15)
+            ax.set_title(f"{display_item}", fontweight='bold', fontsize=14, pad=15)
             ax.set_xlabel("Subgroup", fontweight='bold', fontsize=12)
             ax.set_ylabel("Unit", fontweight='bold', fontsize=12)
             plt.tight_layout()
             
             item_safe = str(item).replace(':', '').replace('/', '_').replace(' ', '_')
-            plt.savefig(os.path.join(output_dir, f"subgroup_gradient_{item_safe}.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            plt.savefig(os.path.join(output_dir, f"subgroup_gradient_{item_safe}.png"), dpi=600, bbox_inches='tight', facecolor='white')
             plt.close()
 
             # Standalone colorbar
@@ -3400,7 +3882,7 @@ class HSI_Visualizer:
             cbar = cb_fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), cax=cb_ax, orientation='vertical')
             cbar.set_label('Relative Prob. %' if value_col == 'Percentage' else 'Mean Ratio', color='black', fontsize=12)
             cb_fig.tight_layout()
-            cb_fig.savefig(os.path.join(output_dir, f"subgroup_gradient_{item_safe}_colorbar.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            cb_fig.savefig(os.path.join(output_dir, f"subgroup_gradient_{item_safe}_colorbar.png"), dpi=600, bbox_inches='tight', facecolor='white')
             plt.close(cb_fig)
 
             print(f"  Generated subgroup gradient heatmap for {item}: {output_dir}")
@@ -3412,7 +3894,7 @@ class HSI_Visualizer:
                                             units_to_display=None, cmap='RdBu_r',
                                             min_size_to_plot=10, remove_outliers=True,
                                             show_values=True, cmap_scale=None,
-                                            cbar_label='Mean Ratio'):
+                                            cbar_label='Mean Ratio', display_significance=False):
         """
         Create a spatial gradient heatmap of ratios/molecules across ordered subgroups per unit,
         taking a wide format DataFrame where metrics are separate columns.
@@ -3500,62 +3982,66 @@ class HSI_Visualizer:
             pivot_counts = pivot_counts.reindex(index=pivot_df.index, columns=pivot_df.columns)
             item_safe = str(item).replace(':', '').replace('/', '_').replace(' ', '_')
             pivot_counts.to_csv(os.path.join(output_dir, f"subgroup_gradient_{item_safe}_counts.csv"))
+            if display_significance:
+                # Statistical variations across subgroups (on RAW data)
+                anova_results = {}
+                spearman_results = {}
+                rank_map = {sg: i for i, sg in enumerate(subgroup_order)}
 
-            # Statistical variations across subgroups (on RAW data)
-            anova_results = {}
-            spearman_results = {}
-            rank_map = {sg: i for i, sg in enumerate(subgroup_order)}
+                for unit in pivot_df.index:
+                    x_ranks = []
+                    y_means_raw = []
 
-            for unit in pivot_df.index:
-                x_ranks = []
-                y_means_raw = []
+                    for sg in valid_cols:
+                        sg_vals_raw = item_data_stats[(item_data_stats['Unit'] == unit) & (item_data_stats['Group_ID'] == sg)][item].values
+                        if len(sg_vals_raw) >= 2:
+                            x_ranks.append(rank_map[sg])
+                            y_means_raw.append(np.mean(sg_vals_raw))
 
-                for sg in valid_cols:
-                    sg_vals_raw = item_data_stats[(item_data_stats['Unit'] == unit) & (item_data_stats['Group_ID'] == sg)][item].values
-                    if len(sg_vals_raw) >= 2:
-                        x_ranks.append(rank_map[sg])
-                        y_means_raw.append(np.mean(sg_vals_raw))
+                    # 1. Welch's ANOVA (using raw data)
+                    unit_subset = item_data_stats[item_data_stats['Unit'] == unit]
+                    if unit_subset['Group_ID'].nunique() >= 2:
+                        try:
+                            import pingouin as pg
+                            aov = pg.welch_anova(data=unit_subset, dv=item, between='Group_ID')
+                            p_val = aov['p-unc'].iloc[0] if 'p-unc' in aov.columns else aov['p_unc'].iloc[0]
+                            anova_results[unit] = p_val
+                        except Exception:
+                            anova_results[unit] = np.nan
 
-                # 1. Welch's ANOVA (using raw data)
-                unit_subset = item_data_stats[item_data_stats['Unit'] == unit]
-                if unit_subset['Group_ID'].nunique() >= 2:
-                    try:
-                        import pingouin as pg
-                        aov = pg.welch_anova(data=unit_subset, dv=item, between='Group_ID')
-                        p_val = aov['p-unc'].iloc[0] if 'p-unc' in aov.columns else aov['p_unc'].iloc[0]
-                        anova_results[unit] = p_val
-                    except Exception:
-                        anova_results[unit] = np.nan
+                    # 2. Spearman Correlation
+                    if len(x_ranks) >= 3:
+                        from scipy.stats import spearmanr
+                        try:
+                            corr, s_p = spearmanr(x_ranks, y_means_raw)
+                            spearman_results[unit] = (corr, s_p)
+                        except Exception:
+                            spearman_results[unit] = (np.nan, np.nan)
 
-                # 2. Spearman Correlation
-                if len(x_ranks) >= 3:
-                    from scipy.stats import spearmanr
-                    try:
-                        corr, s_p = spearmanr(x_ranks, y_means_raw)
-                        spearman_results[unit] = (corr, s_p)
-                    except Exception:
-                        spearman_results[unit] = (np.nan, np.nan)
+                right_side_labels = []
+                for row in pivot_df.index:
+                    right_label = ""
+                    p_val = anova_results.get(row, 1.0)
+                    if p_val < 0.001: right_label += "***"
+                    elif p_val < 0.01: right_label += "**"
+                    elif p_val < 0.05: right_label += "*"
 
-            # Labels and display rows
+                    if row in spearman_results:
+                        corr, s_p = spearman_results[row]
+                        if not np.isnan(corr):
+                            if right_label: right_label += " "
+                            right_label += f"(ρ={corr:.2f})"
+                    right_side_labels.append(right_label)
+                            # Labels and display rows
+            
             display_rows = [unit_display_map.get(row, row) if unit_display_map else row for row in pivot_df.index]
-            right_side_labels = []
-            for row in pivot_df.index:
-                right_label = ""
-                p_val = anova_results.get(row, 1.0)
-                if p_val < 0.001: right_label += "***"
-                elif p_val < 0.01: right_label += "**"
-                elif p_val < 0.05: right_label += "*"
 
-                if row in spearman_results:
-                    corr, s_p = spearman_results[row]
-                    if not np.isnan(corr):
-                        if right_label: right_label += " "
-                        right_label += f"(ρ={corr:.2f})"
-                right_side_labels.append(right_label)
+            
 
             # Plotting
-            fig_width = max(5, len(valid_cols) * 1.2 + 2)
             fig_height = max(4, len(pivot_df) * 0.4 + 2)
+            fig_width = max(fig_height, len(valid_cols) * 1.2 + 2)
+
             fig, ax = plt.subplots(figsize=(fig_width, fig_height))
             display_item = display_name_map.get(item, item) if display_name_map else item
 
@@ -3569,17 +4055,18 @@ class HSI_Visualizer:
                         xticklabels=valid_cols, yticklabels=display_rows, vmin=vmin_p, vmax=vmax_p)
 
             # Right Y-axis
-            ax_r = ax.twinx()
-            ax_r.set_ylim(ax.get_ylim()); ax_r.set_yticks(ax.get_yticks())
-            ax_r.set_yticklabels(right_side_labels, rotation=0, ha='left', fontsize=10, color='black')
-            for s in ['right', 'top', 'left', 'bottom']: ax_r.spines[s].set_visible(False)
-            ax_r.tick_params(axis='y', which='both', length=0)
+            if display_significance:
+                ax_r = ax.twinx()
+                ax_r.set_ylim(ax.get_ylim()); ax_r.set_yticks(ax.get_yticks())
+                ax_r.set_yticklabels(right_side_labels, rotation=0, ha='left', fontsize=10, color='black')
+                for s in ['right', 'top', 'left', 'bottom']: ax_r.spines[s].set_visible(False)
+                ax_r.tick_params(axis='y', which='both', length=0)
 
-            ax.set_title(f"Subgroup Gradient: {display_item}", fontweight='bold', fontsize=14, pad=15)
+            ax.set_title(f"{display_item}", fontweight='bold', fontsize=14, pad=15)
             ax.set_xlabel("Subgroup", fontweight='bold', fontsize=12)
             ax.set_ylabel("Unit", fontweight='bold', fontsize=12)
             plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, f"subgroup_gradient_{item_safe}.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            plt.savefig(os.path.join(output_dir, f"subgroup_gradient_{item_safe}.png"), dpi=600, bbox_inches='tight', facecolor='white')
             plt.close()
 
             # Colorbar
@@ -3590,12 +4077,276 @@ class HSI_Visualizer:
             cbar = cb_fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), cax=cb_ax, orientation='vertical')
             cbar.set_label(cbar_label, color='black', fontsize=12)
             cb_fig.tight_layout()
-            cb_fig.savefig(os.path.join(output_dir, f"subgroup_gradient_{item_safe}_colorbar.png"), dpi=300, bbox_inches='tight', facecolor='white')
+            cb_fig.savefig(os.path.join(output_dir, f"subgroup_gradient_{item_safe}_colorbar.png"), dpi=600, bbox_inches='tight', facecolor='white')
             plt.close(cb_fig)
 
             print(f"  Generated subgroup gradient heatmap for {item}: {output_dir}")
             print(f"  Generated colorbar: {output_dir}")
 
+    def plot_subgroup_gradient_heatmap_wide_transposed(self, wide_df, value_cols, subgroup_order,
+                                                       output_dir=None, display_name_map=None,
+                                                       unit_display_map=None, unit_order=None,
+                                                       units_to_display=None, cmap='RdBu_r',
+                                                       min_size_to_plot=10, remove_outliers=True,
+                                                       show_values=True, cmap_scale=None,
+                                                       cbar_label='Z-score'):
+        """
+        Create a spatial gradient heatmap of ratios/molecules across ordered subgroups per unit,
+        taking a wide format DataFrame where metrics are separate columns.
+        
+        **Layout**: Subgroups are ROWS (in order), each column is a Unit+Ratio_Type combination.
+        Columns are labeled with just the ratio type and visually separated by ratio type.
+        
+        Also runs 1-Way ANOVA to evaluate regional statistical variance.
+        Each heatmap is z-scored independently, and all plots share the same
+        color scale based on the maximum absolute z-score across items.
+
+        Parameters
+        ----------
+        wide_df : pandas.DataFrame
+            Pivoted DataFrame containing metrics as columns.
+        value_cols : str or list of str
+            The column names in wide_df to plot (e.g. ['Lipid_to_Protein', 'Lipid_Unsaturation']).
+        subgroup_order : list
+            Ordered spatial segments (e.g. ['P', 'M', 'CM', 'C3', 'C2', 'C1']) that will be rows.
+        output_dir : str
+            Directory to save plots.
+        display_name_map : dict, optional
+            Mapping of ratio type names to display names.
+        unit_display_map : dict, optional
+            Mapping of unit names to display names.
+        unit_order : list, optional
+            Custom order for units. If None, uses sorted order.
+        units_to_display : list, optional
+            List of unit names to include; all others are excluded.
+        cmap : str
+            Colormap for heatmap (default 'RdBu_r').
+        min_size_to_plot : int
+            Minimum number of valid data points required per cell.
+        remove_outliers : bool
+            Whether to remove outliers before plotting.
+        show_values : bool
+            Whether to annotate cells with values.
+        cmap_scale : dict, optional
+            Per-item custom vmin/vmax. Example: {'Ratio_A': [-1, 1], 'Ratio_B': [0, 2]}
+        cbar_label : str
+            Label for the colorbar (default 'Mean Ratio').
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import numpy as np
+        import os
+        import pandas as pd
+        import matplotlib.cm as cm
+        import matplotlib.colors as mcolors
+        from scipy.stats import f_oneway
+        from scipy.stats import spearmanr
+
+        if output_dir is None:
+            output_dir = 'subgroup_gradient_heatmaps_transposed'
+        os.makedirs(output_dir, exist_ok=True)
+
+        if isinstance(value_cols, str):
+            value_cols = [value_cols]
+
+        # 1. Filter to selected units if specified
+        if units_to_display is not None:
+            wide_df = wide_df[wide_df['Unit'].isin(units_to_display)].copy()
+
+        if 'Group_ID' not in wide_df.columns:
+            print("  Error: 'Group_ID' column required to establish subgroup cohorts.")
+            return
+
+        # Filter strictly to targeted subgroups
+        wide_df = wide_df[wide_df['Group_ID'].isin(subgroup_order)].copy()
+
+        # 2. Determine unit order
+        all_units = sorted(wide_df['Unit'].unique())
+        if unit_order is not None:
+            ordered_units = [u for u in unit_order if u in all_units]
+            remaining_units = [u for u in all_units if u not in ordered_units]
+            all_units = ordered_units + remaining_units
+
+        plot_records = []
+
+        for item in value_cols:
+            if item not in wide_df.columns:
+                print(f"  Warning: Column '{item}' not found in DataFrame.")
+                continue
+
+            # Clean data (NaNs/infs) but keep outliers for stats
+            item_data_stats = wide_df[['Unit', 'Group_ID', item]].replace([np.inf, -np.inf], np.nan).dropna(subset=[item]).copy()
+
+            # Outlier Filtration for plotting
+            if remove_outliers:
+                item_data_plot = self._apply_outlier_filtration(item_data_stats, item, ['Unit', 'Group_ID'])
+            else:
+                item_data_plot = item_data_stats
+
+            # Build Data Matrix (Plotting): subgroups as rows, units as columns
+            agg_data_plot = item_data_plot.groupby(['Group_ID', 'Unit'])[item].agg(['mean', 'count']).reset_index()
+            agg_data_plot = agg_data_plot[agg_data_plot['count'] >= min_size_to_plot]
+
+            if agg_data_plot.empty:
+                continue
+
+            pivot_df = agg_data_plot.pivot(index='Group_ID', columns='Unit', values='mean')
+            valid_subgroups = [sg for sg in subgroup_order if sg in pivot_df.index]
+            pivot_df = pivot_df.reindex(valid_subgroups)
+            plot_units = [u for u in all_units if u in pivot_df.columns]
+            pivot_df = pivot_df[plot_units]
+
+            if pivot_df.empty or pivot_df.isnull().all().all():
+                print(f"  Skipping {item}: no valid data after filtering.")
+                continue
+
+            display_item = display_name_map.get(item, item) if display_name_map else item
+            item_safe = str(item).replace(':', '').replace('/', '_').replace(' ', '_')
+
+            z_df = pivot_df.copy().astype(float)
+            z_values = z_df.to_numpy(dtype=float)
+            z_mean = np.nanmean(z_values)
+            z_std = np.nanstd(z_values)
+            if np.isnan(z_std) or z_std == 0:
+                z_df = z_df - z_mean
+            else:
+                z_df = (z_df - z_mean) / z_std
+
+            item_abs_max = np.nanmax(np.abs(z_df.to_numpy(dtype=float)))
+            if np.isnan(item_abs_max):
+                item_abs_max = 0
+
+            # Save counts
+            pivot_counts = agg_data_plot.pivot(index='Group_ID', columns='Unit', values='count')
+            pivot_counts = pivot_counts.reindex(index=valid_subgroups, columns=plot_units)
+            counts_csv_path = os.path.join(output_dir, f"subgroup_gradient_transposed_{item_safe}_counts.csv")
+            pivot_counts.to_csv(counts_csv_path)
+
+            # Statistical variations across subgroups (on RAW data)
+            stats_rows = []
+            rank_map = {sg: i for i, sg in enumerate(valid_subgroups)}
+
+            for unit in plot_units:
+                x_ranks = []
+                y_means_raw = []
+
+                for sg in valid_subgroups:
+                    sg_vals_raw = item_data_stats[(item_data_stats['Unit'] == unit) & (item_data_stats['Group_ID'] == sg)][item].values
+                    if len(sg_vals_raw) >= 2:
+                        x_ranks.append(rank_map[sg])
+                        y_means_raw.append(np.mean(sg_vals_raw))
+
+                welch_p = np.nan
+                unit_subset = item_data_stats[item_data_stats['Unit'] == unit]
+                if unit_subset['Group_ID'].nunique() >= 2:
+                    try:
+                        import pingouin as pg
+                        aov = pg.welch_anova(data=unit_subset, dv=item, between='Group_ID')
+                        welch_p = aov['p-unc'].iloc[0] if 'p-unc' in aov.columns else aov['p_unc'].iloc[0]
+                    except Exception:
+                        welch_p = np.nan
+
+                spearman_rho = np.nan
+                spearman_p = np.nan
+                if len(x_ranks) >= 3:
+                    try:
+                        corr, s_p = spearmanr(x_ranks, y_means_raw)
+                        spearman_rho, spearman_p = corr, s_p
+                    except Exception:
+                        spearman_rho, spearman_p = np.nan, np.nan
+
+                stats_rows.append({
+                    'Unit': unit,
+                    'Welch_ANOVA_p': welch_p,
+                    'Spearman_rho': spearman_rho,
+                    'Spearman_p': spearman_p,
+                    'N_subgroups_used': len(x_ranks)
+                })
+
+            stats_df = pd.DataFrame(stats_rows)
+            stats_csv_path = os.path.join(output_dir, f"subgroup_gradient_transposed_{item_safe}_stats.csv")
+            stats_df.to_csv(stats_csv_path, index=False)
+            plot_records.append({
+                'item': item,
+                'item_safe': item_safe,
+                'display_item': display_item,
+                'z_df': z_df,
+                'display_rows': list(pivot_df.index),
+                'display_cols': [f"{idx}" for idx, _ in enumerate(pivot_df.columns, start=1)],
+                'n_rows': len(pivot_df.index),
+                'item_abs_max': item_abs_max,
+                'counts_csv_path': counts_csv_path,
+                'stats_csv_path': stats_csv_path,
+            })
+
+        if not plot_records:
+            print("No valid data to plot.")
+            return
+
+        global_abs_max = max(record['item_abs_max'] for record in plot_records)
+        if np.isnan(global_abs_max) or global_abs_max == 0:
+            global_abs_max = 1.0
+        vmin_p, vmax_p = -global_abs_max, global_abs_max
+
+        for record in plot_records:
+            item = record['item']
+            item_safe = record['item_safe']
+            display_item = record['display_item']
+            z_df = record['z_df']
+            display_rows = record['display_rows']
+            display_cols = record['display_cols']
+            n_rows = record['n_rows']
+
+            n_cols = len(z_df.columns)
+            fig_width = max(16, n_cols * 0.6 + 2)
+            fig_height = max(fig_width, n_rows * 0.5 + 2)
+
+            fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+            sns.heatmap(
+                z_df,
+                annot=show_values,
+                fmt=".3f",
+                cmap=cmap,
+                cbar=False,
+                linewidths=1.5,
+                linecolor='white',
+                ax=ax,
+                vmin=vmin_p,
+                vmax=vmax_p
+            )
+
+            ax.set_xticklabels(display_cols,
+                               rotation=0,
+                               ha='center',
+                               fontsize=fig_width * 2,
+                               fontweight='bold')
+            ax.set_yticklabels(display_rows, rotation=90, fontsize=fig_height * 2, fontweight='bold')
+            ax.set_title(f"{display_item}", fontweight='bold', fontsize=fig_height * 2.5, pad=15)
+            ax.set_xlabel("", fontweight='bold', fontsize=12)
+            ax.set_ylabel("", fontweight='bold', fontsize=12)
+
+            for _, spine in ax.spines.items():
+                spine.set_visible(True)
+                spine.set_linewidth(5)
+
+            plt.tight_layout()
+            png_path = os.path.join(output_dir, f"subgroup_gradient_transposed_{item_safe}.png")
+            plt.savefig(png_path, dpi=600, bbox_inches='tight', transparent=True)
+            plt.close()
+
+            cb_fig, cb_ax = plt.subplots(figsize=(1.2, max(3, n_rows * 0.4)))
+            norm = mcolors.Normalize(vmin=vmin_p, vmax=vmax_p)
+            cbar = cb_fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), cax=cb_ax, orientation='vertical')
+            cbar.set_label(cbar_label, color='black', fontsize=12)
+            cb_fig.tight_layout()
+            colorbar_path = os.path.join(output_dir, f"subgroup_gradient_transposed_{item_safe}_colorbar.png")
+            cb_fig.savefig(colorbar_path, dpi=600, bbox_inches='tight', transparent=True)
+            plt.close(cb_fig)
+
+            print(f"  Generated transposed subgroup gradient heatmap for {item}: {png_path}")
+            print(f"  Generated colorbar: {colorbar_path}")
+            print(f"  Saved counts CSV: {record['counts_csv_path']}")
+            print(f"  Saved stats CSV: {record['stats_csv_path']}")
     def _save_standalone_legend(self, handles, title, save_path, ncol=1, fontsize=11, title_fontsize=12):
         """Save a standalone legend figure as a PNG.
 
@@ -3615,6 +4366,12 @@ class HSI_Visualizer:
             Font size for the legend title.
         """
         import matplotlib.pyplot as plt
+        import os
+
+        # Create parent directory if it doesn't exist
+        parent_dir = os.path.dirname(save_path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
 
         # Use enough columns to keep the legend readable but not too wide
         n = len(handles)
@@ -3634,681 +4391,9 @@ class HSI_Visualizer:
         legend.get_frame().set_facecolor('white')
         legend.get_frame().set_alpha(0.95)
         ax.axis('off')
-        fig.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+        fig.savefig(save_path, dpi=600, bbox_inches='tight', facecolor='white', transparent=True)
         plt.close(fig)
 
-    # def create_individual_barplots(self, df, value_col, grouping_col, items_list=None,
-    #                                 output_dir=None, data_type='percentage',
-    #                                 show_plots=False, display_name_map=None,
-    #                                 unit_color_map=None, unit_display_map=None,
-    #                                 units_to_display=None,
-    #                                 consolidate_Group_IDs=False,
-    #                                 subgroup_list=None,
-    #                                 use_patterns=True,
-    #                                 compare_by="Group_ID",
-    #                                 show_empty_subgroups=False,
-    #                                 show_scatter=False,
-    #                                 plot_type='bar',
-    #                                 sig_style='brackets',
-    #                                 min_size_to_plot=3,
-    #                                 remove_outliers=True):
-    #     """
-    #     Create individual plots for publication.
-    #     Supports bar, box, or violin plots with optional Group_ID subgroup variants.
-        
-    #     Args:
-    #         df: DataFrame containing the measurements.
-    #         value_col: Column name for the values ('Percentage' or 'Mean_Ratio').
-    #         grouping_col: Column name for the items ('Molecule' or 'Ratio_Type').
-    #         items_list: List of molecules/ratios to plot.
-    #         output_dir: Directory to save plots.
-    #         consolidate_Group_IDs: If True, merges subgroups into base Units for cleaner comparison.
-    #         compare_by: Column name or list of column names used to define subgroups (default: "Group_ID").
-    #         plot_type: Plot style to render ('bar', 'box', or 'violin').
-    #         sig_style: Controls how statistical significance is shown on the plot.
-    #         min_size_to_plot: Minimum number of valid data points required to plot a unit (default: 3).
-    #             'brackets'   — (default) traditional bracket lines with * symbols above bars.
-    #                            Can get crowded when there are many significant pairs.
-    #             'stars_only' — compact mode: a small * / ** / *** label is placed directly
-    #                            above each bar in a significant pair.  No crossing lines.
-    #             'export_only'— no on-plot markers at all; results are only written to CSV.
-    #             A CSV of all significant pairs is always saved to output_dir (when set),
-    #             regardless of the chosen style.
-    #     """
-    #     import matplotlib.patches as mpatches
-    #     import matplotlib.pyplot as plt
-    #     from statsmodels.stats.multicomp import pairwise_tukeyhsd
-    #     from scipy.stats import f_oneway, ttest_ind
-
-    #     if output_dir is None:
-    #         output_dir = 'individual_barplots'
-    #     os.makedirs(output_dir, exist_ok=True)
-
-    #     plot_type = str(plot_type).lower().strip()
-    #     if plot_type not in {'bar', 'box', 'violin'}:
-    #         raise ValueError(f"Unsupported plot_type '{plot_type}'. Use 'bar', 'box', or 'violin'.")
-        
-    #     print(f"Units to display: {units_to_display if units_to_display else 'All'}")
-
-    #     # Filter units if specified
-    #     if units_to_display is not None:
-    #         df = df[df['Unit'].isin(units_to_display)].copy()
-        
-    #     # Consolidation check
-    #     if consolidate_Group_IDs:
-    #         df['Plot_Unit'] = df['Unit']
-    #     else:
-    #         # Create Unit_(Subgroup) labels based on compare_by columns
-    #         def make_unit_subgroup_label(row):
-    #             # Handle single string or list of columns
-    #             cols = [compare_by] if isinstance(compare_by, str) else compare_by
-                
-    #             label_parts = []
-    #             for col in cols:
-    #                 val = row.get(col)
-    #                 if not pd.isna(val) and val not in [None, '', 'Other', 'O']:
-    #                     label_parts.append(str(val))
-                
-    #             if not label_parts:
-    #                 return str(row['Unit'])
-                
-    #             # Combine multiple column values if necessary
-    #             subgroup_str = ", ".join(label_parts)
-    #             return f"{row['Unit']} ({subgroup_str})"
-            
-    #         df['Plot_Unit'] = df.apply(make_unit_subgroup_label, axis=1)
-
-    #         # --- IDENTIFY SUBGROUPS FOR DYNAMIC VISUALS ---
-    #         if subgroup_list is None:
-    #             all_groups = set()
-    #             for unit in df['Plot_Unit'].unique():
-    #                 if ' (' in unit:
-    #                     gid = unit.split(' (')[-1].rstrip(')')
-    #                     all_groups.add(gid)
-    #             # Sort alphabetically only when auto-detecting
-    #             subgroup_list = sorted(list(all_groups))
-    #         else:
-    #             # Use provided list as is (maintain order)
-    #             subgroup_list = list(subgroup_list)
-            
-    #         visual_type = "patterns" if use_patterns else "shading"
-    #         print(f"Subgroups identified for dynamic {visual_type}: {subgroup_list}")
-
-    #     if items_list == "All" or items_list is None:
-    #         items_list = sorted(df[grouping_col].unique())
-
-    #     # Iterate through items
-    #     for item_name in items_list:
-    #         item_data = df[df[grouping_col] == item_name].copy()
-    #         item_data.replace([np.inf, -np.inf], np.nan, inplace=True)
-    #         item_data = item_data.dropna(subset=[value_col])
-            
-    #         if len(item_data) == 0:
-    #             print(f"  Skipping {item_name}: no valid data")
-    #             continue
-
-    #         # 1. Determine base units to plot
-    #         if units_to_display is not None:
-    #             base_units = units_to_display
-    #         else:
-    #             # Extract unique base units from the data and sort them
-    #             all_raw_units = item_data['Plot_Unit'].unique()
-    #             base_units = sorted(list(set(pu.split(' (')[0] if ' (' in pu else pu for pu in all_raw_units)))
-
-    #         # 2. Build final ordered list of plot units
-    #         reordered_units = []
-    #         for bu in base_units:
-    #             if consolidate_Group_IDs:
-    #                 # Check if this base unit exists in data
-    #                 if any((pu.split(' (')[0] if ' (' in pu else pu) == bu for pu in item_data['Plot_Unit'].unique()):
-    #                     reordered_units.append(bu)
-    #             else:
-    #                 # Get existing units for this base
-    #                 existing_for_base = [pu for pu in item_data['Plot_Unit'].unique() if (pu.split(' (')[0] if ' (' in pu else pu) == bu]
-                    
-    #                 # For this base unit, iterate over subgroups in the requested order
-    #                 added_for_this_base = []
-    #                 for sg in subgroup_list:
-    #                     pu = f"{bu} ({sg})"
-    #                     if pu in existing_for_base:
-    #                         reordered_units.append(pu)
-    #                         added_for_this_base.append(pu)
-    #                     elif show_empty_subgroups:
-    #                         reordered_units.append(pu)
-    #                         added_for_this_base.append(pu)
-                    
-    #                 # Safety catch: Add any remaining units for this base (e.g. base unit without subgroup)
-    #                 for pu in existing_for_base:
-    #                     if pu not in added_for_this_base:
-    #                         reordered_units.append(pu)
-            
-    #         all_plot_units = reordered_units
-
-            
-    #         # Prepare data groups
-    #         bar_means = []
-    #         bar_stderrs = []
-    #         colors = []
-    #         hatches = []
-    #         positions = []
-    #         scatter_vals_per_pos = []  # list of (position, array_of_values) for scatter overlay
-    #         plot_vals_per_pos = []     # list of arrays used to draw box/violin plots
-
-    #         # Layout tuning knobs for individual barplots:
-    #         # - bar_width controls visual thickness of each bar
-    #         # - same_unit_spacing controls spacing between subgroup bars of the same base unit
-    #         # - between_unit_spacing controls spacing between different base units
-    #         bar_width = 0.3
-    #         same_unit_spacing = 0.4
-    #         between_unit_spacing = 1.1
-            
-    #         current_pos = 1.0
-    #         unit_tick_positions = []
-    #         unit_tick_labels = []
-    #         unit_position_map = {}     # Map unit name -> tick position
-    #         unit_significance = []     # List of (pos1, pos2, sig_symbol)
-    #         subgroup_data_by_base = {} # Map base_unit -> {group_id: (data, position)}
-    #         prev_base_unit = None
-            
-    #         for unit in all_plot_units:
-    #             unit_data = item_data[item_data['Plot_Unit'] == unit]
-                
-    #             # Skip units that do not have enough data to form a meaningful distribution
-    #             if unit_data[value_col].count() < min_size_to_plot:
-    #                 continue
-                
-    #             base_unit = unit.split(' (')[0] if ' (' in unit else unit
-
-    #             # Add tighter spacing within a base unit and larger gaps between base units
-    #             if prev_base_unit is not None:
-    #                 if base_unit == prev_base_unit:
-    #                     current_pos += same_unit_spacing
-    #                 else:
-    #                     current_pos += between_unit_spacing
-                
-    #             # Simple unit-based plot
-    #             # Remove outliers using shared IQR method for both bar heights and statistical tests
-    #             if remove_outliers:
-    #                 unit_data_filtered = self._apply_outlier_filtration(unit_data, value_col, ['Plot_Unit'])
-    #             else:
-    #                 unit_data_filtered = unit_data
-    #             filtered_vals = unit_data_filtered[value_col].values
-
-    #             if len(filtered_vals) > 0:
-    #                 bar_means.append(np.mean(filtered_vals))
-    #                 bar_stderrs.append(np.std(filtered_vals) / np.sqrt(len(filtered_vals)))
-    #             else:
-    #                 raw_vals = unit_data[value_col].values
-    #                 if len(raw_vals) > 0:
-    #                     bar_means.append(np.mean(raw_vals))
-    #                     bar_stderrs.append(np.std(raw_vals) / np.sqrt(len(raw_vals)))
-    #                 else:
-    #                     bar_means.append(0)
-    #                     bar_stderrs.append(0)
-                
-    #             # Store individual values for scatter overlay
-    #             vals_for_plot = filtered_vals if len(filtered_vals) > 0 else unit_data[value_col].values
-    #             scatter_vals_per_pos.append((current_pos, vals_for_plot))
-    #             plot_vals_per_pos.append(vals_for_plot if len(vals_for_plot) > 0 else np.array([np.nan]))
-
-    #             positions.append(current_pos)
-    #             # Use unit_color_map if provided, with color variation for Group_ID subgroups
-    #             base_color = unit_color_map.get(base_unit, '#888888') if unit_color_map else '#888888'
-                
-    #             # Extract Group_ID if present and apply dynamic visuals
-    #             hatch = None
-    #             if ' (' in unit:
-    #                 # Extract Group_ID (e.g., 'CortexInner' from 'Unit (CortexInner)')
-    #                 group_id = unit.split(' (')[-1].rstrip(')')
-                    
-    #                 if use_patterns:
-    #                     # Use hatch patterns instead of color adjustment
-    #                     hatch = self._get_hatch_for_group(group_id, subgroup_list=subgroup_list)
-    #                     color = base_color
-    #                 else:
-    #                     # Apply dynamic color variations (shading)
-    #                     color = self._adjust_color_for_group(base_color, group_id, subgroup_list=subgroup_list)
-    #             else:
-    #                 color = base_color
-                
-    #             colors.append(color)
-    #             hatches.append(hatch)
-                
-    #             unit_tick_positions.append(current_pos)
-    #             unit_position_map[unit] = current_pos
-
-    #             # Collect subgroup data for later intra-unit significance testing.
-    #             # Keep a fallback to raw values if filtering leaves too few points.
-    #             if not consolidate_Group_IDs and ' (' in unit:
-    #                 group_id = unit.split(' (')[-1].rstrip(')')
-    #                 subgroup_vals = filtered_vals if len(filtered_vals) >= 2 else unit_data[value_col].values
-    #                 if base_unit not in subgroup_data_by_base:
-    #                     subgroup_data_by_base[base_unit] = {}
-    #                 subgroup_data_by_base[base_unit][group_id] = (subgroup_vals, current_pos)
-
-
-    #             prev_base_unit = base_unit
-
-    #             # Map display name for unit
-    #             display_unit = unit
-    #             if unit_display_map:
-    #                 base_unit = unit.split(' (')[0] if ' (' in unit else unit
-    #                 if base_unit in unit_display_map:
-    #                     mapped = unit_display_map[base_unit]
-    #                     display_unit = unit.replace(base_unit, mapped)
-                
-                
-    #             unit_tick_labels.append(display_unit)
-
-    #         if not bar_means: continue
-            
-    #         # --- Intra-unit significance testing for subgroups (after all units processed) ---
-    #         if subgroup_data_by_base:
-    #             compare_by_label = ", ".join(compare_by) if isinstance(compare_by, list) else compare_by
-    #             sig_symbols = {0.001: '***', 0.01: '**', 0.05: '*', 1.0: 'ns'}
-    #             for base_unit, subgroup_dict in subgroup_data_by_base.items():
-    #                 if len(subgroup_dict) >= 2:
-    #                     # Get sorted group IDs to ensure consistent ordering (e.g., C vs M)
-    #                     group_ids = sorted(subgroup_dict.keys())
-    #                     if len(group_ids) == 2:
-    #                         # Extract data and positions
-    #                         data1, pos1 = subgroup_dict[group_ids[0]]
-    #                         data2, pos2 = subgroup_dict[group_ids[1]]
-                            
-    #                         # T-test for 2 subgroups
-    #                         t_stat, p_val = ttest_ind(data1, data2, equal_var=False)
-    #                         sig = 'ns'
-    #                         for thresh, symb in sorted(sig_symbols.items()):
-    #                             if p_val <= thresh: sig = symb; break
-                            
-    #                         if sig != 'ns':
-    #                             unit_significance.append((pos1, pos2, sig))
-    #                             print(f"    {compare_by_label} sig in {base_unit}: {group_ids[0]} vs {group_ids[1]}: p={p_val:.4f} ({sig})")
-                        
-    #                     elif len(group_ids) > 2:
-    #                         # Tukey HSD for 3+ subgroups
-    #                         records = []
-    #                         for gid in group_ids:
-    #                             vals, _ = subgroup_dict[gid]
-    #                             for v in vals:
-    #                                 records.append({'GID': gid, 'Value': v})
-                            
-    #                         if records:
-    #                             tukey_df = pd.DataFrame(records)
-    #                             try:
-    #                                 res = pairwise_tukeyhsd(endog=tukey_df['Value'], groups=tukey_df['GID'], alpha=0.05)
-                                    
-    #                                 # Process significant results
-    #                                 for row in res.summary().data[1:]:
-    #                                     gid1, gid2, p_adj = str(row[0]), str(row[1]), float(row[3])
-    #                                     if p_adj < 0.05:
-    #                                         sig = 'ns'
-    #                                         for thresh, symb in sorted(sig_symbols.items()):
-    #                                             if p_adj <= thresh: sig = symb; break
-                                            
-    #                                         if sig != 'ns':
-    #                                             pos1 = subgroup_dict[gid1][1]
-    #                                             pos2 = subgroup_dict[gid2][1]
-    #                                             unit_significance.append((pos1, pos2, sig))
-    #                                             print(f"    {compare_by_label} sig in {base_unit} (Tukey): {gid1} vs {gid2}: p={p_adj:.4f} ({sig})")
-    #                             except Exception as e:
-    #                                 print(f"    Warning: Intra-unit Tukey HSD failed for {base_unit}: {e}")
-
-    #         # Plotting
-    #         fig_height = 6
-            
-    #         # Scale width based on the total coordinate span to maintain consistent physical bar width.
-    #         # positions[-1] is the center of the last bar; we use it to calculate the total span.
-    #         # 0.8 inches per coordinate unit provides a consistent visual thickness.
-    #         fig_width = max(6, 2.5 + (positions[-1] + bar_width/2) * 0.8)
-
-    #         fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-
-    #         if plot_type == 'bar':
-    #             bars = ax.bar(positions, bar_means, width=bar_width, yerr=bar_stderrs,
-    #                         error_kw=dict(linestyle='-', elinewidth=1.5, capsize=5, capthick=1.5),
-    #                         color=colors, alpha=0.8, edgecolor='black', linewidth=2)
-
-    #             # Apply hatches to individual bars
-    #             for bar, h in zip(bars, hatches):
-    #                 if h:
-    #                     bar.set_hatch(h)
-    #         elif plot_type == 'box':
-    #             box = ax.boxplot(
-    #                 plot_vals_per_pos,
-    #                 positions=positions,
-    #                 widths=bar_width * 0.9,
-    #                 patch_artist=True,
-    #                 showfliers=False,
-    #             )
-    #             for patch, color, h in zip(box['boxes'], colors, hatches):
-    #                 patch.set_facecolor(color)
-    #                 patch.set_alpha(0.8)
-    #                 patch.set_edgecolor('black')
-    #                 patch.set_linewidth(1.5)
-    #                 if h:
-    #                     patch.set_hatch(h)
-    #             for key in ['whiskers', 'caps', 'medians']:
-    #                 for artist in box[key]:
-    #                     artist.set_color('black')
-    #                     artist.set_linewidth(1.2)
-    #         else:  # violin
-    #             # violinplot requires ≥2 data points per group (needs KDE).
-    #             # Split into multi-point groups (violin) and single-point groups (scatter dot).
-    #             violin_vals, violin_positions, violin_colors, violin_hatches = [], [], [], []
-    #             single_vals, single_positions, single_colors = [], [], []
-    #             for vv, vp, vc, vh in zip(plot_vals_per_pos, positions, colors, hatches):
-    #                 clean = vv[~np.isnan(vv)] if len(vv) > 0 else vv
-    #                 if len(clean) >= 2:
-    #                     violin_vals.append(vv)
-    #                     violin_positions.append(vp)
-    #                     violin_colors.append(vc)
-    #                     violin_hatches.append(vh)
-    #                 elif len(clean) == 1:
-    #                     single_vals.append(clean[0])
-    #                     single_positions.append(vp)
-    #                     single_colors.append(vc)
-
-    #             if violin_vals:
-    #                 violin = ax.violinplot(
-    #                     violin_vals,
-    #                     positions=violin_positions,
-    #                     widths=bar_width * 0.95,
-    #                     showmeans=False,
-    #                     showmedians=True,
-    #                     showextrema=True,
-    #                 )
-    #                 for body, color, h in zip(violin['bodies'], violin_colors, violin_hatches):
-    #                     body.set_facecolor(color)
-    #                     body.set_alpha(0.7)
-    #                     body.set_edgecolor('black')
-    #                     body.set_linewidth(1.2)
-    #                     if h:
-    #                         body.set_hatch(h)
-    #                 for key in ['cbars', 'cmins', 'cmaxes', 'cmedians']:
-    #                     if key in violin:
-    #                         violin[key].set_color('black')
-    #                         violin[key].set_linewidth(1.0)
-
-    #             # Single-point groups: render as a prominent scatter marker
-    #             if single_vals:
-    #                 ax.scatter(
-    #                     single_positions, single_vals,
-    #                     color=single_colors, edgecolors='black',
-    #                     linewidths=1.0, s=60, zorder=5, marker='D',
-    #                     label='_single_point'
-    #                 )
-
-    #         # --- Scatter overlay: individual data points jittered over each bar ---
-    #         if show_scatter:
-    #             rng = np.random.default_rng(seed=42)
-    #             scatter_jitter = bar_width * 0.30  # jitter within ±30% of half bar width
-    #             for (s_pos, s_vals), s_color in zip(scatter_vals_per_pos, colors):
-    #                 if len(s_vals) == 0:
-    #                     continue
-    #                 jitter = rng.uniform(-scatter_jitter, scatter_jitter, size=len(s_vals))
-    #                 ax.scatter(
-    #                     s_pos + jitter,
-    #                     s_vals,
-    #                     color=s_color,
-    #                     edgecolors='black',
-    #                     linewidths=0.5,
-    #                     s=18,
-    #                     alpha=0.65,
-    #                     zorder=4,
-    #                 )
-            
-    #         # Determine which display names have duplicates across units_to_display (if provided)
-    #         # This MUST be done BEFORE label cleaning so we can match against full display names
-    #         display_names_with_duplicates = set()
-            
-    #         if units_to_display is not None and unit_display_map:
-    #             # Map each base unit to its display name
-    #             unit_to_display_name = {}
-    #             for base_unit in units_to_display:
-    #                 if base_unit in unit_display_map:
-    #                     unit_to_display_name[base_unit] = unit_display_map[base_unit]
-    #                 else:
-    #                     unit_to_display_name[base_unit] = base_unit
-                
-    #             # Count how many base units map to each display name
-    #             from collections import Counter
-    #             display_name_counts = Counter(unit_to_display_name.values())
-    #             display_names_with_duplicates = {name for name, count in display_name_counts.items() if count > 1}
-                
-    #         # Add (N) suffixes to labels that have duplicates (BEFORE cleaning labels)
-    #         if display_names_with_duplicates:
-    #             # Directly check if label is in the duplicated names set
-    #             label_indices = {name: 0 for name in display_names_with_duplicates}
-    #             deduplicated_labels = []
-    #             for label in unit_tick_labels:
-    #                 if label in label_indices:
-    #                     label_indices[label] += 1
-    #                     deduplicated_labels.append(f"{label} (N{label_indices[label]})")
-    #                 else:
-    #                     deduplicated_labels.append(label)
-    #             unit_tick_labels = deduplicated_labels
-    #         else:
-    #             # Also check for duplicates within this plot as a fallback
-    #             from collections import Counter
-    #             label_counts = Counter(unit_tick_labels)
-    #             duplicate_labels = {label for label in label_counts if label_counts[label] > 1}
-                
-    #             if duplicate_labels:
-    #                 label_indices = {label: 0 for label in duplicate_labels}
-    #                 deduplicated_labels = []
-    #                 for label in unit_tick_labels:
-    #                     if label in label_indices:
-    #                         label_indices[label] += 1
-    #                         deduplicated_labels.append(f"{label} (N{label_indices[label]})")
-    #                     else:
-    #                         deduplicated_labels.append(label)
-    #                 unit_tick_labels = deduplicated_labels
-            
-    #         # Clean up labels: extract display name if pipe-delimited
-    #         # cleaned_labels = []
-    #         # for label in unit_tick_labels:
-    #         #     # If label contains "|", take only the part after it
-    #         #     if "|" in label:
-    #         #         label = label.split("|", 1)[1].strip()
-    #         #     cleaned_labels.append(label)
-    #         # unit_tick_labels = cleaned_labels
-
-    #         # Labels and styling
-    #         display_item = display_name_map.get(item_name, item_name) if display_name_map else item_name
-    #         y_label = 'Relative Prob. %' if data_type == 'percentage' else 'Mean Ratio'
-    #         ax.set_ylabel(y_label, fontweight='bold', fontsize=14)
-    #         ax.set_title(f"{display_item}", fontweight='bold', fontsize=16, pad=15)
-            
-    #         # Hide x-ticks and build legends
-    #         ax.set_xticks([])
-    #         ax.set_xticklabels([])
-
-    #         # Legend 1: base unit colors only (no subgroup suffixes)
-    #         unit_legend_patches = []
-    #         if units_to_display is not None:
-    #             base_units_for_legend = [u for u in units_to_display if any((pu.split(' (')[0] if ' (' in pu else pu) == u for pu in all_plot_units)]
-    #         else:
-    #             base_units_for_legend = []
-    #             seen_base_units = set()
-    #             for pu in all_plot_units:
-    #                 bu = pu.split(' (')[0] if ' (' in pu else pu
-    #                 if bu not in seen_base_units:
-    #                     seen_base_units.add(bu)
-    #                     base_units_for_legend.append(bu)
-
-    #         for base_unit in base_units_for_legend:
-    #             display_base = unit_display_map.get(base_unit, base_unit) if unit_display_map else base_unit
-    #             base_color = unit_color_map.get(base_unit, '#888888') if unit_color_map else '#888888'
-    #             unit_legend_patches.append(mpatches.Patch(color=base_color, label=display_base))
-
-    #         # Always refresh legend so colors stay in sync with current run settings.
-    #         unit_legend_path = os.path.join(output_dir, "unit_legend.png")
-    #         self._save_standalone_legend(unit_legend_patches, "Units", unit_legend_path)
-
-    #         # Legend 2: subgroup shading (lighter/darker) semantics
-    #         # Use subgroup_list for ordering, but only include those that actually appear in all_plot_units
-    #         subgroups_in_plot = set()
-    #         for pu in all_plot_units:
-    #             if ' (' in pu:
-    #                 subgroups_in_plot.add(pu.split(' (')[-1].rstrip(')'))
-            
-    #         subgroup_ids_present = [sg for sg in subgroup_list if sg in subgroups_in_plot]
-
-    #         if subgroup_ids_present:
-    #             subgroup_legend_patches = []
-    #             neutral_base = '#888888'
-                
-    #             if not use_patterns:
-    #                 neutral_luminance = np.mean(mcolors.to_rgb(neutral_base))
-
-    #             for gid in subgroup_ids_present:
-    #                 if use_patterns:
-    #                     hatch = self._get_hatch_for_group(gid, subgroup_list=subgroup_list)
-    #                     subgroup_legend_patches.append(
-    #                         mpatches.Patch(facecolor=neutral_base, hatch=hatch, edgecolor='black', label=f"{gid}")
-    #                     )
-    #                 else:
-    #                     shade_color = self._adjust_color_for_group(neutral_base, gid, subgroup_list=subgroup_list)
-    #                     shade_luminance = np.mean(mcolors.to_rgb(shade_color))
-    #                     shade_direction = 'lighter' if shade_luminance >= neutral_luminance else 'darker'
-    #                     subgroup_legend_patches.append(
-    #                         mpatches.Patch(color=shade_color, label=f"{gid} ({shade_direction})")
-    #                     )
-
-    #             legend_title = "Subgroup Patterns" if use_patterns else "Subgroup Shading"
-    #             subgroup_legend_filename = "subgroup_pattern_legend.png" if use_patterns else "subgroup_shading_legend.png"
-    #             subgroup_legend_path = os.path.join(output_dir, subgroup_legend_filename)
-    #             self._save_standalone_legend(subgroup_legend_patches, legend_title, subgroup_legend_path)
-
-    #         # Note: We will draw all significance markers (intra-unit and inter-unit) at the end
-    #         # to ensure proper vertical stacking.
-            
-    #         # Tukey HSD significance testing across units
-    #         # Skip if we're showing Group_ID subgroups (indicated by ' (' in unit names)
-    #         has_subgroup_variants = any(' (' in unit for unit in all_plot_units)
-            
-    #         if len(all_plot_units) > 1 and not has_subgroup_variants:
-    #             # Prepare data for Tukey HSD - only for base units without subgroups
-    #             if remove_outliers:
-    #                 item_data_filtered = self._apply_outlier_filtration(item_data, value_col, ['Plot_Unit'])
-    #             else:
-    #                 item_data_filtered = item_data
-    #             records = []
-    #             for _, row in item_data_filtered.iterrows():
-    #                 records.append({'Unit': row['Plot_Unit'], 'Value': row[value_col]})
-                
-    #             if records and len(item_data_filtered['Plot_Unit'].unique()) > 1:
-    #                 tukey_df = pd.DataFrame(records)
-    #                 try:
-    #                     tukey_result = pairwise_tukeyhsd(endog=tukey_df['Value'], groups=tukey_df['Unit'], alpha=0.05)
-                        
-    #                     sig_symbols = {0.001: '***', 0.01: '**', 0.05: '*', 1.0: 'ns'}
-    #                     for row in tukey_result.summary().data[1:]:
-    #                         unit1, unit2, p_adj = str(row[0]), str(row[1]), float(row[3])
-    #                         if p_adj < 0.05:
-    #                             sig = 'ns'
-    #                             for thresh, symb in sorted(sig_symbols.items()):
-    #                                 if p_adj <= thresh: sig = symb; break
-                                
-    #                             # Use centers for unit positions
-    #                             if unit1 in unit_position_map and unit2 in unit_position_map:
-    #                                 p1 = unit_position_map[unit1]
-    #                                 p2 = unit_position_map[unit2]
-    #                                 unit_significance.append((p1, p2, sig))
-    #                 except Exception as e:
-    #                     print(f"    Warning: Tukey HSD failed for {item_name}: {e}")
-            
-    #         # --- Save significance results to CSV (always, when output_dir is set) ---
-    #         if output_dir and unit_significance:
-    #             import csv
-    #             item_safe_sig = item_name.replace(':', '').replace('/', '_').replace(' ', '_')
-    #             sig_csv_path = os.path.join(output_dir, f"{item_safe_sig}_significance.csv")
-    #             # Build a reverse map: position -> unit label
-    #             pos_to_label = {pos: lbl for pos, lbl in zip(unit_tick_positions, unit_tick_labels)}
-    #             with open(sig_csv_path, 'w', newline='') as csvf:
-    #                 writer = csv.writer(csvf)
-    #                 writer.writerow(['Group_1', 'Group_2', 'Significance'])
-    #                 for x1, x2, sig_sym in unit_significance:
-    #                     lbl1 = pos_to_label.get(x1, str(x1))
-    #                     lbl2 = pos_to_label.get(x2, str(x2))
-    #                     writer.writerow([lbl1, lbl2, sig_sym])
-    #             print(f"  Saved significance table: {sig_csv_path}")
-
-    #         # --- Draw significance markers on the plot ---
-    #         _sig_style = str(sig_style).lower().strip()
-
-    #         if unit_significance and _sig_style != 'export_only':
-    #             y_max = ax.get_ylim()[1]
-
-    #             if _sig_style == 'stars_only':
-    #                 # ── Compact mode: accumulate the strongest symbol per bar position ──
-    #                 # For each position, collect all symbols it appears in, then pick the
-    #                 # strongest (most stars) and write it once above that bar.
-    #                 sym_rank = {'***': 3, '**': 2, '*': 1, 'ns': 0}
-    #                 bar_sym_rank = {}   # pos -> best rank seen so far
-    #                 bar_sym_label = {}  # pos -> best symbol
-    #                 for x1, x2, sig_sym in unit_significance:
-    #                     rank = sym_rank.get(sig_sym, 0)
-    #                     for pos in (x1, x2):
-    #                         if rank > bar_sym_rank.get(pos, -1):
-    #                             bar_sym_rank[pos] = rank
-    #                             bar_sym_label[pos] = sig_sym
-
-    #                 # Determine a consistent y position slightly above the tallest bar
-    #                 star_y = y_max * 1.04
-    #                 for pos, sym in bar_sym_label.items():
-    #                     ax.text(pos, star_y, sym,
-    #                             ha='center', va='bottom',
-    #                             fontsize=11, fontweight='bold', color='black')
-    #                 # Give a small headroom for the stars
-    #                 ax.set_ylim(top=y_max * 1.15)
-
-    #             else:  # 'brackets' (default)
-    #                 line_height = 0.08
-    #                 unit_significance.sort(key=lambda x: (abs(x[0]-x[1]), min(x[0], x[1])))
-    #                 drawn_markers = []  # list of ((x1, x2), level)
-
-    #                 for x1, x2, sig_sym in unit_significance:
-    #                     if x1 > x2: x1, x2 = x2, x1
-
-    #                     # Find first available stacking level
-    #                     level = 0
-    #                     while True:
-    #                         collision = False
-    #                         for (mx1, mx2), mlevel in drawn_markers:
-    #                             if mlevel == level:
-    #                                 if not (x2 + 0.2 < mx1 or x1 - 0.2 > mx2):
-    #                                     collision = True
-    #                                     break
-    #                         if not collision:
-    #                             break
-    #                         level += 1
-
-    #                     y_pos = y_max * (1.10 + level * line_height)
-    #                     ax.plot([x1, x2], [y_pos, y_pos], 'k-', linewidth=1.0)
-    #                     ax.text((x1 + x2) / 2, y_pos, sig_sym,
-    #                             ha='center', va='bottom', fontsize=10, fontweight='bold')
-    #                     drawn_markers.append(((x1, x2), level))
-
-    #                 max_level = max(m[1] for m in drawn_markers) if drawn_markers else 0
-    #                 ax.set_ylim(top=y_max * (1.20 + max_level * line_height))
-            
-
-    #         # Grid and spines
-    #         ax.grid(axis='y', linestyle='--', alpha=0.3)
-    #         for spine in ax.spines.values(): spine.set_edgecolor('#cccccc')
-            
-    #         plt.tight_layout()
-    #         # Save
-    #         item_safe = item_name.replace(':', '').replace('/', '_').replace(' ', '_')
-    #         save_path = os.path.join(output_dir, f"{data_type}_{item_safe}_{plot_type}plot.png")
-    #         # print(f" Generated individual bar plot in {save_path}")
-
-    #         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            
-    #         if show_plots: plt.show()
-    #         else: plt.close(fig)
 
 
 
@@ -4326,7 +4411,8 @@ class HSI_Visualizer:
                                     sig_style='brackets',
                                     use_patterns=True,
                                     min_size_to_plot=3,
-                                    remove_outliers=True):
+                                    remove_outliers=True,
+                                    orientation='vertical'):
         """
         Create individual plots for publication.
         Supports bar, box, or violin plots with optional Group_ID subgroup variants.
@@ -4349,6 +4435,7 @@ class HSI_Visualizer:
                 'export_only'— no on-plot markers at all; results are only written to CSV.
                 A CSV of all significant pairs is always saved to output_dir (when set),
                 regardless of the chosen style.
+            orientation: 'vertical' (default) or 'horizontal'.
         """
         import matplotlib.patches as mpatches
         import matplotlib.pyplot as plt
@@ -4363,9 +4450,15 @@ class HSI_Visualizer:
         # - bar_width controls visual thickness of each bar
         # - same_unit_spacing controls spacing between subgroup bars of the same base unit
         # - between_unit_spacing controls spacing between different base units
-        bar_width = 0.3
-        same_unit_spacing = 0.4
-        between_unit_spacing = 0.8
+        bar_width = 0.2
+        same_unit_spacing = 0.21
+        between_unit_spacing = 0.4 if consolidate_Group_IDs and not plot_type == 'bar' else bar_width if plot_type == 'bar' else 0.7
+
+        orientation = str(orientation).lower().strip()
+        if orientation not in {'vertical', 'horizontal'}:
+            raise ValueError(f"Unsupported orientation '{orientation}'. Use 'vertical' or 'horizontal'.")
+
+        horizontal = orientation == 'horizontal'
 
         if output_dir is None:
             output_dir = 'individual_barplots'
@@ -4428,6 +4521,13 @@ class HSI_Visualizer:
         elif items_list == "All" or items_list is None:
             items_list = sorted(df[grouping_col].unique())
 
+        consolidated_unit_reference = None
+        if consolidate_Group_IDs and show_empty_subgroups:
+            if units_to_display is not None:
+                consolidated_unit_reference = list(units_to_display)
+            else:
+                consolidated_unit_reference = sorted(df['Unit'].dropna().unique().tolist())
+
 
         # Iterate through items
         for item_name in items_list:
@@ -4446,9 +4546,20 @@ class HSI_Visualizer:
                 print(f"  Skipping {item_name}: no valid data")
                 continue
 
+            if "Ion" in item_name:
+                # Normalize ion intensity values between 0 and 100
+                item_data[current_value_col] = (item_data[current_value_col] - item_data[current_value_col].min()) / (item_data[current_value_col].max() - item_data[current_value_col].min() + 1e-9)
+                tmp_outliers = False  # Don't apply outlier filtration to already normalized ion intensities
+            else:
+                tmp_outliers = remove_outliers
+
             # 1. Determine base units to plot
             if units_to_display is not None:
                 base_units = units_to_display
+            elif consolidated_unit_reference is not None:
+                # Use the full unit list so consolidated plots keep spacing for
+                # units that are absent from the current item.
+                base_units = consolidated_unit_reference
             else:
                 # Extract unique base units from the data and sort them
                 all_raw_units = item_data['Plot_Unit'].unique()
@@ -4457,7 +4568,12 @@ class HSI_Visualizer:
             # 2. Build final ordered list of plot units
             if consolidate_Group_IDs:
                 source_map = set(item_data['Plot_Unit'].unique())
-                reordered_units = [bu   for bu in base_units if bu in source_map]
+                if show_empty_subgroups:
+                    # Keep all base units, including those without data (for spacing consistency)
+                    reordered_units = base_units
+                else:
+                    # Only include units that have data
+                    reordered_units = [bu for bu in base_units if bu in source_map]
             else: 
                 reordered_units = []
                 for bu in base_units:
@@ -4497,15 +4613,25 @@ class HSI_Visualizer:
             unit_tick_positions = []
             unit_tick_labels = []
             unit_position_map = {}     # Map unit name -> tick position
+            empty_positions = []       # Track positions of empty units
             unit_significance = []     # List of (pos1, pos2, sig_symbol)
             subgroup_data_by_base = {} # Map base_unit -> {group_id: (data, position)}
+            empty_units = set()        # Track units with no actual data
             prev_base_unit = None
             
             for unit in all_plot_units:
                 unit_data = item_data[item_data['Plot_Unit'] == unit]
                 
-                # Skip units that do not have enough data to form a meaningful distribution
-                if unit_data[current_value_col].count() < min_size_to_plot:
+                if (show_empty_subgroups or consolidated_unit_reference is not None) and len(unit_data) == 0:
+                    # Add a placeholder with NaN value to ensure the unit appears in the plot
+                    # This applies to both empty subgroups and empty consolidated units
+                    unit_data = pd.DataFrame({current_value_col: [np.nan], 'Plot_Unit': [unit]})
+                    has_data = False
+                    empty_units.add(unit)  # Track as empty for stats exclusion
+                else:
+                    has_data = True
+
+                if unit_data[current_value_col].count() < min_size_to_plot and has_data:
                     continue
                 
                 base_unit = unit.split(' (')[0] if ' (' in unit else unit
@@ -4517,9 +4643,12 @@ class HSI_Visualizer:
                     else:
                         current_pos += between_unit_spacing
                 
+                # Track empty position before adding to plots
+                if not has_data:
+                    empty_positions.append(current_pos)
+                
                 # Simple unit-based plot
-                # Remove outliers using shared IQR method for both bar heights and statistical tests
-                if remove_outliers:
+                if remove_outliers and has_data:
                     unit_data_filtered = self._apply_outlier_filtration(unit_data, current_value_col, ['Plot_Unit'])
                 else:
                     unit_data_filtered = unit_data
@@ -4534,7 +4663,7 @@ class HSI_Visualizer:
                         bar_means.append(np.mean(raw_vals))
                         bar_stderrs.append(np.std(raw_vals) / np.sqrt(len(raw_vals)))
                     else:
-                        bar_means.append(0)
+                        bar_means.append(np.nan)
                         bar_stderrs.append(0)
                 
                 # Store individual values for scatter overlay
@@ -4596,6 +4725,23 @@ class HSI_Visualizer:
             # --- SIGNIFICANCE TESTING ---
             unit_significance = []
             sig_symbols = {0.001: '***', 0.01: '**', 0.05: '*', 1.0: 'ns'}
+
+            # Keep a consistent aspect ratio across bar, box, and violin variants so the
+            # rendered plots are directly comparable even when the orientation changes.
+            # For vertical plots: 2:1 aspect ratio (taller than wider), so width/height = 0.5
+            # For horizontal plots: 2:1 aspect ratio (wider than taller), so width/height = 2.0
+            target_aspect_ratio = 1.5 if horizontal else 0.66
+
+            def _match_aspect_ratio(preferred_width, preferred_height):
+                preferred_width = max(preferred_width, 6)
+                preferred_height = max(preferred_height, 4)
+
+                if preferred_width / preferred_height > target_aspect_ratio:
+                    preferred_height = preferred_width / target_aspect_ratio
+                else:
+                    preferred_width = preferred_height * target_aspect_ratio
+
+                return preferred_width, preferred_height
             
             # ALWAYS perform statistical tests on the RAW data (before outlier removal)
             # while the visual bars/boxes will respect the remove_outliers flag.
@@ -4603,7 +4749,7 @@ class HSI_Visualizer:
 
             if consolidate_Group_IDs:
                 # 1. INTER-UNIT: Compare all base units across the plot
-                unique_units = [u for u in all_plot_units if u in unit_position_map]
+                unique_units = [u for u in all_plot_units if u in unit_position_map and u not in empty_units]
                 # Filter to only units that have at least 2 samples AND non-zero variance (Welch's ANOVA requirement)
                 unique_units = [u for u in unique_units if len(stat_df[stat_df['Plot_Unit'] == u]) >= 2 
                                 and stat_df[stat_df['Plot_Unit'] == u][current_value_col].std() > 1e-9]
@@ -4625,11 +4771,15 @@ class HSI_Visualizer:
             else:
                 # 2. INTRA-UNIT: Compare subgroups within each base unit
                 for b_unit, s_dict in subgroup_data_by_base.items():
-                    g_ids = sorted(s_dict.keys())
+                    # Filter out empty subgroup variants from this base unit
+                    s_dict_filtered = {gid: (data, pos) for gid, (data, pos) in s_dict.items() 
+                                      if f"{b_unit} ({gid})" not in empty_units}
+                    g_ids = sorted(s_dict_filtered.keys())
+                    
                     if len(g_ids) == 2:
                         # Welch's T-test for 2 subgroups
-                        d1, p1 = s_dict[g_ids[0]]
-                        d2, p2 = s_dict[g_ids[1]]
+                        d1, p1 = s_dict_filtered[g_ids[0]]
+                        d2, p2 = s_dict_filtered[g_ids[1]]
                         _, p = ttest_ind(d1, d2, equal_var=False)
                         if p < 0.05:
                             sig = next((s for t, s in sig_symbols.items() if p <= t), 'ns')
@@ -4655,19 +4805,28 @@ class HSI_Visualizer:
 
 
             # Plotting
-            fig_height = 6
-            
-            # Scale width based on the total coordinate span to maintain consistent physical bar width.
-            # positions[-1] is the center of the last bar; we use it to calculate the total span.
-            # 0.8 inches per coordinate unit provides a consistent visual thickness.
-            fig_width = max(4, 2.5 + (positions[-1] + bar_width/2) * 0.8)
+            span_extent = positions[-1] + bar_width / 2
+            value_extent = max([abs(v) for v in bar_means if np.isfinite(v)] + [1.0])
+            if horizontal:
+                fig_width = max(6, 4.0 + value_extent * 0.08, 2.5 + span_extent * 0.8)
+                fig_height = max(4, 2.5 + span_extent * 0.8)
+            else:
+                fig_width = max(4, 2.5 + span_extent * 0.8)
+                fig_height = max(6, 4.0 + value_extent * 0.08)
+
+            fig_width, fig_height = _match_aspect_ratio(fig_width, fig_height)
 
             fig, ax = plt.subplots(figsize=(fig_width, fig_height))
 
             if plot_type == 'bar':
-                bars = ax.bar(positions, bar_means, width=bar_width, yerr=bar_stderrs,
-                            error_kw=dict(linestyle='-', elinewidth=1.5, capsize=5, capthick=1.5),
-                            color=colors, alpha=0.8, edgecolor='black', linewidth=2)
+                if horizontal:
+                    bars = ax.barh(positions, bar_means, height=bar_width, xerr=bar_stderrs,
+                                error_kw=dict(linestyle='-', elinewidth=1.5, capsize=5, capthick=1.5),
+                                color=colors, alpha=0.8, edgecolor='black', linewidth=2)
+                else:
+                    bars = ax.bar(positions, bar_means, width=bar_width, yerr=bar_stderrs,
+                                error_kw=dict(linestyle='-', elinewidth=1.5, capsize=5, capthick=1.5),
+                                color=colors, alpha=0.8, edgecolor='black', linewidth=2)
 
                 # Apply hatches to individual bars
                 for bar, h in zip(bars, hatches):
@@ -4680,6 +4839,7 @@ class HSI_Visualizer:
                     widths=bar_width * 0.9,
                     patch_artist=True,
                     showfliers=False,
+                    vert=not horizontal,
                 )
                 for patch, color, h in zip(box['boxes'], colors, hatches):
                     patch.set_facecolor(color)
@@ -4694,17 +4854,20 @@ class HSI_Visualizer:
                         artist.set_linewidth(1.2)
             else:  # violin
                 # violinplot requires ≥2 data points per group (needs KDE).
-                # Split into multi-point groups (violin) and single-point groups (scatter dot).
                 violin_vals, violin_positions, violin_colors, violin_hatches = [], [], [], []
                 single_vals, single_positions, single_colors = [], [], []
                 for vv, vp, vc, vh in zip(plot_vals_per_pos, positions, colors, hatches):
-                    clean = vv[~np.isnan(vv)] if len(vv) > 0 else vv
-                    if len(clean) >= 2:
-                        violin_vals.append(vv)
+                    arr = np.asarray(vv)
+                    # Keep only finite values
+                    clean = arr[np.isfinite(arr)] if arr.size > 0 else arr
+                    # Require at least two distinct finite values for KDE (violin);
+                    # otherwise treat as a single-point group (render as a marker)
+                    if clean.size >= 2 and np.unique(clean).size >= 2:
+                        violin_vals.append(clean)
                         violin_positions.append(vp)
                         violin_colors.append(vc)
                         violin_hatches.append(vh)
-                    elif len(clean) == 1:
+                    elif clean.size == 1:
                         single_vals.append(clean[0])
                         single_positions.append(vp)
                         single_colors.append(vc)
@@ -4716,7 +4879,8 @@ class HSI_Visualizer:
                         widths=bar_width * 0.95,
                         showmeans=False,
                         showmedians=True,
-                        showextrema=True,
+                        showextrema=False,
+                        vert=not horizontal,
                     )
                     for body, color, h in zip(violin['bodies'], violin_colors, violin_hatches):
                         body.set_facecolor(color)
@@ -4735,7 +4899,7 @@ class HSI_Visualizer:
                     ax.scatter(
                         single_positions, single_vals,
                         color=single_colors, edgecolors='black',
-                        linewidths=1.0, s=60, zorder=5, marker='D',
+                        linewidths=1.0, s=2, zorder=5, marker='D',
                         label='_single_point'
                     )
 
@@ -4746,27 +4910,104 @@ class HSI_Visualizer:
                 for (s_pos, s_vals), s_color in zip(scatter_vals_per_pos, colors):
                     if len(s_vals) == 0:
                         continue
-                    jitter = rng.uniform(-scatter_jitter, scatter_jitter, size=len(s_vals))
-                    ax.scatter(
-                        s_pos + jitter,
-                        s_vals,
-                        color=s_color,
-                        edgecolors='black',
-                        linewidths=0.5,
-                        s=18,
-                        alpha=0.65,
-                        zorder=4,
-                    )
+                    elif len(s_vals) == 1:
+                        # Single point: plot without jitter
+                        if horizontal:
+                            ax.scatter(
+                                s_vals[0], s_pos,
+                                color=s_color, edgecolors='black',
+                                linewidths=1.0, s=60, zorder=2, marker='D',
+                                label='_single_point_scatter'
+                            )
+                        else:
+                            ax.scatter(
+                                s_pos, s_vals[0],
+                                color=s_color, edgecolors='black',
+                                linewidths=1.0, s=60, zorder=2, marker='D',
+                                label='_single_point_scatter'
+                            )
+                        continue
+                    elif len(s_vals) > 100:
+                        # Plot random subset of points if too many to avoid overplotting
+                        s_rand_vals = rng.choice(s_vals, size=100, replace=False)
+                        jitter = rng.uniform(-scatter_jitter, scatter_jitter, size=100)
+                        if horizontal:
+                            ax.scatter(
+                                s_rand_vals,
+                                s_pos + jitter,
+                                color=s_color,
+                                edgecolors='black',
+                                linewidths=0.5,
+                                s=2,
+                                alpha=0.5,
+                                zorder=4,
+                            )
+                        else:
+                            ax.scatter(
+                                s_pos + jitter,
+                                s_rand_vals,
+                                color=s_color,
+                                edgecolors='black',
+                                linewidths=0.5,
+                                s=2,
+                                alpha=0.5,
+                                zorder=4,
+                            )
+                    else:
+                        jitter = rng.uniform(-scatter_jitter, scatter_jitter, size=len(s_vals))
+                        if horizontal:
+                            ax.scatter(
+                                s_vals,
+                                s_pos + jitter,
+                                color=s_color,
+                                edgecolors='black',
+                                linewidths=0.5,
+                                s=2,
+                                alpha=0.5,
+                                zorder=4,
+                            )
+                        else:
+                            ax.scatter(
+                                s_pos + jitter,
+                                s_vals,
+                                color=s_color,
+                                edgecolors='black',
+                                linewidths=0.5,
+                                s=2,
+                                alpha=0.5,
+                                zorder=4,
+                            )
 
             # Labels and styling
             display_item = display_name_map.get(item_name, item_name) if display_name_map else item_name
-            y_label = 'Relative Prob. %' if data_type == 'percentage' else 'Mean Ratio'
-            ax.set_ylabel(y_label, fontweight='bold', fontsize=14)
-            ax.set_title(f"{display_item}", fontweight='bold', fontsize=16, pad=15)
+            # y_label = 'Relative Prob. %' if data_type == 'percentage' else 'Mean Value'
+            # y_label = ""
+            # ax.set_ylabel(y_label, fontweight='bold', fontsize=14)
+            if horizontal:
+                ax.tick_params(axis='y', pad=6, labelsize=11)
+                ax.set_yticks(unit_tick_positions)
+                # Remove unit names from y-axis labels
+                ax.set_yticklabels([])
+                # Invert y-axis so bars appear in reverse order (top-to-bottom)
+                ax.invert_yaxis()
+                ax.tick_params(axis='x', pad=2, labelsize=11)
+                
+                # # Set consistent aspect ratio for the plot area (grid)
+                # # Make plot grid square in data coordinates for consistent visual proportions
+                # y_range = positions[-1] - positions[0] + bar_width if positions else 1.0
+                # xlim = ax.get_xlim()
+                # x_range = xlim[1] - xlim[0] if xlim else 1.0
+                # aspect_ratio = y_range / x_range if x_range > 0 else 1.0
+                # ax.set_aspect(aspect_ratio, adjustable='box')
+
+            ax.set_title(f"{display_item}", fontweight='bold', fontsize=20, pad=15)
             
-            # Hide x-ticks and build legends
-            ax.set_xticks([])
-            ax.set_xticklabels([])
+            # Hide category ticks only for the vertical layout; the horizontal layout
+            # keeps the numeric x-axis visible.
+            if not horizontal:
+                ax.set_xticks([])
+                ax.set_xticklabels([])
+                ax.tick_params(axis='y', labelsize=16)
 
             # Legend 1: base unit colors only (no subgroup suffixes)
             unit_legend_patches = []
@@ -4797,7 +5038,11 @@ class HSI_Visualizer:
                 if ' (' in pu:
                     subgroups_in_plot.add(pu.split(' (')[-1].rstrip(')'))
             
-            subgroup_ids_present = [sg for sg in subgroup_list if sg in subgroups_in_plot]
+            if subgroup_list is not None:
+                subgroup_ids_present = [sg for sg in subgroup_list if sg in subgroups_in_plot]
+            else:
+                print("No subgroup_list provided; skipping subgroup legend.")
+                subgroup_ids_present = []
 
             if subgroup_ids_present:
                 subgroup_legend_patches = []
@@ -4829,23 +5074,35 @@ class HSI_Visualizer:
             # --- Save significance results to CSV ---
             if output_dir and unit_significance:
                 import csv
-                item_safe_sig = item_name.replace(':', '').replace('/', '_').replace(' ', '_')
+                import re
+                item_safe_sig = re.sub(r'[<>:"/\\|?*]', '_', str(item_name))
                 sig_csv_path = os.path.join(output_dir, f"{item_safe_sig}_significance.csv")
                 # Build a reverse map: position -> unit label
                 pos_to_label = {pos: lbl for pos, lbl in zip(unit_tick_positions, unit_tick_labels)}
+                # Build a map: position -> mean value
+                pos_to_mean = {pos: mean for pos, mean in zip(positions, bar_means)}
                 with open(sig_csv_path, 'w', newline='') as csvf:
                     writer = csv.writer(csvf)
-                    writer.writerow(['Group_1', 'Group_2', 'Significance'])
+                    writer.writerow(['Group_1', 'Group_2', 'Significance', 'Greater_Mean'])
                     for x1, x2, sig_sym in unit_significance:
                         lbl1 = pos_to_label.get(x1, str(x1))
                         lbl2 = pos_to_label.get(x2, str(x2))
-                        writer.writerow([lbl1, lbl2, sig_sym])
+                        mean1 = pos_to_mean.get(x1, np.nan)
+                        mean2 = pos_to_mean.get(x2, np.nan)
+                        if np.isfinite(mean1) and np.isfinite(mean2):
+                            greater = lbl1 if mean1 > mean2 else lbl2
+                        else:
+                            greater = "N/A"
+                        writer.writerow([lbl1, lbl2, sig_sym, greater])
                 print(f"  Saved significance table: {sig_csv_path}")
 
             # --- Draw significance markers on the plot ---
             _sig_style = str(sig_style).lower().strip()
             if unit_significance and _sig_style != 'export_only':
-                y_max = ax.get_ylim()[1]
+                if horizontal:
+                    x_max = ax.get_xlim()[1]
+                else:
+                    y_max = ax.get_ylim()[1]
 
                 if _sig_style == 'stars_only':
                     # Compact mode: pick strongest symbol per bar position
@@ -4859,11 +5116,18 @@ class HSI_Visualizer:
                                 bar_sym_rank[pos] = rank
                                 bar_sym_label[pos] = sig_sym
 
-                    star_y = y_max * 1.04
-                    for pos, sym in bar_sym_label.items():
-                        ax.text(pos, star_y, sym, ha='center', va='bottom',
-                                fontsize=11, fontweight='bold', color='black')
-                    ax.set_ylim(top=y_max * 1.15)
+                    if horizontal:
+                        star_x = x_max * 1.04 if x_max != 0 else 1.0
+                        for pos, sym in bar_sym_label.items():
+                            ax.text(star_x, pos, sym, ha='left', va='center',
+                                    fontsize=11 if bar_width > 0.5 else 8, fontweight='bold', color='black')
+                        ax.set_xlim(right=x_max * 1.15 if x_max != 0 else 1.15)
+                    else:
+                        star_y = y_max * 1.04
+                        for pos, sym in bar_sym_label.items():
+                            ax.text(pos, star_y, sym, ha='center', va='bottom',
+                                    fontsize=11 if bar_width > 0.5 else 8, fontweight='bold', color='black')
+                        ax.set_ylim(top=y_max * 1.15)
 
                 else:  # 'brackets' (default)
                     line_height = 0.08
@@ -4886,37 +5150,114 @@ class HSI_Visualizer:
                                 break
                             level += 1
 
-                        y_pos = y_max * (1.10 + level * line_height)
-                        ax.plot([x1, x2], [y_pos, y_pos], 'k-', linewidth=1.0)
-                        ax.text((x1 + x2) / 2, y_pos, sig_sym,
-                                ha='center', va='bottom', fontsize=10, fontweight='bold')
+                        if horizontal:
+                            x_pos = x_max * (1.10 + level * line_height)
+                            ax.plot([x_pos, x_pos], [x1, x2], 'k-', linewidth=1.0)
+                            ax.text(x_pos, (x1 + x2) / 2, sig_sym,
+                                    ha='left', va='center', fontsize=10 if bar_width > 0.5 else 8, fontweight='bold')
+                        else:
+                            y_pos = y_max * (1.10 + level * line_height)
+                            ax.plot([x1, x2], [y_pos, y_pos], 'k-', linewidth=1.0)
+                            ax.text((x1 + x2) / 2, y_pos, sig_sym,
+                                    ha='center', va='bottom', fontsize=10 if bar_width > 0.5 else 8, fontweight='bold')
                         drawn_markers.append(((x1, x2), level))
 
                     max_level = max(m[1] for m in drawn_markers) if drawn_markers else 0
-                    ax.set_ylim(top=y_max * (1.20 + max_level * line_height))
-                    
-                    # Dynamically increase figure height if we have many levels
-                    if max_level > 3:
-                        fig.set_figheight(fig_height + (max_level - 3) * 0.5)
+                    if horizontal:
+                        ax.set_xlim(right=x_max * (1.20 + max_level * line_height))
+                        # Dynamically increase figure width if we have many levels
+                        if max_level > 3:
+                            fig.set_figwidth(fig_width + (max_level - 3) * 0.5)
+                    else:
+                        ax.set_ylim(top=y_max * (1.20 + max_level * line_height))
+                        
+                        # Dynamically increase figure height if we have many levels
+                        if max_level > 3:
+                            fig.set_figheight(fig_height + (max_level - 3) * 0.5)
+
+            # --- Mark empty units with subtle vertical tick lines (flush with spine) ---
+            if empty_positions:
+                if horizontal:
+                    x_min, x_max = ax.get_xlim()
+                    tick_width = (x_max - x_min) * 0.01  # Small tick size
+                    for y_pos in empty_positions:
+                        # Draw a small horizontal tick line at the left edge, flush with spine
+                        ax.plot([x_min, x_min + tick_width], [y_pos, y_pos], 'k-', linewidth=1.5, alpha=0.5, zorder=3)
+                else:
+                    y_min, y_max = ax.get_ylim()
+                    tick_height = (y_max - y_min) * 0.01  # Small tick size
+                    for x_pos in empty_positions:
+                        # Draw a small vertical tick line at the bottom, starting from the spine (flush with x-axis)
+                        ax.plot([x_pos, x_pos], [y_min, y_min + tick_height], 'k-', linewidth=1.5, alpha=0.5, zorder=3)
 
             # Grid and spines
-            ax.grid(axis='y', linestyle='--', alpha=0.3)
-            for spine in ax.spines.values(): spine.set_edgecolor('#cccccc')
+            # Enable grid and send it behind the plot
+            ax.grid(True, which='major', axis='y', linestyle='--', alpha=0.7, zorder=0)
+            ax.set_axisbelow(True)
+
+            # Ensure the patch (background) is transparent so grid is visible
+            ax.set_facecolor('white')  # Keep background white
+            ax.patch.set_alpha(0)  
+            for spine in ax.spines.values(): spine.set_edgecolor("#505050")
             
-            try:
-                plt.tight_layout()
-            except Exception:
-                # Fallback if decorations are too large for tight_layout
-                pass
+            # try:
+            #     plt.tight_layout()
+            # except Exception:
+            #     # Fallback if decorations are too large for tight_layout
+            #     pass
             # Save
-            item_safe = item_name.replace(':', '').replace('/', '_').replace(' ', '_')
-            save_path = os.path.join(output_dir, f"{data_type}_{item_safe}_{plot_type}plot.png")
+            # Sanitize item_name for use as filename (remove/replace invalid Windows characters)
+            import re
+            item_safe = re.sub(r'[<>:"/\\|?*]', '_', str(item_name))
+            orientation_suffix = '_horizontal' if horizontal else ''
+            save_path = os.path.join(output_dir, f"{data_type}_{item_safe}_{plot_type}plot{orientation_suffix}.png")
             # print(f" Generated individual bar plot in {save_path}")
 
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path, dpi=600, bbox_inches='tight', transparent=True)
             
             if show_plots: plt.show()
             else: plt.close(fig)
+
+    def create_individual_barplots_horizontal(self, df, value_col, grouping_col, items_list=None,
+                                               output_dir=None, data_type='percentage',
+                                               show_plots=False, display_name_map=None,
+                                               unit_color_map=None, unit_display_map=None,
+                                               units_to_display=None,
+                                               consolidate_Group_IDs=False,
+                                               subgroup_list=None,
+                                               compare_by="Group_ID",
+                                               show_empty_subgroups=False,
+                                               show_scatter=False,
+                                               plot_type='bar',
+                                               sig_style='brackets',
+                                               use_patterns=True,
+                                               min_size_to_plot=3,
+                                               remove_outliers=True):
+        """Create individual plots using the same workflow as create_individual_barplots, but horizontal."""
+        return self.create_individual_barplots(
+            df=df,
+            value_col=value_col,
+            grouping_col=grouping_col,
+            items_list=items_list,
+            output_dir=output_dir,
+            data_type=data_type,
+            show_plots=show_plots,
+            display_name_map=display_name_map,
+            unit_color_map=unit_color_map,
+            unit_display_map=unit_display_map,
+            units_to_display=units_to_display,
+            consolidate_Group_IDs=consolidate_Group_IDs,
+            subgroup_list=subgroup_list,
+            compare_by=compare_by,
+            show_empty_subgroups=show_empty_subgroups,
+            show_scatter=show_scatter,
+            plot_type=plot_type,
+            sig_style=sig_style,
+            use_patterns=use_patterns,
+            min_size_to_plot=min_size_to_plot,
+            remove_outliers=remove_outliers,
+            orientation='horizontal',
+        )
 
     def generate_spatial_value_maps(self, df, value_col, grouping_col, output_dir, 
                                    grid_size=(1000, 1000), cmap='magma', show_plots=False,
@@ -5049,14 +5390,14 @@ class HSI_Visualizer:
                 # Styling
                 title_suffix = f" (Unit: {', '.join(selected_units)})" if selected_units else ""
                 ax.set_title(f"Spatial Distribution: {item_name}{title_suffix}\nImage: {img_name}", 
-                             fontweight='bold', fontsize=16, pad=20)
+                             fontweight='bold', fontsize=20, pad=20)
                 
                 if grid_size:
-                    ax.set_xlabel(f"Binned X (Grid: {width})", fontsize=12)
-                    ax.set_ylabel(f"Binned Y (Grid: {height})", fontsize=12)
+                    ax.set_xlabel(f"Binned X (Grid: {width})", fontsize=16)
+                    ax.set_ylabel(f"Binned Y (Grid: {height})", fontsize=16)
                 else:
-                    ax.set_xlabel("X (pixels)", fontsize=12)
-                    ax.set_ylabel("Y (pixels)", fontsize=12)
+                    ax.set_xlabel("X (pixels)", fontsize=16)
+                    ax.set_ylabel("Y (pixels)", fontsize=16)
                 
                 plt.tight_layout()
                 
@@ -5064,7 +5405,7 @@ class HSI_Visualizer:
                 item_safe = str(item_name).replace(':', '').replace('/', '_').replace(' ', '_')
                 img_safe = str(img_name).replace(':', '').replace('/', '_').replace(' ', '_')
                 save_path = os.path.join(output_dir, f"spatial_{value_col}_{item_safe}_{img_safe}_{selected_units}.png")
-                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                plt.savefig(save_path, dpi=600, bbox_inches='tight')
                 
                 if show_plots:
                     plt.show()
@@ -5203,7 +5544,7 @@ class HSI_Visualizer:
                     save_name = f"profile_{direction}_{img_safe}{item_safe}.png"
                         
                     save_path = os.path.join(output_dir, save_name)
-                    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                    plt.savefig(save_path, dpi=600, bbox_inches='tight')
                     
                     if show_plots:
                         plt.show()
@@ -5211,326 +5552,4 @@ class HSI_Visualizer:
                         plt.close(fig)
                     
                     print(f"Generated {direction.upper()} directional profile for {img_name}{group_title}")
-
-    def plot_distance_variation_wide(self, wide_df, ratio_cols, distance_col='distance', 
-                                     unit_col='Unit', output_dir=None, 
-                                     display_name_map=None, unit_display_map=None,
-                                     show_plots=False, threshold_col=None, threshold_dict=None,
-                                     pixel_size_um=1.0, bin_size_um=5.0, min_points_per_bin=5):
-        """
-        Visualize how specific ratio values vary as a function of distance from a feature.
-        Separates plots by ratio type and overlays different threshold categories in the same figure.
-        
-        Args:
-            wide_df: DataFrame with one row per instance and ratio columns.
-            ratio_cols: List of column names in wide_df to plot.
-            distance_col: Column name representing distance (X-axis).
-            unit_col: Column name to group by (one figure per unit).
-            output_dir: Directory to save the resulting plots.
-            display_name_map: Optional mapping for ratio names in titles.
-            unit_display_map: Optional mapping for unit names in titles.
-            show_plots: Whether to display plots interactively.
-            threshold_col: Optional column name to use for grouping (e.g., 'thickness').
-            threshold_dict: Optional dict mapping category names to [min, max] bounds for threshold_col.
-            pixel_size_um: Multiplier to convert distance_col to microns.
-            bin_size_um: Size of bins for averaging distance values to smooth the plot.
-            min_points_per_bin: Minimum number of points required in a bin to keep it (clips the tail).
-        """
-        import matplotlib.pyplot as plt
-        import seaborn as sns
-        import os
-        import pandas as pd
-        import numpy as np
-
-        if wide_df is None or wide_df.empty:
-            print("No data available for distance variation plotting.")
-            return
-
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-
-        # Scale distance to microns
-        df = wide_df.copy()
-        if pixel_size_um != 1.0:
-            df[distance_col] = df[distance_col] * pixel_size_um
-
-        # Iterate over unique units
-        unique_units = sorted(df[unit_col].dropna().unique())
-        for unit in unique_units:
-            unit_df = df[df[unit_col] == unit].copy()
-            if unit_df.empty:
-                continue
-
-            display_unit = unit_display_map.get(unit, unit) if unit_display_map else unit
-            
-            for ratio in ratio_cols:
-                if ratio not in unit_df.columns:
-                    continue
-                    
-                # Prepare plot data for this unit and ratio
-                plot_df = unit_df.dropna(subset=[ratio, distance_col]).copy()
-                if plot_df.empty:
-                    continue
-                
-                hue_col = None
-                hue_order = None
-                if threshold_dict and threshold_col:
-                    # Categorize rows by threshold bounds
-                    plot_df['Category'] = 'Other'
-                    for cat_name, bounds in threshold_dict.items():
-                        t_min, t_max = bounds
-                        mask = (plot_df[threshold_col] >= t_min) & (plot_df[threshold_col] <= t_max)
-                        plot_df.loc[mask, 'Category'] = cat_name
-                    
-                    # Remove points that don't fit any category
-                    plot_df = plot_df[plot_df['Category'] != 'Other'].copy()
-                    if plot_df.empty: 
-                        continue
-                    
-                    hue_col = 'Category'
-                    hue_order = list(threshold_dict.keys())
-                
-                # Binning for smoothing
-                plot_df['dist_bin'] = (plot_df[distance_col] // bin_size_um) * bin_size_um + (bin_size_um / 2)
-                
-                # Clipping: find the last bin with sufficient data to avoid noisy tails
-                bin_counts = plot_df.groupby('dist_bin').size()
-                valid_bins = bin_counts[bin_counts >= min_points_per_bin].index
-                if len(valid_bins) > 0:
-                    max_dist = valid_bins.max()
-                    plot_df = plot_df[plot_df['dist_bin'] <= max_dist].copy()
-                else:
-                    continue # Not enough data for any bin
-
-                # Generate Plot
-                display_ratio = display_name_map.get(ratio, ratio) if display_name_map else ratio
-                title = f"{display_unit}: {display_ratio}"
-                
-                fig = plt.figure(figsize=(12, 7))
-                # Set theme for consistency
-                sns.set_theme(style="whitegrid")
-                
-                sns.lineplot(data=plot_df, x='dist_bin', y=ratio, hue=hue_col, 
-                             hue_order=hue_order, linewidth=3, palette='viridis', 
-                             errorbar='se', marker='o', markersize=4)
-                
-                plt.title(f"Distance-Dependent Profile: {title}", fontweight='bold', fontsize=16, pad=20)
-                plt.xlabel("Distance to Feature (microns)", fontsize=14, fontweight='bold')
-                plt.ylabel(f"Mean {display_ratio}", fontsize=14, fontweight='bold')
-                
-                legend_title = threshold_col.replace('_', ' ').title() if threshold_col else None
-                plt.legend(title=legend_title, bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0., frameon=True)
-                plt.grid(True, linestyle='--', alpha=0.4)
-                plt.tight_layout()
-
-                if output_dir:
-                    safe_ratio = str(ratio).replace(' ', '_').replace('/', '_')
-                    safe_unit = str(unit).replace(' ', '_').replace('/', '_').replace(':', '')
-                    file_path = os.path.join(output_dir, f"variation_{safe_unit}_{safe_ratio}.png")
-                    plt.savefig(file_path, dpi=300, bbox_inches='tight')
-                    
-                if show_plots:
-                    plt.show()
-                else:
-                    plt.close(fig)
-        
-        print(f"Distance variation plots generated in {output_dir}")
-
-    def plot_distance_variation_heatmap(self, wide_df, ratio_cols, distance_col='distance', 
-                                         unit_col='Unit', output_dir=None, 
-                                         display_name_map=None, unit_display_map=None,
-                                         show_plots=False, threshold_col=None, threshold_dict=None,
-                                         pixel_size_um=1.0, n_bins=120, min_points_per_bin=3,
-                                         remove_outliers=False, selected_units=None, max_distance=None):
-        """
-        Visualize spatial gradients of ratios as a heatmap, with units and threshold categories as rows.
-        The X-axis represents distance bins from 0 to the maximum observed distance.
-        
-        Args:
-            wide_df: DataFrame with one row per instance and ratio columns.
-            ratio_cols: List of column names in wide_df to plot.
-            distance_col: Column name representing distance (X-axis).
-            unit_col: Column name for units (rows).
-            output_dir: Directory to save the resulting plots.
-            display_name_map: Optional mapping for ratio names in titles.
-            unit_display_map: Optional mapping for unit names in row labels.
-            show_plots: Whether to display plots interactively.
-            threshold_col: Optional column name for thickness/threshold grouping.
-            threshold_dict: Optional dict mapping category names to [min, max] bounds.
-            pixel_size_um: Multiplier to convert distance_col to microns.
-            n_bins: Number of bins along the distance axis (default 120).
-            min_points_per_bin: Minimum number of points required in a bin to keep it.
-            remove_outliers: Whether to apply IQR-based outlier filtration per group.
-            selected_units: Optional list of units to include in the heatmap.
-        """
-        import matplotlib.pyplot as plt
-        import seaborn as sns
-        import os
-        import pandas as pd
-        import numpy as np
-
-        if wide_df is None or wide_df.empty:
-            print("No data available for distance variation heatmap.")
-            return
-
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-
-        df = wide_df.copy()
-
-        # 1. Filter by selected units
-        if selected_units:
-            if isinstance(selected_units, str):
-                selected_units = [selected_units]
-            df = df[df[unit_col].isin(selected_units)].copy()
-            if df.empty:
-                print(f"No data for selected units: {selected_units}")
-                return
-
-        # 2. Scale distance
-        if pixel_size_um != 1.0:
-            df[distance_col] = df[distance_col] * pixel_size_um
-
-        # 3. Categorize by threshold if provided
-        if threshold_dict and threshold_col:
-            df['Category'] = 'Other'
-            for cat_name, bounds in threshold_dict.items():
-                t_min, t_max = bounds
-                mask = (df[threshold_col] >= t_min) & (df[threshold_col] <= t_max)
-                df.loc[mask, 'Category'] = cat_name
-            df = df[df['Category'] != 'Other'].copy()
-
-        # 4. Iterate over Ratios
-        for ratio in ratio_cols:
-            if ratio not in df.columns:
-                continue
-                
-            ratio_df = df.dropna(subset=[ratio, distance_col]).copy()
-            if ratio_df.empty:
-                continue
-                
-            # 5. Optional Outlier Filtration
-            if remove_outliers:
-                group_cols = [unit_col]
-                if 'Category' in ratio_df.columns:
-                    group_cols.append('Category')
-                ratio_df = self._apply_outlier_filtration(ratio_df, ratio, group_cols)
-
-            if ratio_df.empty:
-                continue
-
-            # 6. Define Bins across the whole range for this ratio
-            if max_distance is not None:
-                max_dist = max_distance
-            else:
-                max_dist = ratio_df[distance_col].quantile(.95)
-            if max_dist == 0 or np.isnan(max_dist):
-                print(f"Warning: max_distance is 0 or NaN, setting to 80 for {ratio}")
-                max_dist = 80
-            
-            bin_edges = np.linspace(0, max_dist, n_bins + 1)
-            bin_centers = bin_edges[:-1] + np.diff(bin_edges)/2
-            
-            # Use cut to assign bins
-            ratio_df['dist_bin'] = pd.cut(ratio_df[distance_col], bins=bin_edges, labels=False, include_lowest=True)
-            
-            # 7. Aggregate
-            group_keys = [unit_col, 'dist_bin']
-            if 'Category' in ratio_df.columns:
-                group_keys.insert(1, 'Category')
-                
-            # Calculate mean and count per bin
-            agg_df = ratio_df.groupby(group_keys, observed=True).agg({
-                ratio: 'mean',
-                distance_col: 'count' 
-            }).reset_index()
-            
-            # 8. Apply Clipping for sparse bins
-            agg_df.loc[agg_df[distance_col] < min_points_per_bin, ratio] = np.nan
-            
-            # 9. Pivot for Heatmap
-            if 'Category' in ratio_df.columns:
-
-                
-                # Robust Row Ordering
-                row_order = []
-                # Filter units present in the current agg_df
-                units_present = agg_df[unit_col].unique()
-                
-                # Order units based on unit_display_map or alphabetical
-                if unit_display_map:
-                    ordered_units = [u for u in unit_display_map.keys() if u in units_present]
-                    # Add any units not in map
-                    remaining = sorted([u for u in units_present if u not in unit_display_map])
-                    ordered_units.extend(remaining)
-                else:
-                    ordered_units = sorted(units_present)
-
-                # Create row label
-                agg_df['display_unit'] = agg_df[unit_col].map(unit_display_map).fillna(agg_df[unit_col])
-
-                agg_df['Row_Label'] = agg_df['display_unit'].astype(str) + " (" + agg_df['Category'].astype(str) + ")"
-                pivot = agg_df.pivot(index='Row_Label', columns='dist_bin', values=ratio)
-
-
-                # Within each unit, order by threshold category
-                for u in ordered_units:
-                    disp_u = unit_display_map.get(u, u) if unit_display_map else u
-                    for cat in threshold_dict.keys():
-                        label = f"{disp_u} ({cat})"
-                        if label in pivot.index:
-                            row_order.append(label)
-                
-                if not row_order:
-                    # Fallback to current pivot index if reordering failed to find matches
-                    row_order = pivot.index.tolist()
-
-                pivot = pivot.reindex(row_order)
-            else:
-                pivot = agg_df.pivot(index=unit_col, columns='dist_bin', values=ratio)
-                if unit_display_map:
-                    ordered_units = [u for u in unit_display_map.keys() if u in pivot.index]
-                    pivot = pivot.reindex(ordered_units)
-                else:
-                    pivot = pivot.sort_index()
-
-            # 10. Visualization
-            if pivot is None or pivot.empty:
-                continue
-                
-            n_rows = len(pivot)
-            fig, ax = plt.subplots(figsize=(16, max(4, n_rows * 0.45)))
-            
-            # Mask NaNs implicitly by leaving them blank or using a specific color
-            sns.heatmap(pivot, cmap='coolwarm', ax=ax, 
-                        cbar_kws={'label': f'Mean {ratio}'}, 
-                        xticklabels=False, yticklabels=True)
-            
-            display_ratio = display_name_map.get(ratio, ratio) if display_name_map else ratio
-            plt.title(f"Distance Gradient Heatmap: {display_ratio}", fontweight='bold', fontsize=18, pad=20)
-            plt.xlabel(f"Distance to Feature (0 to {max_dist:.1f} microns)", fontsize=14, fontweight='bold')
-            plt.ylabel("Unit (Subdivision)", fontsize=14, fontweight='bold')
-            
-            # Add some X-axis labels for reference
-            n_ticks = 10
-            tick_indices = np.linspace(0, n_bins - 1, n_ticks, dtype=int)
-            ax.set_xticks(tick_indices + 0.5)
-            ax.set_xticklabels([f"{bin_centers[i]:.0f}" for i in tick_indices], rotation=0)
-            ax.tick_params(axis='x', which='both', length=5, width=1, labelsize=10)
-
-            plt.tight_layout()
-            
-            if output_dir:
-                safe_ratio = str(ratio).replace(' ', '_').replace('/', '_').replace(':', '')
-                save_path = os.path.join(output_dir, f"dist_heatmap_{safe_ratio}.png")
-                plt.savefig(save_path, dpi=300, bbox_inches='tight')
-                print(f"  Saved heatmap for {ratio}: {save_path}")
-                
-            if show_plots:
-                plt.show()
-            else:
-                plt.close(fig)
-        
-        print(f"Distance variation heatmaps generated in {output_dir}")
-
 

@@ -3,11 +3,15 @@
   "description": "Configuration for kidney tissue analysis with major nephron segments",
   "processing_options": {
     "perform_RF_classification": false,
-    "perform_masking": true,
+    "perform_masking": false,
     "display_plots": true
   },
   "dataset_parameters": {
     "mask_type": "CODEX_FTUcells_masks",
+      "subgroups": [
+        "Cortex",
+        "Medulla"
+      ],
     "display_units_maps": [
       "Glomeruli",
       "Proximal Tubule",
@@ -20,10 +24,10 @@
     "display_units_boxplots": [
       "Glomeruli",
       "Proximal Tubule",
+      "Thin Descending Limb",
       "Thick Ascending Limb",
       "Distal Tubule",
       "Distal Nephron",
-      "Thin Descending Limb",
       "Vasculature"
     ],
     "molecules_to_display": [
@@ -97,10 +101,10 @@
   "unit_mappings": {
     "glom": "Glomeruli",
     "proxtub": "Proximal Tubule",
+    "tdl": "Thin Descending Limb",
     "disttub": "Distal Tubule",
     "tal": "Thick Ascending Limb",
     "distneph": "Distal Nephron",
-    "tdl": "Thin Descending Limb",
     "vasc": "Vasculature"
   },
   "unit_colors": {

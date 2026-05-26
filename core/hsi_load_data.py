@@ -47,6 +47,26 @@ def normalize(array, max_val=None, min_val=None, axis=None):
         diff = max_val - min_val
         return (array - min_val) / diff + 1e-6
 
+def noise_normalize(array, ch_start, axis=1):
+    """
+    Normalize array by noise level calculated from specified channel range. Expected shape of array is (n_samples, n_channels).
+    
+    Args:
+        array: Input 2D array (num_molecules x num_samples)
+        ch_start: Starting channel index to calculate noise level (inclusive)
+        axis: Axis along which to normalize (default 1)
+    """
+    # Calculate noise level from specified channel range
+    noise_level = np.std(array[:, 0:ch_start], axis=axis, keepdims=True)
+    if np.any(noise_level == 0):
+        print("Warning: Noise level is zero for some channels, which is unexpected. Adding small constant to avoid division by zero.")
+        noise_level = np.where(noise_level == 0, 1e-6, noise_level)
+    noise_mean = np.mean(array[:, 0:ch_start], axis=axis, keepdims=True)
+
+    array = array - noise_mean  # Center data by subtracting mean
+    
+    # Normalize array by noise level
+    return array / noise_level
 
 def create_background(wavenumber_1, wavenumber_2, num_samp, background_df, br_shift):
 

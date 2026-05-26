@@ -10,7 +10,7 @@ if core_path not in sys.path:
     sys.path.insert(0, core_path)
     
 from hsi_unlabeled_dataset import HSI_Unlabeled_Dataset
-from hsi_load_data import normalize
+from hsi_load_data import normalize, noise_normalize
 import tifffile
 
 
@@ -22,7 +22,7 @@ def spectral_standardization(data, wavenum_1=2700, wavenum_2=3100, num_samp=61, 
     ch_start = int((2800 - wavenum_1) / (wavenum_2 - wavenum_1) * num_samp)
     if background is None:
         raise ValueError("background cannot be None. Load from srs_params_path.")
-    temp_norm = normalize(data)
+    temp_norm = noise_normalize(data, ch_start)
     temp_end = temp_norm[:,-1:-4:-1]
     temp_start = temp_norm[:,:ch_start]
     temp = temp_norm-np.mean(temp_start,axis=1)[:, np.newaxis]
@@ -152,7 +152,7 @@ def main():
         
         # --- Pass 2: Final Process and Save ---
         print("  Pass 2: Finalizing and writing output...")
-        normalized_dir = os.path.join(os.path.dirname(os.path.dirname(img_path)), 'normalized')
+        normalized_dir = os.path.join(os.path.dirname(os.path.dirname(img_path)), 'Normalized')
         os.makedirs(normalized_dir, exist_ok=True)
         norm_img_path = os.path.join(normalized_dir, f"{sample}")
         

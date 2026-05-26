@@ -61,7 +61,7 @@ def generate_ion_umaps(
         output_dir = os.path.join(plots_directory, 'umaps_ratios')
 
     # Set aesthetic parameters for premium look
-    sns.set_theme(style="whitegrid", palette="muted")
+    # sns.set_theme(style="whitegrid", palette="muted")
     plt.rcParams['font.family'] = 'sans-serif'
     plt.rcParams['font.sans-serif'] = ['Arial', 'DejaVu Sans']
 
@@ -147,7 +147,7 @@ def generate_ion_umaps(
                 continue
 
             print(f"  Generating plot for {color_by} ({len(plot_df)} instances shown)...")
-            plt.figure(figsize=(12, 12), dpi=100)
+            plt.figure(figsize=(8, 8), dpi=100)
             
             # Determine palette and order
             if color_by == 'Unit':
@@ -172,23 +172,40 @@ def generate_ion_umaps(
                 plot_hue = 'Group_ID'
                 title_label = "Subgroup (Group ID)"
 
-            sns.scatterplot(
+            ax = sns.scatterplot(
                 data=plot_df,
                 x='umap_1', y='umap_2',
                 hue=plot_hue,
                 palette=palette,
                 hue_order=hue_order_display,
-                alpha=0.7,
+                alpha=0.8,
                 edgecolor='w',
                 linewidth=0.5,
-                s=25
+                s=15
             )
+
+            # Remove top and right spines
+            sns.despine(ax=ax)
+
+            # Remove x-axis labels
+            ax.set_xticklabels([])  # Removes tick labels
+            ax.set_xlabel("")       # Removes axis title
+
+            # Remove y-axis labels
+            ax.set_yticklabels([])
+            ax.set_ylabel("")
+
+            # Remove legend
+            ax.get_legend().remove()
             
-            plt.title(f"UMAP Visualization: {mode_name}\nColored by {title_label}", fontsize=15, fontweight='bold', pad=20)
-            plt.xlabel("UMAP Dimension 1", fontsize=12)
-            plt.ylabel("UMAP Dimension 2", fontsize=12)
-            plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0, title=title_label, frameon=True, shadow=True)
-            plt.grid(True, alpha=0.3)
+            # plt.title(f"UMAP Visualization: {mode_name} + MMOI", fontsize=24, fontweight='bold', pad=20)
+            # plt.xlabel("UMAP Dimension 1", fontsize=18)
+            # plt.ylabel("UMAP Dimension 2", fontsize=18)
+            # if len(hue_order_display) <= 10:
+            #     plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0, title=title_label, frameon=True, shadow=True)
+            # else:
+            #     plt.legend(ncols=2, bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0, title=title_label, frameon=True, shadow=True)
+            # plt.grid(True, alpha=0.3)
             plt.tight_layout()
             
             if output_dir:

@@ -3,11 +3,12 @@
   "description": "Configuration for kidney tissue analysis with 26 clusters",
   "processing_options": {
     "perform_RF_classification": false,
-    "perform_masking": true,
+    "perform_masking": false,
     "display_plots": true
   },
   "dataset_parameters": {
     "mask_type": "CODEX_clusters_masks",
+    "subgroups": null,
     "display_units_maps": null,
     "molecules_to_display": [
       "16:0 Cardiolipin",
@@ -31,16 +32,15 @@
     ],
     "ratios_to_display": null,
     "display_units_boxplots": [
-      "Cluster12",
-      "Cluster13",
-      "Cluster14",
-      "Cluster15",
-      "Cluster16",
-      "Cluster17"
+
+      "Cluster2",
+      "Cluster4",
+      "Cluster5",
+      "Cluster11"
     ]
   },
   "display_names": {
-    "16:0 Cardiolipin": "CL 16:0",
+    "16:0 Cardiolipin": "CL 18:2",
     "PC Mix": "PC",
     "PE Mix": "PE",
     "PS Mix": "PS",
@@ -83,7 +83,7 @@
     "Lactate": "Lac",
     "Lipid_to_Protein": "Lipid/Protein",
     "Lipid_Unsaturation": "Lipid Unsat",
-    "Redox": "ORR"
+    "Redox": "Redox"
   },
   "unit_mappings": {
     "cluster1": "Cluster1",
@@ -145,16 +145,16 @@
     "Cluster1": "Glomeruli | Podo, CD31",
     "Cluster2": "PT | LRP2",
     "Cluster3": "PT | LRP2, AQP1, CD90",
-    "Cluster4": "PT | LRP2, CD90",
-    "Cluster5": "PT | LRP2, PROM1, VCAM1",
+    "Cluster4": "PT | THY1",
+    "Cluster5": "PT | PROM1/VCAM1",
     "Cluster6": "TDL | AQP1, Cyto8 (N1)",
     "Cluster7": "TDL | AQP1, Cyto8 (N2)",
     "Cluster8": "TAL | NaK/UMOD",
-    "Cluster9": "TAL | UMOD (N1)",
-    "Cluster10": "TAL | UMOD (N2)",
+    "Cluster9": "TAL | UMOD",
+    "Cluster10": "TAL | UMOD",
     "Cluster11": "DCT | SLC12a3",
     "Cluster12": "DN | Cyto8 (N1)",
-    "Cluster13": "DN | Cyto8 (N2)",
+    "Cluster13": "DN | Cyto8",
     "Cluster14": "DN | Cyto8 (N3)",
     "Cluster15": "DN | Cyto8, Bcat",
     "Cluster16": "DN | Cyto8, Bcat, Ecad",
