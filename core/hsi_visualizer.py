@@ -134,13 +134,6 @@ class HSI_Visualizer:
         Creates and saves a standalone legend image.
         """
         import matplotlib.pyplot as plt
-        import os
-        
-        # Create parent directory if it doesn't exist
-        parent_dir = os.path.dirname(output_path)
-        if parent_dir:
-            os.makedirs(parent_dir, exist_ok=True)
-            
         fig = plt.figure(figsize=(3, 2))
         fig.legend(handles=patches, title=title, loc='center', frameon=True)
         plt.axis('off')
@@ -386,24 +379,6 @@ class HSI_Visualizer:
         ax_spectrum.legend(fontsize=9)
         
         title = "Sample Spectrum"
-        if img_idx is not None:
-            title += f" from Image {img_idx+1}"
-        if prediction is not None and self.molecule_names is not None:
-            prob_str = f" (p={probabilities[prediction]:.3f})" if probabilities is not None else ""
-            title += f" ΓåÆ {self.molecule_names[prediction]}{prob_str}"
-        ax_spectrum.set_title(title, fontsize=11, fontweight='bold')
-        ax_spectrum.set_xlabel("Wavenumber (cmΓü╗┬╣)", fontsize=10)
-        ax_spectrum.set_ylabel("Normalized Intensity", fontsize=10)
-        ax_spectrum.grid(True, alpha=0.3)
-        
-        # Plot probabilities if provided
-        if probabilities is not None and prediction is not None:
-            sorted_indices = np.argsort(probabilities)[::-1][:5]
-            sorted_probs = probabilities[sorted_indices]
-            sorted_names = [self.molecule_names[i] for i in sorted_indices]
-            
-            colors = ['green' if i == prediction else 'gray' for i in sorted_indices]
-            ax_prob.barh(range(len(sorted_probs)), sorted_probs, color=colors)
         if img_idx is not None:
             title += f" from Image {img_idx+1}"
         if prediction is not None and self.molecule_names is not None:
@@ -665,68 +640,8 @@ class HSI_Visualizer:
         except Exception as e:
             print(f"Warning: failed to save probability stack for {img_path}: {e}")
 
-
-
-    def _instance_masking(self, mask, dilations=2, min_instance_size=250):
-        """
-        Apply dilation and size filtering to an instance mask.
-        
-        Args:
-            mask: 2D numpy array of the instance mask (binary or labeled)
-            dilations: Number of dilation iterations to apply
-            min_instance_size: Minimum size (in pixels) for an instance to be kept
-
-        Returns:
-            List of dicts with instance metadata (label, padded_slice, instance_mask, centroid_x, centroid_y)
-        """
-        # Label mask for instance segmentation
-        labeled_mask, num_features = ndi.label(mask > 0)
-        if num_features == 0:
-            return None
-        
-        # Identify valid instances and pre-calculate their metadata
-        object_slices = ndi.find_objects(labeled_mask)
-        instance_metadata = []
-        
-        for label, obj_slice in enumerate(object_slices, start=1):
-            if obj_slice is None:
-                continue
-
-            y_slice, x_slice = obj_slice
-            y_start = max(0, y_slice.start - dilations)
-            y_end = min(labeled_mask.shape[0], y_slice.stop + dilations)
-            x_start = max(0, x_slice.start - dilations)
-            x_end = min(labeled_mask.shape[1], x_slice.stop + dilations)
-            
-            padded_slice = (slice(y_start, y_end), slice(x_start, x_end))
-            local_labels = labeled_mask[padded_slice]
-            instance_mask = local_labels == label
-
-            if int(np.sum(instance_mask)) < min_instance_size:
-                continue
-
-            # Dilate mask if requested (using original logic: dilations-1)
-            if dilations > 0:
-                instance_mask = ndi.binary_dilation(instance_mask, iterations=dilations-1)
-
-            # Centroids
-            rows, cols = np.nonzero(local_labels == label)
-            rows += padded_slice[0].start
-            cols += padded_slice[1].start
-            centroid_y = int(np.mean(rows))
-            centroid_x = int(np.mean(cols))
-
-            instance_metadata.append({
-                'label': label,
-                'padded_slice': padded_slice,
-                'instance_mask': instance_mask,
-                'centroid_x': centroid_x,
-                'centroid_y': centroid_y
-            })
-
     def apply_rf_masking(self, prediction_csv_path=None, ratio_tiff_path=None, mask_list_path=None, prefix='CODEX', results_per_unit=None, 
-                        subgroups=None, img_name=None, Source_ID=None, classes_to_ignore=None, group_subclasses=False,dilations=2, min_instance_size=250,
-                        mask_dict=None):
+                        subgroups=None, img_name=None, Source_ID=None, classes_to_ignore=None, group_subclasses=False,dilations=2, min_instance_size=250):
         """
         Apply masks and quantify predictions or ratios for each instance.
         
@@ -742,9 +657,7 @@ class HSI_Visualizer:
             Source_ID: Explicit source name (formerly sample_name)
             classes_to_ignore: List of class names to ignore in quantification (default: ['Masked', 'Kidney Background', 'No Match'])
             group_subclasses: If True, consolidates counts of subclasses into their overarching ' Mix' superclass
-            mask_dict: Optional dictionary mapping unit names to mask stack slices (keys are indeces in mask_img)
-
-
+            
         Returns:
             Dictionary with quantified data per unit and instance
         """
@@ -753,9 +666,6 @@ class HSI_Visualizer:
         
         if prediction_csv_path is not None and ratio_tiff_path is not None:
             raise ValueError("Provide only one of prediction_csv_path or ratio_tiff_path, not both")
-    
-
-
         # Determine mode
         is_prediction_mode = prediction_csv_path is not None
 
@@ -798,156 +708,102 @@ class HSI_Visualizer:
         
         # Process each mask file
         for mask_file in tqdm(mask_files, desc="Processing masks"):
-
             mask_basename = os.path.basename(mask_file)
+            
+            # --- EXTRACT NAMES FROM FILENAME FIRST ---
+            unit_name = mask_basename
+            if prefix and unit_name.startswith(f"{prefix}-"):
+                unit_name = unit_name[len(prefix)+1:]
+            
+            for suffix in ['-mask.tif', '-Mask.tif']:
+                if unit_name.endswith(suffix):
+                    unit_name = unit_name[:-len(suffix)]
+            
+            subgroup = None
+            if "_" in unit_name and subgroups is not None:
+                unit_parts = unit_name.split('_')
+                if len(unit_parts) == 2:
+                    match0 = next((s for s in subgroups if s.lower() == unit_parts[0].lower()), None)
+                    match1 = next((s for s in subgroups if s.lower() == unit_parts[1].lower()), None)
+                    if match0:
+                        subgroup = match0
+                        unit_name = unit_parts[1]
+                    elif match1:
+                        subgroup = match1
+                        unit_name = unit_parts[0]
+                
+                if subgroup is None:
+                    for i, part in enumerate(unit_parts):
+                        match = next((s for s in subgroups if s.lower() == part.lower()), None)
+                        if match:
+                            subgroup = match
+                            remaining = [p for j, p in enumerate(unit_parts) if i != j]
+                            unit_name = "_".join(remaining)
+                            break
+                
+            
+            if subgroups is not None and subgroup is None:
+                continue
 
             # Load mask
             mask_img = tifffile.imread(mask_file)
             if mask_img.ndim > 2:
                 mask_img = np.squeeze(mask_img)
             
-            if mask_img.ndim == 3 and mask_img.shape[0] == 1:
-                mask_img = mask_img[0]
+            if mask_img.ndim != 2:
+                print(f"Skipping {mask_basename}: expected 2D mask, got shape {mask_img.shape}")
+                continue
             
-            if mask_img.ndim == 3 and mask_img.shape[0] > 1:
-                if mask_dict is None:
-                    raise Exception(f"Mask image {mask_basename} has multiple channels but no mask_dict provided for indexing.")
-                else:
-                    ## Extract names from dictionary keys and match to filename
-                    for idx, unit in mask_dict.items():
-                        mask_slice = mask_img[idx]
-                        if mask_slice.ndim != 2: 
-                            print(f"Skipping {mask_basename} channel {idx}: expected 2D mask, got shape {mask_slice.shape}")
-                            continue
-
-                        unit_name = unit
-                        if prefix and unit_name.startswith(f"{prefix}-"):
-                            unit_name = unit_name[len(prefix)+1:]
-                        for suffix in ['-mask.tif', '-Mask.tif']:
-                            if unit_name.endswith(suffix):
-                                unit_name = unit_name[:-len(suffix)]
-
-                        # Identify subgroup if applicable
-                        subgroup = None
-                        if "_" in unit_name and subgroups is not None:
-                            unit_parts = unit_name.split('_')
-                            if len(unit_parts) == 2:
-                                match0 = next((s for s in subgroups if s.lower() == unit_parts[0].lower()), None)
-                                match1 = next((s for s in subgroups if s.lower() == unit_parts[1].lower()), None)
-                                if match0:
-                                    subgroup = match0
-                                    unit_name = unit_parts[1]
-                                elif match1:
-                                    subgroup = match1
-                                    unit_name = unit_parts[0]
-                            
-                            if subgroup is None:
-                                for i, part in enumerate(unit_parts):
-                                    match = next((s for s in subgroups if s.lower() == part.lower()), None)
-                                    if match:
-                                        subgroup = match
-                                        remaining = [p for j, p in enumerate(unit_parts) if i != j]
-                                        unit_name = "_".join(remaining)
-                                        break
-                        # Convert mask to boolean
-                        mask_slice = mask_slice > 0
-                        if not np.any(mask_slice) or np.all(mask_slice == 0):
-                            print(f"Skipping {mask_basename} channel {idx} | {unit_name}")
-                            continue
-                        
-                        instance_metadata = self._instance_masking(
-                            mask_slice, 
-                            dilations=dilations, 
-                            min_instance_size=min_instance_size
-                            )
-                    
-
-            elif mask_img.ndim == 2:
-                # --- EXTRACT NAMES FROM FILENAME FIRST ---
-                unit_name = mask_basename
-                if prefix and unit_name.startswith(f"{prefix}-"):
-                    unit_name = unit_name[len(prefix)+1:]
-                
-                for suffix in ['-mask.tif', '-Mask.tif']:
-                    if unit_name.endswith(suffix):
-                        unit_name = unit_name[:-len(suffix)]
-                
-                subgroup = None
-                if "_" in unit_name and subgroups is not None:
-                    unit_parts = unit_name.split('_')
-                    if len(unit_parts) == 2:
-                        match0 = next((s for s in subgroups if s.lower() == unit_parts[0].lower()), None)
-                        match1 = next((s for s in subgroups if s.lower() == unit_parts[1].lower()), None)
-                        if match0:
-                            subgroup = match0
-                            unit_name = unit_parts[1]
-                        elif match1:
-                            subgroup = match1
-                            unit_name = unit_parts[0]
-                    
-                    if subgroup is None:
-                        for i, part in enumerate(unit_parts):
-                            match = next((s for s in subgroups if s.lower() == part.lower()), None)
-                            if match:
-                                subgroup = match
-                                remaining = [p for j, p in enumerate(unit_parts) if i != j]
-                                unit_name = "_".join(remaining)
-                                break
-                    
-                
-                if subgroups is not None and subgroup is None:
+            # Resize mask if needed
+            if mask_img.shape != target_shape:
+                print(f"  Resizing mask {mask_basename} from {mask_img.shape} to {target_shape} due to downsampling...")
+                zoom_factors = (target_shape[0] / mask_img.shape[0], target_shape[1] / mask_img.shape[1])
+                mask_img = ndi.zoom(mask_img, zoom_factors, order=0)
+            
+            # Label mask for instance segmentation
+            labeled_mask, num_features = ndi.label(mask_img > 0)
+            if num_features == 0:
+                continue
+            
+            # Identify valid instances and pre-calculate their metadata
+            object_slices = ndi.find_objects(labeled_mask)
+            instance_metadata = []
+            
+            for label, obj_slice in enumerate(object_slices, start=1):
+                if obj_slice is None:
                     continue
+
+                y_slice, x_slice = obj_slice
+                y_start = max(0, y_slice.start - dilations)
+                y_end = min(labeled_mask.shape[0], y_slice.stop + dilations)
+                x_start = max(0, x_slice.start - dilations)
+                x_end = min(labeled_mask.shape[1], x_slice.stop + dilations)
                 
-                # # Resize mask if needed
-                # if mask_img.shape != target_shape:
-                #     print(f"  Resizing mask {mask_basename} from {mask_img.shape} to {target_shape} due to downsampling...")
-                #     zoom_factors = (target_shape[0] / mask_img.shape[0], target_shape[1] / mask_img.shape[1])
-                #     mask_img = ndi.zoom(mask_img, zoom_factors, order=0)
-                
-                # Label mask for instance segmentation
-                labeled_mask, num_features = ndi.label(mask_img > 0)
-                if num_features == 0:
+                padded_slice = (slice(y_start, y_end), slice(x_start, x_end))
+                local_labels = labeled_mask[padded_slice]
+                instance_mask = local_labels == label
+
+                if int(np.sum(instance_mask)) < min_instance_size:
                     continue
-                
-                # Identify valid instances and pre-calculate their metadata
-                object_slices = ndi.find_objects(labeled_mask)
-                instance_metadata = []
-                
-                for label, obj_slice in enumerate(object_slices, start=1):
-                    if obj_slice is None:
-                        continue
 
-                    y_slice, x_slice = obj_slice
-                    y_start = max(0, y_slice.start - dilations)
-                    y_end = min(labeled_mask.shape[0], y_slice.stop + dilations)
-                    x_start = max(0, x_slice.start - dilations)
-                    x_end = min(labeled_mask.shape[1], x_slice.stop + dilations)
-                    
-                    padded_slice = (slice(y_start, y_end), slice(x_start, x_end))
-                    local_labels = labeled_mask[padded_slice]
-                    instance_mask = local_labels == label
+                # Dilate mask if requested (using original logic: dilations-1)
+                if dilations > 0:
+                    instance_mask = ndi.binary_dilation(instance_mask, iterations=dilations-1)
 
-                    if int(np.sum(instance_mask)) < min_instance_size:
-                        continue
+                # Centroids
+                rows, cols = np.nonzero(local_labels == label)
+                rows += padded_slice[0].start
+                cols += padded_slice[1].start
+                centroid_y = int(np.mean(rows))
+                centroid_x = int(np.mean(cols))
 
-                    # Dilate mask if requested (using original logic: dilations-1)
-                    if dilations > 0:
-                        instance_mask = ndi.binary_dilation(instance_mask, iterations=dilations-1)
-
-                    # Centroids
-                    rows, cols = np.nonzero(local_labels == label)
-                    rows += padded_slice[0].start
-                    cols += padded_slice[1].start
-                    centroid_y = int(np.mean(rows))
-                    centroid_x = int(np.mean(cols))
-
-                    instance_metadata.append({
-                        'label': label,
-                        'padded_slice': padded_slice,
-                        'instance_mask': instance_mask,
-                        'centroid_x': centroid_x,
-                        'centroid_y': centroid_y
-                    })
+                instance_metadata.append({
+                    'label': label,
+                    'padded_slice': padded_slice,
+                    'instance_mask': instance_mask,
+                    'centroid_x': centroid_x,
+                    'centroid_y': centroid_y
+                })
 
             if not instance_metadata:
                 continue
@@ -1078,344 +934,6 @@ class HSI_Visualizer:
                     })
         df = pd.DataFrame.from_records(records)
         return df
-
-
-    def _parse_mask_basename(self, basename, prefix, subgroups):
-        """Return cleaned unit_name and optional subgroup from a mask basename."""
-        unit_name = basename
-        if prefix and unit_name.startswith(f"{prefix}-"):
-            unit_name = unit_name[len(prefix) + 1:]
-
-        for suffix in ['-mask.tif', '-Mask.tif']:
-            if unit_name.endswith(suffix):
-                unit_name = unit_name[:-len(suffix)]
-
-        subgroup = None
-        if "_" in unit_name and subgroups is not None:
-            unit_parts = unit_name.split("_")
-            if len(unit_parts) == 2:
-                match0 = next((s for s in subgroups if s.lower() == unit_parts[0].lower()), None)
-                match1 = next((s for s in subgroups if s.lower() == unit_parts[1].lower()), None)
-                if match0:
-                    subgroup = match0
-                    unit_name = unit_parts[1]
-                elif match1:
-                    subgroup = match1
-                    unit_name = unit_parts[0]
-
-            if subgroup is None:
-                for i, part in enumerate(unit_parts):
-                    match = next((s for s in subgroups if s.lower() == part.lower()), None)
-                    if match:
-                        subgroup = match
-                        remaining = [p for j, p in enumerate(unit_parts) if i != j]
-                        unit_name = "_".join(remaining)
-                        break
-
-        return unit_name, subgroup
-
-
-    def apply_unified_masking(self, *, mode, data_path=None, mask_list_path, prefix='CODEX', mask_dict=None,
-                              subgroups=None, img_name=None, classes_to_ignore=None,
-                              group_subclasses=False, dilations=2, min_instance_size=100, output_flat_csv=None):
-        """
-        Unified masking quantification for three modes: 'predictions', 'ratios', 'sam_classmap'.
-
-        Returns a long-form pandas DataFrame with instance-level rows suitable for pivoting
-        into the same `wide_df` shape used by `integratedPipeline.py`.
-        """
-        if mode not in ('predictions', 'ratios', 'sam_classmap'):
-            raise ValueError("mode must be one of 'predictions', 'ratios', 'sam_classmap'")
-
-        if mask_list_path is None:
-            raise ValueError('mask_list_path is required')
-
-        if mode in ('predictions',) and data_path is None:
-            raise ValueError('data_path (CSV) required for predictions mode')
-
-        if mode == 'ratios' and data_path is None:
-            raise ValueError('data_path (ratio TIFF) required for ratios mode')
-
-        # Defaults
-        if classes_to_ignore is None:
-            classes_to_ignore = ['Masked', 'Kidney Background', 'No Match']
-        classes_to_ignore_set = {c.strip() for c in classes_to_ignore}
-
-        # Load data sources as needed
-        data_matrix = None
-        tif_ratios = None
-        sam_class_map = None
-        ratio_basename = None
-
-        if mode == 'predictions':
-            data_df = pd.read_csv(data_path, header=None, index_col=False)
-            data_matrix = data_df.values
-            if img_name is None:
-                img_name = os.path.basename(data_path).replace('_predictions.csv', '')
-
-        elif mode == 'ratios':
-            tif_ratios = tifffile.TiffFile(data_path)
-            num_pages = len(tif_ratios.pages)
-            ratio_basename = os.path.splitext(os.path.basename(data_path))[0]
-            if img_name is None:
-                img_name = os.path.splitext(os.path.basename(data_path))[0]
-                if '-ratio' in img_name:
-                    img_name = img_name.split('-')[0]
-
-        elif mode == 'sam_classmap':  # sam_classmap
-            sam_class_map = tifffile.imread(data_path)
-            if img_name is None:
-                img_name = os.path.splitext(os.path.basename(data_path))[0]
-
-        records = []
-
-        mask_files = glob(os.path.join(mask_list_path, '*-mask.tif'))
-        if not mask_files:
-            raise ValueError(f'No mask TIFF files found in {mask_list_path}')
-
-        for mask_file in tqdm(mask_files, desc='Processing masks (unified)'):
-            mask_basename = os.path.basename(mask_file)
-            mask_img = tifffile.imread(mask_file)
-            if mask_img.ndim > 2:
-                mask_img = np.squeeze(mask_img)
-
-            # Multi-channel mask handling
-            if mask_img.ndim == 3 and mask_img.shape[0] > 1:
-                if mask_dict is None:
-                    raise Exception(f"Mask image {mask_basename} has multiple channels but no mask_dict provided for indexing.")
-
-                for idx, unit in mask_dict.items():
-                    try:
-                        mask_slice = mask_img[idx]
-                    except Exception:
-                        print(f"Skipping {mask_basename} channel {idx}: index error")
-                        continue
-
-                    unit_name = unit
-                    # if prefix and unit_name.startswith(f"{prefix}-"):
-                    #     unit_name = unit_name[len(prefix) + 1:]
-
-                    unit_name, subgroup = self._parse_mask_basename(unit_name, prefix, subgroups)
-
-                    mask_slice = mask_slice > 0
-                    if not np.any(mask_slice):
-                        continue
-
-                    instance_metadata = self._instance_masking(mask_slice, dilations=dilations, min_instance_size=min_instance_size)
-
-                    for inst in instance_metadata:
-                        npx = int(np.sum(inst['instance_mask']))
-                        base_meta = {
-                            'Image_Name': img_name,
-                            'Unit': unit_name,
-                            'Instance_Label': f"{int(inst['label'])}",
-                            'Source_ID': img_name.split('-')[0] if img_name else None,
-                            'Group_ID': subgroup,
-                            'centroid_x': inst.get('centroid_x', None),
-                            'centroid_y': inst.get('centroid_y', None),
-                            'n_pixels': npx
-                        }
-
-                        if mode == 'predictions':
-                            preds = data_matrix[inst['padded_slice']][inst['instance_mask']]
-                            if preds.size == 0:
-                                continue
-                            unique, counts = np.unique(preds, return_counts=True)
-                            class_counts = {str(k).strip(): int(v) for k, v in zip(unique, counts)}
-                            for c in list(classes_to_ignore_set):
-                                if c in class_counts:
-                                    del class_counts[c]
-
-                            if group_subclasses:
-                                all_classes = self.molecule_names if hasattr(self, 'molecule_names') and self.molecule_names else list(class_counts.keys())
-                                mix_classes = [c.strip() for c in all_classes if isinstance(c, str) and 'Mix' in c]
-                                for mix_class in mix_classes:
-                                    superclass = mix_class.replace(' Mix', '')
-                                    subclasses = [c for c in class_counts.keys() if superclass in c and c != mix_class]
-                                    if subclasses:
-                                        combined = class_counts.get(mix_class, 0)
-                                        for sub in subclasses:
-                                            combined += class_counts.get(sub, 0)
-                                            class_counts.pop(sub, None)
-                                        class_counts[mix_class] = combined
-
-                            total = sum(class_counts.values())
-                            if total == 0:
-                                continue
-                            for mol, cnt in class_counts.items():
-                                pct = (cnt / total) * 100.0
-                                rec = base_meta.copy()
-                                rec.update({'Molecule': mol, 'Percentage': float(pct)})
-                                records.append(rec)
-
-                        elif mode == 'sam_classmap':
-                            if self.molecule_names is None:
-                                raise ValueError('HSI_Visualizer.molecule_names not set; required for sam_classmap mode')
-                            patch = sam_class_map[inst['padded_slice']][inst['instance_mask']]
-                            labels, counts = np.unique(patch, return_counts=True)
-                            mol_names_ext = ['No Match'] + list(self.molecule_names)
-                            name_counts = {mol_names_ext[int(lbl)]: int(cnt) for lbl, cnt in zip(labels, counts) if int(lbl) < len(mol_names_ext)}
-                            # Filter No Match
-                            name_counts.pop('No Match', None)
-                            total = sum(name_counts.values())
-                            if total == 0:
-                                continue
-                            for mol, cnt in name_counts.items():
-                                pct = (cnt / total) * 100.0
-                                rec = base_meta.copy()
-                                rec.update({'Molecule': mol, 'Percentage': float(pct)})
-                                records.append(rec)
-
-                        else:  # ratios
-                            # For ratios, handle each page separately
-                            for slice_idx in range(num_pages):
-                                data_slice = tif_ratios.pages[slice_idx].asarray()
-                                r_type_slice = f"{ratio_basename}_{slice_idx + 1}" if num_pages > 1 else ratio_basename
-                                masked_vals = data_slice[inst['padded_slice']][inst['instance_mask']]
-                                vals = masked_vals[(masked_vals > 0) & np.isfinite(masked_vals)]
-                                if vals.size == 0:
-                                    continue
-                                mean_ratio = float(np.nanmean(vals))
-                                rec = base_meta.copy()
-                                rec.update({'Ratio_Type': r_type_slice, 'Mean_Ratio': mean_ratio})
-                                records.append(rec)
-
-            else:
-                # Single-channel mask
-                unit_name, subgroup = self._parse_mask_basename(mask_basename, prefix, subgroups)
-                if subgroups is not None and subgroup is None:
-                    continue
-
-                mask_slice = mask_img > 0
-                labeled_mask, num_features = ndi.label(mask_slice)
-                if num_features == 0:
-                    continue
-
-                object_slices = ndi.find_objects(labeled_mask)
-                instance_metadata = []
-                for label, obj_slice in enumerate(object_slices, start=1):
-                    if obj_slice is None:
-                        continue
-                    y_slice, x_slice = obj_slice
-                    y_start = max(0, y_slice.start - dilations)
-                    y_end = min(labeled_mask.shape[0], y_slice.stop + dilations)
-                    x_start = max(0, x_slice.start - dilations)
-                    x_end = min(labeled_mask.shape[1], x_slice.stop + dilations)
-                    padded_slice = (slice(y_start, y_end), slice(x_start, x_end))
-                    local_labels = labeled_mask[padded_slice]
-                    instance_mask = local_labels == label
-                    if int(np.sum(instance_mask)) < min_instance_size:
-                        continue
-                    if dilations > 0:
-                        instance_mask = ndi.binary_dilation(instance_mask, iterations=dilations - 1)
-                    rows, cols = np.nonzero(local_labels == label)
-                    rows += padded_slice[0].start
-                    cols += padded_slice[1].start
-                    centroid_y = int(np.mean(rows))
-                    centroid_x = int(np.mean(cols))
-                    instance_metadata.append({'label': label, 'padded_slice': padded_slice, 'instance_mask': instance_mask, 'centroid_x': centroid_x, 'centroid_y': centroid_y})
-
-                for inst in instance_metadata:
-                    npx = int(np.sum(inst['instance_mask']))
-                    base_meta = {
-                        'Image_Name': img_name,
-                        'Unit': unit_name,
-                        'Instance_Label': f"{int(inst['label'])}",
-                        'Source_ID': (img_name.split('-')[0] if img_name else None),
-                        'Group_ID': subgroup,
-                        'centroid_x': inst.get('centroid_x', None),
-                        'centroid_y': inst.get('centroid_y', None),
-                        'n_pixels': npx
-                    }
-
-                    if mode == 'predictions':
-                        preds = data_matrix[inst['padded_slice']][inst['instance_mask']]
-                        if preds.size == 0:
-                            continue
-                        unique, counts = np.unique(preds, return_counts=True)
-                        class_counts = {str(k).strip(): int(v) for k, v in zip(unique, counts)}
-                        for c in list(classes_to_ignore_set):
-                            if c in class_counts:
-                                del class_counts[c]
-
-                        if group_subclasses:
-                            all_classes = self.molecule_names if hasattr(self, 'molecule_names') and self.molecule_names else list(class_counts.keys())
-                            mix_classes = [c.strip() for c in all_classes if isinstance(c, str) and 'Mix' in c]
-                            for mix_class in mix_classes:
-                                superclass = mix_class.replace(' Mix', '')
-                                subclasses = [c for c in class_counts.keys() if superclass in c and c != mix_class]
-                                if subclasses:
-                                    combined = class_counts.get(mix_class, 0)
-                                    for sub in subclasses:
-                                        combined += class_counts.get(sub, 0)
-                                        class_counts.pop(sub, None)
-                                    class_counts[mix_class] = combined
-
-                        total = sum(class_counts.values())
-                        if total == 0:
-                            continue
-                        for mol, cnt in class_counts.items():
-                            pct = (cnt / total) * 100.0
-                            rec = base_meta.copy()
-                            rec.update({'Molecule': mol, 'Percentage': float(pct)})
-                            records.append(rec)
-
-                    elif mode == 'sam_classmap':
-                        if self.molecule_names is None:
-                            raise ValueError('HSI_Visualizer.molecule_names not set; required for sam_classmap mode')
-                        patch = sam_class_map[inst['padded_slice']][inst['instance_mask']]
-                        labels, counts = np.unique(patch, return_counts=True)
-                        mol_names_ext = ['No Match'] + list(self.molecule_names)
-                        name_counts = {mol_names_ext[int(lbl)]: int(cnt) for lbl, cnt in zip(labels, counts) if int(lbl) < len(mol_names_ext)}
-                        name_counts.pop('No Match', None)
-                        total = sum(name_counts.values())
-                        if total == 0:
-                            continue
-                        for mol, cnt in name_counts.items():
-                            pct = (cnt / total) * 100.0
-                            rec = base_meta.copy()
-                            rec.update({'Molecule': mol, 'Percentage': float(pct)})
-                            records.append(rec)
-
-                    else:  # ratios
-                        for slice_idx in range(num_pages):
-                            data_slice = tif_ratios.pages[slice_idx].asarray()
-                            r_type_slice = f"{ratio_basename}_{slice_idx + 1}" if num_pages > 1 else ratio_basename
-                            masked_vals = data_slice[inst['padded_slice']][inst['instance_mask']]
-                            vals = masked_vals[(masked_vals > 0) & np.isfinite(masked_vals)]
-                            if vals.size == 0:
-                                continue
-                            mean_ratio = float(np.nanmean(vals))
-                            rec = base_meta.copy()
-                            rec.update({'Ratio_Type': r_type_slice, 'Mean_Ratio': mean_ratio})
-                            records.append(rec)
-
-        # Close tif handle if opened
-        if tif_ratios is not None:
-            tif_ratios.close()
-
-        if not records:
-            raise ValueError('No valid instances found across all masks.')
-
-        df_out = pd.DataFrame.from_records(records)
-        # Ensure consistent column ordering favorable for pivoting
-        index_cols = ['Image_Name', 'Unit', 'Instance_Label', 'Source_ID']
-        if 'Group_ID' in df_out.columns and df_out['Group_ID'].notna().any():
-            index_cols.append('Group_ID')
-
-        # Optionally write flat output as parquet when requested.
-        if output_flat_csv:
-            output_path = str(output_flat_csv)
-            if output_path.lower().endswith('.parquet'):
-                try:
-                    df_out.to_parquet(output_path, index=False)
-                except ImportError:
-                    fallback_path = output_path[:-8] + '.csv'
-                    df_out.to_csv(fallback_path, index=False)
-            else:
-                df_out.to_csv(output_path, index=False)
-
-        return df_out
 
 
     def quantify_unit_ratio_means_nested(self, units_dict, unit_mappings=None):
@@ -4089,7 +3607,7 @@ class HSI_Visualizer:
                                                        units_to_display=None, cmap='RdBu_r',
                                                        min_size_to_plot=10, remove_outliers=True,
                                                        show_values=True, cmap_scale=None,
-                                                       cbar_label='Z-score'):
+                                                       cbar_label='Mean Ratio'):
         """
         Create a spatial gradient heatmap of ratios/molecules across ordered subgroups per unit,
         taking a wide format DataFrame where metrics are separate columns.
@@ -4098,8 +3616,6 @@ class HSI_Visualizer:
         Columns are labeled with just the ratio type and visually separated by ratio type.
         
         Also runs 1-Way ANOVA to evaluate regional statistical variance.
-        Each heatmap is z-scored independently, and all plots share the same
-        color scale based on the maximum absolute z-score across items.
 
         Parameters
         ----------
@@ -4167,8 +3683,10 @@ class HSI_Visualizer:
             remaining_units = [u for u in all_units if u not in ordered_units]
             all_units = ordered_units + remaining_units
 
-        plot_records = []
-
+        # Process all ratio types and build combined heatmap
+        all_heatmaps = []  # List of (ratio_type, heatmap_matrix) tuples
+        # all_stats = {}     # ratio_type -> {unit -> (anova_p, spearman_corr, spearman_p)}
+        
         for item in value_cols:
             if item not in wide_df.columns:
                 print(f"  Warning: Column '{item}' not found in DataFrame.")
@@ -4176,177 +3694,199 @@ class HSI_Visualizer:
 
             # Clean data (NaNs/infs) but keep outliers for stats
             item_data_stats = wide_df[['Unit', 'Group_ID', item]].replace([np.inf, -np.inf], np.nan).dropna(subset=[item]).copy()
-
+            
             # Outlier Filtration for plotting
             if remove_outliers:
                 item_data_plot = self._apply_outlier_filtration(item_data_stats, item, ['Unit', 'Group_ID'])
             else:
                 item_data_plot = item_data_stats
 
+            if item_data_plot.empty:
+                continue
+
             # Build Data Matrix (Plotting): subgroups as rows, units as columns
             agg_data_plot = item_data_plot.groupby(['Group_ID', 'Unit'])[item].agg(['mean', 'count']).reset_index()
             agg_data_plot = agg_data_plot[agg_data_plot['count'] >= min_size_to_plot]
-
+            
             if agg_data_plot.empty:
                 continue
 
+            # Pivot: rows = Group_ID (subgroups), columns = Unit
             pivot_df = agg_data_plot.pivot(index='Group_ID', columns='Unit', values='mean')
+
+            if not np.array_equal(pivot_df.columns, all_units):
+                tmp_units = [u for u in all_units if u in pivot_df.columns]
+                all_units = tmp_units
+
+            
+            # Reindex rows to subgroup_order
             valid_subgroups = [sg for sg in subgroup_order if sg in pivot_df.index]
             pivot_df = pivot_df.reindex(valid_subgroups)
-            plot_units = [u for u in all_units if u in pivot_df.columns]
-            pivot_df = pivot_df[plot_units]
-
+            
+            # Reindex columns to unit_order
+            
+            pivot_df = pivot_df[all_units]
+            
             if pivot_df.empty or pivot_df.isnull().all().all():
                 print(f"  Skipping {item}: no valid data after filtering.")
                 continue
 
-            display_item = display_name_map.get(item, item) if display_name_map else item
-            item_safe = str(item).replace(':', '').replace('/', '_').replace(' ', '_')
-
-            z_df = pivot_df.copy().astype(float)
-            z_values = z_df.to_numpy(dtype=float)
-            z_mean = np.nanmean(z_values)
-            z_std = np.nanstd(z_values)
-            if np.isnan(z_std) or z_std == 0:
-                z_df = z_df - z_mean
-            else:
-                z_df = (z_df - z_mean) / z_std
-
-            item_abs_max = np.nanmax(np.abs(z_df.to_numpy(dtype=float)))
-            if np.isnan(item_abs_max):
-                item_abs_max = 0
+            all_heatmaps.append((item, pivot_df))
 
             # Save counts
             pivot_counts = agg_data_plot.pivot(index='Group_ID', columns='Unit', values='count')
-            pivot_counts = pivot_counts.reindex(index=valid_subgroups, columns=plot_units)
-            counts_csv_path = os.path.join(output_dir, f"subgroup_gradient_transposed_{item_safe}_counts.csv")
-            pivot_counts.to_csv(counts_csv_path)
+            pivot_counts = pivot_counts.reindex(index=valid_subgroups, columns=all_units)
+            item_safe = str(item).replace(':', '').replace('/', '_').replace(' ', '_')
+            pivot_counts.to_csv(os.path.join(output_dir, f"subgroup_gradient_transposed_{item_safe}_counts.csv"))
 
-            # Statistical variations across subgroups (on RAW data)
-            stats_rows = []
-            rank_map = {sg: i for i, sg in enumerate(valid_subgroups)}
+            # # Statistical variations across subgroups (on RAW data)
+            # anova_results = {}
+            # spearman_results = {}
+            # rank_map = {sg: i for i, sg in enumerate(valid_subgroups)}
+            
+            # for unit in all_units:
+            #     x_ranks = []
+            #     y_means_raw = []
+                
+            #     for sg in valid_subgroups:
+            #         sg_vals_raw = item_data_stats[(item_data_stats['Unit'] == unit) & (item_data_stats['Group_ID'] == sg)][item].values
+            #         if len(sg_vals_raw) >= 2:
+            #             x_ranks.append(rank_map[sg])
+            #             y_means_raw.append(np.mean(sg_vals_raw))
+                
+            #     # 1. Welch's ANOVA (using raw data)
+            #     unit_subset = item_data_stats[item_data_stats['Unit'] == unit]
+            #     if unit_subset['Group_ID'].nunique() >= 2:
+            #         try:
+            #             import pingouin as pg
+            #             aov = pg.welch_anova(data=unit_subset, dv=item, between='Group_ID')
+            #             p_val = aov['p-unc'].iloc[0] if 'p-unc' in aov.columns else aov['p_unc'].iloc[0]
+            #             anova_results[unit] = p_val
+            #         except Exception:
+            #             anova_results[unit] = np.nan
+                
+            #     # 2. Spearman Correlation
+            #     if len(x_ranks) >= 3:
+            #         try:
+            #             corr, s_p = spearmanr(x_ranks, y_means_raw)
+            #             spearman_results[unit] = (corr, s_p)
+            #         except Exception:
+            #             spearman_results[unit] = (np.nan, np.nan)
+            
+            # all_stats[item] = {
+            #     'anova': anova_results,
+            #     'spearman': spearman_results
+            # }
 
-            for unit in plot_units:
-                x_ranks = []
-                y_means_raw = []
-
-                for sg in valid_subgroups:
-                    sg_vals_raw = item_data_stats[(item_data_stats['Unit'] == unit) & (item_data_stats['Group_ID'] == sg)][item].values
-                    if len(sg_vals_raw) >= 2:
-                        x_ranks.append(rank_map[sg])
-                        y_means_raw.append(np.mean(sg_vals_raw))
-
-                welch_p = np.nan
-                unit_subset = item_data_stats[item_data_stats['Unit'] == unit]
-                if unit_subset['Group_ID'].nunique() >= 2:
-                    try:
-                        import pingouin as pg
-                        aov = pg.welch_anova(data=unit_subset, dv=item, between='Group_ID')
-                        welch_p = aov['p-unc'].iloc[0] if 'p-unc' in aov.columns else aov['p_unc'].iloc[0]
-                    except Exception:
-                        welch_p = np.nan
-
-                spearman_rho = np.nan
-                spearman_p = np.nan
-                if len(x_ranks) >= 3:
-                    try:
-                        corr, s_p = spearmanr(x_ranks, y_means_raw)
-                        spearman_rho, spearman_p = corr, s_p
-                    except Exception:
-                        spearman_rho, spearman_p = np.nan, np.nan
-
-                stats_rows.append({
-                    'Unit': unit,
-                    'Welch_ANOVA_p': welch_p,
-                    'Spearman_rho': spearman_rho,
-                    'Spearman_p': spearman_p,
-                    'N_subgroups_used': len(x_ranks)
-                })
-
-            stats_df = pd.DataFrame(stats_rows)
-            stats_csv_path = os.path.join(output_dir, f"subgroup_gradient_transposed_{item_safe}_stats.csv")
-            stats_df.to_csv(stats_csv_path, index=False)
-            plot_records.append({
-                'item': item,
-                'item_safe': item_safe,
-                'display_item': display_item,
-                'z_df': z_df,
-                'display_rows': list(pivot_df.index),
-                'display_cols': [f"{idx}" for idx, _ in enumerate(pivot_df.columns, start=1)],
-                'n_rows': len(pivot_df.index),
-                'item_abs_max': item_abs_max,
-                'counts_csv_path': counts_csv_path,
-                'stats_csv_path': stats_csv_path,
-            })
-
-        if not plot_records:
+        if not all_heatmaps:
             print("No valid data to plot.")
             return
 
-        global_abs_max = max(record['item_abs_max'] for record in plot_records)
-        if np.isnan(global_abs_max) or global_abs_max == 0:
-            global_abs_max = 1.0
-        vmin_p, vmax_p = -global_abs_max, global_abs_max
+        # 3. Combine all heatmaps into one wide matrix
+        # Columns: Ratio_Type_1 [Unit_A, Unit_B, ...], Ratio_Type_2 [Unit_A, Unit_B, ...], ...
+        combined_columns = []
+        combined_data = []
+        
+        for item, heatmap_matrix in all_heatmaps:
+            # Get the displayed name for this ratio type
+            display_item = display_name_map.get(item, item) if display_name_map else item
+            
+            # For each unit, create a column label (just the ratio type)
+            for unit in all_units:
+                if unit in heatmap_matrix.columns:
+                    combined_columns.append((item, unit, display_item))
+                    combined_data.append(heatmap_matrix[unit].values)
+        
+        # Create combined heatmap
+        combined_matrix = np.column_stack(combined_data)
+        combined_df = pd.DataFrame(
+            combined_matrix,
+            index=valid_subgroups,
+            columns=[f"{unit_display_map.get(col[1], col[1])}" for col in combined_columns]  # Just the display ratio type
+        )
 
-        for record in plot_records:
-            item = record['item']
-            item_safe = record['item_safe']
-            display_item = record['display_item']
-            z_df = record['z_df']
-            display_rows = record['display_rows']
-            display_cols = record['display_cols']
-            n_rows = record['n_rows']
+        # # 4. Compute global vmin/vmax
+        # if cmap_scale:
+        #     # If cmap_scale is provided, use it
+        #     all_vals = []
+        #     for item, _ in all_heatmaps:
+        #         if item in cmap_scale:
+        #             all_vals.extend(cmap_scale[item])
+        #     if all_vals:
+        #         vmin_p, vmax_p = min(all_vals), max(all_vals)
+        #     else:
+        #         vmin_p, vmax_p = combined_df.min().min(), combined_df.max().max()
+        # else:
+        #     vmin_p, vmax_p = combined_df.min().min(), combined_df.max().max()
 
-            n_cols = len(z_df.columns)
-            fig_width = max(16, n_cols * 0.6 + 2)
-            fig_height = max(fig_width, n_rows * 0.5 + 2)
+        # 4. Compute global vmin/vmax aaross columns
+        vmin_p, vmax_p = combined_df.min().min(), combined_df.max().max()
+        if cmap_scale:
+            vmin_p = min(vmin_p, min([s[0] for s in cmap_scale.values() if isinstance(s, (list, tuple)) and len(s) == 2]))
+            vmax_p = max(vmax_p, max([s[1] for s in cmap_scale.values() if isinstance(s, (list, tuple)) and len(s) == 2]))
 
-            fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-            sns.heatmap(
-                z_df,
-                annot=show_values,
-                fmt=".3f",
-                cmap=cmap,
-                cbar=False,
-                linewidths=1.5,
-                linecolor='white',
-                ax=ax,
-                vmin=vmin_p,
-                vmax=vmax_p
-            )
 
-            ax.set_xticklabels(display_cols,
-                               rotation=0,
-                               ha='center',
-                               fontsize=fig_width * 2,
-                               fontweight='bold')
-            ax.set_yticklabels(display_rows, rotation=90, fontsize=fig_height * 2, fontweight='bold')
-            ax.set_title(f"{display_item}", fontweight='bold', fontsize=fig_height * 2.5, pad=15)
-            ax.set_xlabel("", fontweight='bold', fontsize=12)
-            ax.set_ylabel("", fontweight='bold', fontsize=12)
+        # 5. Create the heatmap with visual separators
+        n_cols = len(combined_columns)
+        n_rows = len(valid_subgroups)
+        fig_width = max(8, n_cols * 0.6 + 2)
+        fig_height = max(fig_width, n_rows * 0.5 + 2)
+        
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+        
+        # Create heatmap
+        sns.heatmap(
+            combined_df,
+            annot=show_values,
+            fmt=".3f",
+            cmap=cmap,
+            cbar=False,
+            linewidths=0.5,
+            linecolor='white',
+            ax=ax,
+            vmin=vmin_p,
+            vmax=vmax_p
+        )
+        
+        # Add visual separators between different ratio types
+        separator_positions = []
+        current_ratio = None
+        for col_idx, (item, unit, display_item) in enumerate(combined_columns):
+            if current_ratio is not None and item != current_ratio:
+                separator_positions.append(col_idx)
+            current_ratio = item
+        
+        # Draw vertical separator lines
+        for sep_pos in separator_positions:
+            ax.axvline(x=sep_pos, color='black', linewidth=2.5, zorder=10)
+        
+        # Formatting
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right', fontsize=12)
+        ax.set_yticklabels(valid_subgroups, rotation=0, fontsize=16, fontweight='bold')
+        # ax.set_xlabel('Ratio Type (Units)', fontweight='bold', fontsize=12)
+        # ax.set_ylabel('Subgroup', fontweight='bold', fontsize=12)
+        # ax.set_title('Subgroup Gradient Heatmap (Transposed)', fontweight='bold', fontsize=14, pad=15)
+        
+        plt.tight_layout()
+        if len(value_cols) == 1:
+            safe_name = str(value_cols[0]).replace(':', '').replace('/', '_').replace(' ', '_')
+        else:
+            safe_name = 'ratio_types_combined'
+        plt.savefig(os.path.join(output_dir, f"subgroup_gradient_transposed_{safe_name}.png"), dpi=600, bbox_inches='tight', facecolor='white')
+        plt.close()
+        
+        # 6. Save standalone colorbar
+        cb_fig, cb_ax = plt.subplots(figsize=(1.2, max(3, n_rows * 0.4)))
+        norm = mcolors.Normalize(vmin=vmin_p, vmax=vmax_p)
+        cbar = cb_fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), cax=cb_ax, orientation='vertical')
+        cbar.set_label(cbar_label, color='black', fontsize=12)
+        cb_fig.tight_layout()
+        cb_fig.savefig(os.path.join(output_dir, f"subgroup_gradient_transposed_{safe_name}_colorbar.png"), dpi=600, bbox_inches='tight', facecolor='white')
+        plt.close(cb_fig)
+        
+        print(f"  Generated transposed subgroup gradient heatmap: {os.path.join(output_dir, f'subgroup_gradient_transposed_{safe_name}.png')}")
+        print(f"  Generated colorbar: {os.path.join(output_dir, f'subgroup_gradient_transposed_{safe_name}_colorbar.png')}")
 
-            for _, spine in ax.spines.items():
-                spine.set_visible(True)
-                spine.set_linewidth(5)
-
-            plt.tight_layout()
-            png_path = os.path.join(output_dir, f"subgroup_gradient_transposed_{item_safe}.png")
-            plt.savefig(png_path, dpi=600, bbox_inches='tight', transparent=True)
-            plt.close()
-
-            cb_fig, cb_ax = plt.subplots(figsize=(1.2, max(3, n_rows * 0.4)))
-            norm = mcolors.Normalize(vmin=vmin_p, vmax=vmax_p)
-            cbar = cb_fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), cax=cb_ax, orientation='vertical')
-            cbar.set_label(cbar_label, color='black', fontsize=12)
-            cb_fig.tight_layout()
-            colorbar_path = os.path.join(output_dir, f"subgroup_gradient_transposed_{item_safe}_colorbar.png")
-            cb_fig.savefig(colorbar_path, dpi=600, bbox_inches='tight', transparent=True)
-            plt.close(cb_fig)
-
-            print(f"  Generated transposed subgroup gradient heatmap for {item}: {png_path}")
-            print(f"  Generated colorbar: {colorbar_path}")
-            print(f"  Saved counts CSV: {record['counts_csv_path']}")
-            print(f"  Saved stats CSV: {record['stats_csv_path']}")
     def _save_standalone_legend(self, handles, title, save_path, ncol=1, fontsize=11, title_fontsize=12):
         """Save a standalone legend figure as a PNG.
 
@@ -4366,12 +3906,6 @@ class HSI_Visualizer:
             Font size for the legend title.
         """
         import matplotlib.pyplot as plt
-        import os
-
-        # Create parent directory if it doesn't exist
-        parent_dir = os.path.dirname(save_path)
-        if parent_dir:
-            os.makedirs(parent_dir, exist_ok=True)
 
         # Use enough columns to keep the legend readable but not too wide
         n = len(handles)
@@ -4391,7 +3925,7 @@ class HSI_Visualizer:
         legend.get_frame().set_facecolor('white')
         legend.get_frame().set_alpha(0.95)
         ax.axis('off')
-        fig.savefig(save_path, dpi=600, bbox_inches='tight', facecolor='white', transparent=True)
+        fig.savefig(save_path, dpi=600, bbox_inches='tight', facecolor='white')
         plt.close(fig)
 
 
@@ -4728,9 +4262,7 @@ class HSI_Visualizer:
 
             # Keep a consistent aspect ratio across bar, box, and violin variants so the
             # rendered plots are directly comparable even when the orientation changes.
-            # For vertical plots: 2:1 aspect ratio (taller than wider), so width/height = 0.5
-            # For horizontal plots: 2:1 aspect ratio (wider than taller), so width/height = 2.0
-            target_aspect_ratio = 1.5 if horizontal else 0.66
+            target_aspect_ratio = 1.6
 
             def _match_aspect_ratio(preferred_width, preferred_height):
                 preferred_width = max(preferred_width, 6)
@@ -4812,7 +4344,7 @@ class HSI_Visualizer:
                 fig_height = max(4, 2.5 + span_extent * 0.8)
             else:
                 fig_width = max(4, 2.5 + span_extent * 0.8)
-                fig_height = max(6, 4.0 + value_extent * 0.08)
+                fig_height = max(4, 4.0 + value_extent * 0.08)
 
             fig_width, fig_height = _match_aspect_ratio(fig_width, fig_height)
 
@@ -4984,13 +4516,13 @@ class HSI_Visualizer:
             # y_label = ""
             # ax.set_ylabel(y_label, fontweight='bold', fontsize=14)
             if horizontal:
-                ax.tick_params(axis='y', pad=6, labelsize=11)
+                ax.tick_params(axis='y', pad=6)
                 ax.set_yticks(unit_tick_positions)
                 # Remove unit names from y-axis labels
                 ax.set_yticklabels([])
                 # Invert y-axis so bars appear in reverse order (top-to-bottom)
                 ax.invert_yaxis()
-                ax.tick_params(axis='x', pad=2, labelsize=11)
+                ax.tick_params(axis='x', pad=2)
                 
                 # # Set consistent aspect ratio for the plot area (grid)
                 # # Make plot grid square in data coordinates for consistent visual proportions
@@ -5000,14 +4532,13 @@ class HSI_Visualizer:
                 # aspect_ratio = y_range / x_range if x_range > 0 else 1.0
                 # ax.set_aspect(aspect_ratio, adjustable='box')
 
-            ax.set_title(f"{display_item}", fontweight='bold', fontsize=20, pad=15)
+            ax.set_title(f"{display_item}", fontweight='bold', fontsize=16, pad=15)
             
             # Hide category ticks only for the vertical layout; the horizontal layout
             # keeps the numeric x-axis visible.
             if not horizontal:
                 ax.set_xticks([])
                 ax.set_xticklabels([])
-                ax.tick_params(axis='y', labelsize=16)
 
             # Legend 1: base unit colors only (no subgroup suffixes)
             unit_legend_patches = []
@@ -5074,8 +4605,7 @@ class HSI_Visualizer:
             # --- Save significance results to CSV ---
             if output_dir and unit_significance:
                 import csv
-                import re
-                item_safe_sig = re.sub(r'[<>:"/\\|?*]', '_', str(item_name))
+                item_safe_sig = item_name.replace(':', '').replace('/', '_').replace(' ', '_')
                 sig_csv_path = os.path.join(output_dir, f"{item_safe_sig}_significance.csv")
                 # Build a reverse map: position -> unit label
                 pos_to_label = {pos: lbl for pos, lbl in zip(unit_tick_positions, unit_tick_labels)}
@@ -5206,14 +4736,12 @@ class HSI_Visualizer:
             #     # Fallback if decorations are too large for tight_layout
             #     pass
             # Save
-            # Sanitize item_name for use as filename (remove/replace invalid Windows characters)
-            import re
-            item_safe = re.sub(r'[<>:"/\\|?*]', '_', str(item_name))
+            item_safe = item_name.replace(':', '').replace('/', '_').replace(' ', '_')
             orientation_suffix = '_horizontal' if horizontal else ''
             save_path = os.path.join(output_dir, f"{data_type}_{item_safe}_{plot_type}plot{orientation_suffix}.png")
             # print(f" Generated individual bar plot in {save_path}")
 
-            plt.savefig(save_path, dpi=600, bbox_inches='tight', transparent=True)
+            plt.savefig(save_path, dpi=600, bbox_inches='tight')
             
             if show_plots: plt.show()
             else: plt.close(fig)

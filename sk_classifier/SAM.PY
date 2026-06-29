@@ -12,101 +12,89 @@ from skimage import measure
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import seaborn as sns
 
 # =========================================================================
 # CONFIGURATION
 # =========================================================================
 CONFIG = {
     'spectra_csv': r'C:\Users\jvill\OneDrive\Documents\GitHub\hsi_machine_learning\unprocessed_data\averaged_spectra.csv',
-    'image_dir': r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\normalized",
+    'image_dir': r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\xenium-HSI",
     'wavenumber_start': 2700,
     'wavenumber_end': 3100,
     'num_samples': 61,
     'max_shift_cm': 30,  # Max shift in cm^-1
-    'similarity_threshold': 0.85, # Min similarity (0-1) to be considered a match
+    'similarity_threshold': 0.7, # Min similarity (0-1) to be considered a match
     'chunk_size': 1_000_000, # Number of pixels per batch for large images
     'max_csv_pixels': 10_000_000, # Skip full CSV if image is larger than this
     'exclude_molecules': [],
-    'mol_groups': None,
+    # 'mol_groups': None,
 
-        # 'mol_groups': {
-    #     'Sterols': [
-    #         '18:1 Cholesterol Ester', 
-    #         'Cholesterol (ovine)'
-    #         ],
-    #     'Cardiolipins': [
-    #         '16:0 Cardiolipin'
-    #         ],
-    #     'Phosphatidylcholines': [
-    #         'PC Mix', 
-    #         'DOPC', 
-    #         'DSPC'
-    #         ],
-    #     'Phosphatidylethanolamines': [
-    #         'PE Mix', 
-    #         'DOPE'
-    #         ],
-    #     'Phosphatidylserines': [
-    #         'PS Mix'
-    #         ],
-    #     'Phosphatidylinositols': [
-    #         'PI Mix'
-    #         ],
-    #     'Phosphatidylglycerols': [
-    #         'PG Mix'
-    #         ],
-    #     'Lysophosphatidic Acids': [
-    #         '18:0 Lyso PA', 
-    #         '18:1 LPA'
-    #         ],
-    #     'CDP-Diaglycerols': [
-    #         '16:0 CDP DG'
-    #         ],
-    #     'Diaglycerols (L/VL)': [
-    #         'DAG 16:0', 
-    #         'DAG 18:0 and 24:0 '
-    #         ],
-    #     'Triglycerols (M)': [
-    #         'TAG Mix'
-    #         ],
-    #     'Triglycerols (L)': [
-    #         'TAG 16:0', 
-    #         'TAG 18:1'
-    #         ],
-    #     'Sphingomyelins': [
-    #         'Sphingosine'
-    #         ],
-    #     'Ceramides (M)': [
-    #         'Cer 18:1-12:0'
-    #         ],
-    #     'Ceramides (L)': [
-    #         'Cer 18:1-18:0', 
-    #         'Cer 18:1-18:1'
-    #         ],
-    #     'Ceramides (VL)': [
-    #         'Cer 18:1-22:0', 
-    #         'Cer 18:1-24:0', 
-    #         'Cer 18:1-24:1'
-    #         ],
-    #     'Glucosylceramides': [
-    #         "Glucosylceramide (Gaucher's Spleen)"
-    #         ],
-    #     'Dihydroceramides': [
-    #         'Cer 18:0-14:0', 
-    #         'Cer 18:1-24:1(15Z)'
-    #         ],
-    #     'Deoxyceramides' : ['Cer m18:1-16:0', 'Cer m18:1-24:1'],
-    #     'Fatty Acids (L)': ['Stearic Acid', 'Palmitic Acid'],
-    #     'Fatty Acids (PUFA)': ['Docosahexaenoic Acid', 'Tetracosapentaenoic Acid'],
-    #     'Carnitines (S)': [
-    #         'C8 L-Carnitine',
-    #       ],
-    #     'Carnitines (M/L)': [
-    #         'C12 Carnitine', 
-    #         'C16 Carnitine', 
-    #         'C18 Carnitine (d9-cis)'
-    #         ],
-    # },
+    'mol_groups': {
+        'Sterols': [
+            '18:1 Cholesterol Ester', 
+            'Cholesterol (ovine)'
+            ],
+        'Cardiolipins': [
+            '16:0 Cardiolipin'
+            ],
+        'Phosphatidylcholines': [
+            'PC Mix', 
+            'DOPC', 
+            'DSPC'
+            ],
+        'Phosphatidylethanolamines': [
+            'PE Mix', 
+            'DOPE'
+            ],
+        'Phosphatidylserines': [
+            'PS Mix'
+            ],
+        'Phosphatidylinositols': [
+            'PI Mix'
+            ],
+        'Phosphatidylglycerols': [
+            'PG Mix'
+            ],
+        'Lysophosphatidate': [
+            '18:0 Lyso PA', 
+            '18:1 LPA'
+            ],
+        'Glycerols': [
+            'DAG 16:0', 
+            'DAG 18:0 and 24:0 '
+            'TAG Mix'
+            'TAG 16:0', 
+            'TAG 18:1',
+            '16:0 CDP DG'
+            ],
+        'Ceramides': [
+            'Sphingosine'
+            'Cer 18:1-12:0'
+            'Cer 18:1-18:0', 
+            'Cer 18:1-18:1'
+            'Cer 18:1-22:0', 
+            'Cer 18:1-24:0', 
+            'Cer 18:1-24:1'
+            ],
+        'Glucosylceramides': [
+            "Glucosylceramide (Gaucher's Spleen)"
+            ],
+        'Dihydroceramides': [
+            'Cer 18:0-14:0', 
+            'Cer 18:1-24:1(15Z)'
+            ],
+        'Deoxyceramides' : ['Cer m18:1-16:0', 'Cer m18:1-24:1'],
+        'SFA': ['Stearic Acid', 'Palmitic Acid'],
+        'PUFA': ['Docosahexaenoic Acid', 'Tetracosapentaenoic Acid'],
+        'Carnitines': [
+            # 'C8 L-Carnitine',
+            'C12 Carnitine', 
+            'C16 Carnitine', 
+            'C18 Carnitine (d9-cis)'
+            ],
+        'Background' : ['Kidney Background']
+    },
     # 'mol_groups': {
     #     'Background': ['Kidney Background'],
     #     'Sterols': [
@@ -644,6 +632,8 @@ def apply_sam_masking(img_base, img_out_dir, mask_dir, mol_names, mol_groups=Non
 # PIPELINE EXECUTION
 # =========================================================================
 
+
+
 def main():
     base_dir = os.path.dirname(CONFIG['image_dir'])
 
@@ -651,7 +641,7 @@ def main():
         norm_img_dir = os.path.join(base_dir, 'Normalized_Images')
 
 
-    output_dir = os.path.join(base_dir, 'sam_outputs')
+    output_dir = os.path.join(base_dir, 'sam_outputs_grouped')
     os.makedirs(output_dir, exist_ok=True)
     
     all_mask_records = []
@@ -692,32 +682,37 @@ def main():
     image_files = [f for f in os.listdir(CONFIG['image_dir']) 
                    if f.endswith(('.tif', '.tiff')) and not f.startswith('._')]
     print(f"Found {len(image_files)} images.")
+    PALETTE = sns.color_palette("husl", len(target_names))
     
+    # =========================================================================
+    # SAM Classification
+    # =========================================================================
+
     for img_file in image_files:
         img_path = os.path.join(CONFIG['image_dir'], img_file)
         # Sanitize img_base to avoid hidden characters or illegal symbols
         img_base = os.path.splitext(img_file)[0]
         img_base = re.sub(r'[^\w\-_\. ]', '', img_base).strip()
-        
+
         img_out_dir = os.path.normpath(os.path.join(output_dir, img_base))
         os.makedirs(img_out_dir, exist_ok=True)
-        
+
         print(f"\nProcessing {img_file}...")
-        
+
         # Load image as memmap
         image_mmap = tifffile.memmap(img_path, mode='r')
         with tifffile.TiffFile(img_path) as tif:
             if tif.is_imagej:
                 page = tif.pages[0]
-                pixel_size_x = 1/page.resolution[1]
-                pixel_size_y = 1/page.resolution[0]
+                pixel_size_x = 1 / page.resolution[1]
+                pixel_size_y = 1 / page.resolution[0]
             else:
                 pixel_size_x = 1
                 pixel_size_y = 1
-        res = (1/pixel_size_x, 1/pixel_size_y)
+        res = (1 / pixel_size_x, 1 / pixel_size_y)
         meta = {'axes': 'YX', 'unit': 'um', 'PhysicalSizeX': pixel_size_x, 'PhysicalSizeY': pixel_size_y}
         print(f"  Image shape: {image_mmap.shape}")
-        
+
         # Identify channel order
         ch_axis = -1
         if image_mmap.ndim == 3:
@@ -733,23 +728,23 @@ def main():
         else:
             print(f"  Skipping: Expected 3D HSI stack.")
             continue
-            
+
         n_pixels = h * w
         image_flat = image_mmap.reshape(ch, -1).T if ch_axis == 0 else image_mmap.reshape(-1, ch)
-        
+
         # Stage 2: Batched Shift Estimation
         print("  Estimating global shift in batches...")
         sum_spectra = np.zeros(CONFIG['num_samples'], dtype=np.float64)
         for start_p in range(0, n_pixels, CONFIG['chunk_size']):
             end_p = min(start_p + CONFIG['chunk_size'], n_pixels)
             sum_spectra += np.sum(image_flat[start_p:end_p].astype(np.float32), axis=0)
-            
+
         image_mean = (sum_spectra / n_pixels).astype(np.float32)
         image_mean_norm = normalize_spectra(image_mean)
-        
+
         best_shift = estimate_best_shift(image_mean_norm, bg_ref, MAX_SHIFT_CHANNELS)
         print(f"  Estimated best shift: {best_shift} channels (~{best_shift * WN_STEP:.2f} cm^-1)")
-        
+
         # Apply shift to references
         shifted_ref_matrix = np.zeros_like(ref_matrix)
         for i in range(len(mol_names)):
@@ -759,31 +754,29 @@ def main():
                 shifted_ref_matrix[i, :best_shift] = ref_matrix[i, -best_shift:]
             else:
                 shifted_ref_matrix[i] = ref_matrix[i]
-        
+
         # Batched SAM and Classification
         print(f"  Calculating SAM and maps in chunks of {CONFIG['chunk_size']} pixels...")
-        
+
         # Prepare output paths
         sim_stack_path = os.path.normpath(os.path.join(img_out_dir, f"{img_base}_sam_similarity.tif"))
         class_map_path = os.path.normpath(os.path.join(img_out_dir, f"{img_base}_sam_classification.tif"))
-        class_stack_path = os.path.normpath(os.path.join(img_out_dir, f"{img_base}_sam_class_stack.tif"))
+        rgb_stack_path = os.path.normpath(os.path.join(img_out_dir, f"{img_base}_sam_rgb.tif"))
 
-        # Create TIFF-backed memmaps directly at the final output paths (avoid separate .dat temp files)
         sim_best_path = os.path.normpath(os.path.join(img_out_dir, f"{img_base}_sam_best_similarity.tif"))
 
-        sim_stack_mmap = tifffile.memmap(sim_stack_path, shape=(len(target_names), h, w), dtype='float32', mode='w+')
-        class_stack_mmap = tifffile.memmap(class_stack_path, shape=(len(target_names), h, w), dtype='float32', mode='w+')
-        class_stack_mmap[:] = np.nan
-
-        class_map_mmap = tifffile.memmap(class_map_path, shape=(h, w), dtype='uint16', mode='w+')
-        best_sim_mmap = tifffile.memmap(sim_best_path, shape=(h, w), dtype='float32', mode='w+')
+        # Create TIFF-backed memmaps for outputs (no separate .dat temp files)
+        sim_stack_mmap = tifffile.memmap(sim_stack_path, shape=(len(target_names), h, w), dtype='float32')
+        rgb_stack_mmap = tifffile.memmap(rgb_stack_path, shape=(3, h, w), dtype='uint8')
+        class_map_mmap = tifffile.memmap(class_map_path, shape=(h, w), dtype='uint16')
+        best_sim_mmap = tifffile.memmap(sim_best_path, shape=(h, w), dtype='float32')
 
         top_k = 5
         all_top_indices = np.zeros((n_pixels, top_k), dtype=np.uint16)
         all_top_sims = np.zeros((n_pixels, top_k), dtype=np.float32)
         save_csv = n_pixels < CONFIG['max_csv_pixels']
 
-        for start_p in tqdm(range(0, n_pixels, CONFIG['chunk_size']), desc="Processing batches"):
+        for start_p in tqdm(range(0, n_pixels, CONFIG['chunk_size']), desc="        Processing batches"):
             end_p = min(start_p + CONFIG['chunk_size'], n_pixels)
             chunk = image_flat[start_p:end_p].astype(np.float32)
 
@@ -802,7 +795,13 @@ def main():
                 effective_angles = chunk_angles
 
             chunk_similarity = 1.0 - (effective_angles / np.pi)
-            chunk_best_idx = np.argmin(effective_angles, axis=1)
+            # If similarity is below threshold, we will set class to 0 (No Match) and if best match is Tissue Background, we will choose the second best match if it is above threshold
+            sorted_indices = np.argsort(effective_angles, axis=1)
+            background_name = [name for name in target_names if 'background' in name.lower()]
+            temp_best_idx = np.where(sorted_indices[:, 0] == target_names.index(background_name[0]), sorted_indices[:,1], sorted_indices[:, 0])
+            chunk_best_idx = np.where(chunk_similarity[np.arange(len(temp_best_idx)), temp_best_idx] > CONFIG['similarity_threshold'], temp_best_idx, -1)
+
+            # chunk_best_idx = np.argmin(effective_angles, axis=1)
             chunk_best_sim = np.max(chunk_similarity, axis=1)
 
             top_k_indices = np.argsort(effective_angles, axis=1)[:, :top_k]
@@ -813,22 +812,32 @@ def main():
             chunk_best_idx = chunk_best_idx + 1
             chunk_best_idx[no_match_mask] = 0
 
+            # Write into TIFF memmaps
+            # class_map stored as 2D (h, w)
             class_map_mmap.reshape(-1)[start_p:end_p] = chunk_best_idx
             best_sim_mmap.reshape(-1)[start_p:end_p] = chunk_best_sim
 
-            class_stack_flat = class_stack_mmap.reshape(len(target_names), -1)
             sim_stack_flat = sim_stack_mmap.reshape(len(target_names), -1)
             for t_idx in range(len(target_names)):
                 sim_stack_flat[t_idx, start_p:end_p] = chunk_similarity[:, t_idx]
                 best_match_mask = (chunk_best_idx - 1 == t_idx)
-                class_stack_flat[t_idx, start_p:end_p][best_match_mask] = 1.0
+                rows = np.where(best_match_mask)[0] + start_p
+                cols = None
 
+                ys = (rows // w).astype(int)
+                xs = (rows % w).astype(int)
+                rgb_stack_mmap[0, ys, xs] = (np.array(PALETTE[t_idx]) * 255).astype(np.uint8)[0]
+                rgb_stack_mmap[1, ys, xs] = (np.array(PALETTE[t_idx]) * 255).astype(np.uint8)[1]
+                rgb_stack_mmap[2, ys, xs] = (np.array(PALETTE[t_idx]) * 255).astype(np.uint8)[2]
+
+        # Flush memmaps
         sim_stack_mmap.flush()
-        class_stack_mmap.flush()
+        rgb_stack_mmap.flush()
         class_map_mmap.flush()
         best_sim_mmap.flush()
 
-        # TIFF memmaps written in-place; no separate imwrite necessary.
+        target_names_idx_map = {i: name for i, name in enumerate(target_names)}
+        np.savetxt(os.path.join(img_out_dir, f"{img_base}_target_names.txt"), [target_names_idx_map[i] for i in range(len(target_names_idx_map))], fmt="%s")
 
         indices, best_match_idx_sample, similarity_sample = plot_diagnostic_samples(
             img_out_dir, image_mmap, shifted_ref_matrix, mol_names
@@ -893,28 +902,9 @@ def main():
         plt.savefig(os.path.join(img_out_dir, f"{img_base}_sam_summary.png"), dpi=150)
         plt.close()
 
-        del sim_stack_mmap, class_stack_mmap, class_map_mmap, best_sim_mmap
+        del sim_stack_mmap, rgb_stack_mmap, class_map_mmap, best_sim_mmap
         import gc
         gc.collect()
-
-        # Stage 5: Masking (Per Image)
-        if MASKING_CONFIG['perform_masking']:
-            records = apply_sam_masking(
-                img_base, img_out_dir, MASKING_CONFIG['mask_dir'], 
-                target_names,
-                pixel_size=(pixel_size_x, pixel_size_y),
-                norm_img_dir=norm_img_dir if MASKING_CONFIG.get('count_lipid_droplets') else None
-            )
-            all_mask_records.extend(records)
-
-    # Final Aggregated Masking Summary
-    if MASKING_CONFIG['perform_masking'] and all_mask_records:
-        summary_df = pd.DataFrame(all_mask_records)
-        summary_path = os.path.join(output_dir, "sam_masked_summary.csv")
-        summary_df.to_csv(summary_path, index=False)
-        print(f"\nFinal Aggregated Masking Summary saved to: {summary_path}")
-
-    print("\nSAM Pipeline Complete.")
 
 if __name__ == "__main__":
     main()

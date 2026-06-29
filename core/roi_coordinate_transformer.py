@@ -1,8 +1,8 @@
 """
-ROI Coordinate Transformation Module
+Image Coordinate Transformation Module
 
-Handles loading and applying affine transformations to cell coordinates,
-enabling mapping from global tissue space to ROI-local coordinate space.
+Loads and applies affine transformations to cell coordinates,
+enabling mapping from image space to coordinate space.
 
 Supports both pixel and micron coordinate systems, with matrices in both
 xy and yx formats (from SimpleITK/elastix registration files).
@@ -67,6 +67,18 @@ class TransformationLoader:
             Dictionary with 'height' and 'width' in pixels
         """
         shape = self.data['fixed_paths'][0]['image_shape']
+        return {'height': shape[0], 'width': shape[1]}
+    
+    def get_moving_bounds_px(self) -> Dict[str, float]:
+        """
+        Get moving image bounding box dimensions from moving image shape.
+        
+        Returns
+        -------
+        dict
+            Dictionary with 'height' and 'width' in pixels
+        """
+        shape = self.data['moving_paths'][0]['image_shape']
         return {'height': shape[0], 'width': shape[1]}
     
     def get_roi_bounds_um(self) -> Dict[str, float]:
@@ -170,7 +182,8 @@ class CellDataMapper:
                  cell_seg_df: pd.DataFrame,
                  use_microns: bool = False,
                  clip_to_roi: bool = False,
-                 flip_y: bool = True):
+                 flip_y: bool = True,
+                 use_inverse: bool = False):
         """
         Initialize cell data mapper.
         
@@ -188,21 +201,31 @@ class CellDataMapper:
         flip_y : bool, optional
             If True, invert y-coordinate (y_roi = height - y_roi) to correct for
             coordinate system orientation differences. Default is True.
+        use_inverse : bool, optional
+            If True, apply the inverse transformation matrix and use moving image bounds.
+            Default is False.
         """
         self.loader = TransformationLoader(json_path)
         self.cell_seg_df = cell_seg_df.copy()
         self.use_microns = use_microns
         self.clip_to_roi = clip_to_roi
         self.flip_y = flip_y
+        self.use_inverse = use_inverse
 
         # Select appropriate transformation matrix based on coordinate system
-        if use_microns:
+        if use_inverse:
+            matrix = self.loader.get_inverse_matrix_xy_px()
+        elif use_microns:
             matrix = self.loader.get_matrix_xy_um()
         else:
             matrix = self.loader.get_matrix_xy_px()
         
         self.transformer = CoordinateTransformer(matrix)
-        self.roi_bounds = self.loader.get_roi_bounds_um() if use_microns else self.loader.get_roi_bounds_px()
+        
+        if use_inverse:
+            self.roi_bounds = self.loader.get_moving_bounds_px()
+        else:
+            self.roi_bounds = self.loader.get_roi_bounds_um() if use_microns else self.loader.get_roi_bounds_px()
     
     def transform_cells(self, 
                        round_coordinates: bool = True,
@@ -444,7 +467,8 @@ def apply_roi_transform_from_json(json_path: Union[str, Path],
                                   cell_seg_df: pd.DataFrame,
                                   clip_to_roi: bool = False,
                                   return_roi_bounds: bool = True,
-                                  flip_y: bool = True) -> pd.DataFrame:
+                                  flip_y: bool = True,
+                                  use_inverse: bool = False) -> pd.DataFrame:
     """
     Simple interface to transform cell coordinates using transformation JSON.
     
@@ -461,6 +485,9 @@ def apply_roi_transform_from_json(json_path: Union[str, Path],
     flip_y : bool, optional
         If True, invert y-coordinate to correct for coordinate system orientation.
         Default is True.
+    use_inverse : bool, optional
+        If True, apply the inverse transformation matrix and use moving image bounds.
+        Default is False.
     
     Returns
     -------
@@ -468,7 +495,7 @@ def apply_roi_transform_from_json(json_path: Union[str, Path],
         If return_roi_bounds is True: (transformed_df, roi_bounds)
         If return_roi_bounds is False: transformed_df
     """
-    mapper = CellDataMapper(json_path, cell_seg_df, use_microns=False, clip_to_roi=clip_to_roi, flip_y=flip_y)
+    mapper = CellDataMapper(json_path, cell_seg_df, use_microns=False, clip_to_roi=clip_to_roi, flip_y=flip_y, use_inverse=use_inverse)
 
     roi_bounds = mapper.roi_bounds if return_roi_bounds else None
 
