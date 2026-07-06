@@ -19,11 +19,11 @@ import seaborn as sns
 # =========================================================================
 CONFIG = {
     'spectra_csv': r'C:\Users\jvill\OneDrive\Documents\GitHub\hsi_machine_learning\unprocessed_data\averaged_spectra.csv',
-    'image_dir': r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\xenium-HSI",
+    'image_dir': r"C:\Users\jvill\Downloads\KPMP_QC_images\Normalized_HSI",
     'wavenumber_start': 2700,
     'wavenumber_end': 3100,
-    'num_samples': 61,
-    'max_shift_cm': 30,  # Max shift in cm^-1
+    'num_samples': 81,
+    'max_shift_cm': 50,  # Max shift in cm^-1
     'similarity_threshold': 0.7, # Min similarity (0-1) to be considered a match
     'chunk_size': 1_000_000, # Number of pixels per batch for large images
     'max_csv_pixels': 10_000_000, # Skip full CSV if image is larger than this
@@ -32,43 +32,39 @@ CONFIG = {
 
     'mol_groups': {
         'Sterols': [
-            '18:1 Cholesterol Ester', 
             'Cholesterol (ovine)'
             ],
+        'Sterol Esters': [
+            '18:1 Cholesterol Ester'
+        ],
         'Cardiolipins': [
             '16:0 Cardiolipin'
             ],
-        'Phosphatidylcholines': [
+        'Phospholipids': [
             'PC Mix', 
             'DOPC', 
-            'DSPC'
-            ],
-        'Phosphatidylethanolamines': [
+            'DSPC',
             'PE Mix', 
-            'DOPE'
-            ],
-        'Phosphatidylserines': [
-            'PS Mix'
-            ],
-        'Phosphatidylinositols': [
-            'PI Mix'
-            ],
-        'Phosphatidylglycerols': [
+            'DOPE',
+            'PS Mix',
+            'PI Mix',
             'PG Mix'
             ],
-        'Lysophosphatidate': [
+        'Lysophospholipids': [
             '18:0 Lyso PA', 
             '18:1 LPA'
             ],
-        'Glycerols': [
+        'Diglycerides': [
             'DAG 16:0', 
             'DAG 18:0 and 24:0 '
+            '16:0 CDP DG'
+            ],
+        'Triglycerides': [
             'TAG Mix'
             'TAG 16:0', 
             'TAG 18:1',
-            '16:0 CDP DG'
             ],
-        'Ceramides': [
+        'Sphingolipids': [
             'Sphingosine'
             'Cer 18:1-12:0'
             'Cer 18:1-18:0', 
@@ -77,7 +73,7 @@ CONFIG = {
             'Cer 18:1-24:0', 
             'Cer 18:1-24:1'
             ],
-        'Glucosylceramides': [
+        'Glucosylsphingolipids': [
             "Glucosylceramide (Gaucher's Spleen)"
             ],
         'Dihydroceramides': [
@@ -836,8 +832,13 @@ def main():
         class_map_mmap.flush()
         best_sim_mmap.flush()
 
-        target_names_idx_map = {i: name for i, name in enumerate(target_names)}
-        np.savetxt(os.path.join(img_out_dir, f"{img_base}_target_names.txt"), [target_names_idx_map[i] for i in range(len(target_names_idx_map))], fmt="%s")
+        # target_names_idx_map = #{i: name for i, name in enumerate(target_names)}
+        target_names_id = target_names.copy()[:-1]
+        target_names_id.insert(0, "No Match")
+        target_names_rgb_id = [f"#{int(PALETTE[i][0]*255):02x}{int(PALETTE[i][1]*255):02x}{int(PALETTE[i][2]*255):02x}" for i, name in enumerate(target_names)][:-1]
+        target_names_rgb_id.insert(0, "#000000")
+        target_names_df = pd.DataFrame({"Molecules": target_names_id, "RGB": target_names_rgb_id})
+        target_names_df.to_csv(os.path.join(img_out_dir, f"{img_base}_target_names.csv"), index=True)
 
         indices, best_match_idx_sample, similarity_sample = plot_diagnostic_samples(
             img_out_dir, image_mmap, shifted_ref_matrix, mol_names

@@ -63,25 +63,34 @@ def get_image_global_stats(image_flat, chunk_size):
 def main():
     # Setup parameters
     # base_directory = r"E:\Data\Jorge\01_HumanKidney_HuBMAP\05-13-25 Xenium AKI 3782 K2200093_5\ROI1X left side\tifs"
-    num_samp = 61
+    num_samp = 81
     wn_1 = 2700
     wn_2 = 3100
     ch_start = int((2800 - wn_1) / (wn_2 - wn_1) * num_samp)
-    shift = 0  
     
     srs_params_path = 'params_dataset/srs_params_61.npz'
 
     quant = True
-    normalize = True
+    normalize = False
     flip = True
-    bg_subtract = True
+    bg_subtract = False
+    show_plots = True
+    
+    if not bg_subtract:
+        quant = True
     
     # Load SRS parameters to get background dataframe
     srs_data = np.load(srs_params_path)
     # background = srs_data['background']
 
     background = pd.read_csv(r'C:\Users\jvill\OneDrive\Documents\GitHub\hsi_machine_learning\unprocessed_data\water_HSI_76.csv')
-    background = background.values
+    background = background.values.flatten()
+    if flip:
+        background = np.flip(background)  # Flip to match spectra order if needed
+    #Shift background
+    shift = 10
+    # if shift > 0:
+    #     background = np.pad(background, (shift, 0), mode='constant')
     # Interpolate background to match num_samp if needed
     if background.shape[0] != num_samp:
         background_interp = np.interp(
@@ -91,8 +100,7 @@ def main():
         )
         background = background_interp
 
-    if flip:
-        background = np.flip(background)  # Flip to match spectra order if needed
+
 
 
     base_directories = [
@@ -103,7 +111,7 @@ def main():
         # r"E:\Data\Jorge\01_HumanKidney_HuBMAP\05-15-25 Xenium CKD 3990\ROI1 glomeruli bottom right\tifs",
         # r"E:\Data\Jorge\01_HumanKidney_HuBMAP\05-15-25 Xenium CKD 3990\ROI2 glomeruli middle\tifs"
         # r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\xenium-HSI",
-        r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\data"
+        r"C:\Users\jvill\Downloads\KPMP_QC_images\HSI"
 
 
     ]
@@ -195,31 +203,28 @@ def main():
                 max_val = mean_standard[spectra_max_idx] + 3 * std_standard[spectra_max_idx]
                 
             
-                # --- Pass 2: Final Process and Save ---
-                print("  Pass 2: Finalizing and writing output...")
-                normalized_dir = os.path.join(os.path.dirname(os.path.dirname(img_path)), f'Normalized_{os.path.basename(os.path.dirname(img_path))}')
+            # --- Pass 2: Final Process and Save ---
+            print("  Pass 2: Finalizing and writing output...")
+            if bg_subtract:
+                if normalize:
+                    normalized_dir = os.path.join(os.path.dirname(os.path.dirname(img_path)), f'Normalized_BackgroundRemoved_{os.path.basename(os.path.dirname(img_path))}')
+                else:
+                    normalized_dir = os.path.join(os.path.dirname(os.path.dirname(img_path)), f'BackgroundRemoved_{os.path.basename(os.path.dirname(img_path))}')
                 os.makedirs(normalized_dir, exist_ok=True)
                 norm_img_path = os.path.join(normalized_dir, f"{sample}")
             
-            else:
-                print("  Pass 2: Normalization disabled, writing background-subtracted output...")
-                normalized_dir = os.path.join(os.path.dirname(os.path.dirname(img_path)), f'Normalized_{os.path.basename(os.path.dirname(img_path))}')
-                os.makedirs(normalized_dir, exist_ok=True)
-                norm_img_path = os.path.join(normalized_dir, f"{sample}")
-            
-            # Pre-allocate output TIFF stack (CYX)
-
-            norm_stack = tifffile.memmap(
-                norm_img_path, shape=(num_samp, h, w), dtype='float32', imagej=True,
-                metadata={'axes': 'CYX', 'unit': 'um'}
-            )
+                # Pre-allocate output TIFF stack (CYX)
+                norm_stack = tifffile.memmap(
+                    norm_img_path, shape=(num_samp, h, w), dtype='float32', imagej=True,
+                    metadata={'axes': 'CYX', 'unit': 'um'}
+                )
 
 
             if quant:
-                unsat_idx = macro_idx(3050 + 20, num_samp, wn_1, wn_2)
-                protein_idx = macro_idx(2930 + 20, num_samp, wn_1, wn_2)
-                sat_idx = macro_idx(2880 + 20, num_samp, wn_1, wn_2)
-                lipid_idx = macro_idx(2850 + 20, num_samp, wn_1, wn_2)
+                unsat_idx = macro_idx(3050 + shift, num_samp, wn_1, wn_2)
+                protein_idx = macro_idx(2930 + shift, num_samp, wn_1, wn_2)
+                sat_idx = macro_idx(2880 + shift, num_samp, wn_1, wn_2)
+                lipid_idx = macro_idx(2850 + shift, num_samp, wn_1, wn_2)
                 print(f"unsat idx: {unsat_idx}")
                 print(f"protein idx: {protein_idx}")
                 print(f"sat idx: {sat_idx}")
@@ -259,24 +264,28 @@ def main():
                 else:
                     spectra_standard = temp
 
-                if quant:
-                    spectral_std = spectra_standard.std(axis=1)
-                    threshold = np.mean(spectra_standard[:, :15].std(axis=1)) + 2 * np.std(spectra_standard[:, :15].std(axis=1))
+                # if quant:
+                #     spectral_std = spectra_standard.std(axis=1)
+                #     threshold = np.mean(spectra_standard[:, :ch_start].std(axis=1)) + 2 * np.std(spectra_standard[:, :ch_start].std(axis=1))
 
-                    valid_mask = spectral_std > threshold
-                    spectra_standard[~valid_mask] = 0  # Zero out low-variance spectra
+                #     valid_mask = spectral_std > threshold
+                #     spectra_standard[~valid_mask] = 0  # Zero out low-variance spectra
 
-                # if i == 0:  # Plot example from first chunk
-                #     temp_mean = np.mean(temp, axis=0)
-                #     background_mean = np.mean(background_arr, axis=0)
-                #     spec_mean = np.mean(spectra_standard, axis=0)
-                #     plt.figure(figsize=(10, 6))
-                #     plt.plot(temp_mean, label='Original Spectrum')
-                #     plt.plot(background_mean, label='Background Estimate')
-                #     # plt.plot(spec_mean, label='Standardized Spectrum')
-                #     plt.title('Spectral Standardization Example')
-                #     plt.legend(['Original Spectrum', 'Background Estimate', 'Standardized Spectrum'])
-                #     plt.show()
+                if i == 0 and show_plots:  # Plot example from first chunk
+                    temp_mean = np.mean(temp, axis=0)
+                    spec_mean = np.mean(spectra_standard, axis=0)
+                    plt.figure(figsize=(10, 6))
+                    plt.plot(temp_mean, label='Original Spectrum')
+                    if bg_subtract:
+                        background_mean = np.mean(background_arr, axis=0)
+                        plt.plot(background_mean, label='Background Estimate')
+                        plt.plot(spec_mean, label='Standardized Spectrum')
+                        plt.title('Spectral Standardization Example')
+                        plt.legend(['Original Spectrum', 'Background Estimate', 'Standardized Spectrum'])
+                    else:
+                        plt.title('Spectral Standardization Example (No Background Subtraction)')
+                        plt.legend(['Original/Standardized Spectrum'])
+                    plt.show()
 
 
                 
@@ -286,22 +295,22 @@ def main():
                     spectra = spectra_norm - np.median(spectra_norm[:, :ch_start], axis=1)[:, np.newaxis]
                 else:
                     spectra = spectra_standard - np.median(spectra_standard[:, :ch_start], axis=1)[:, np.newaxis]
-                    spectra = np.maximum(spectra, 0)  # Ensure non-negativity if not normalizing
+                    # spectra = np.maximum(spectra, 0)  # Ensure non-negativity if not normalizing
                 
                 #Visualize macromolecule indeces on the first chunk
-                # if i == 0 and quant:
-                #     spectra_mean = np.mean(spectra, axis=0)
-                #     plt.figure(figsize=(10, 6))
-                #     plt.plot(spectra_mean, label='Standardized Spectrum')
-                #     plt.axvline(protein_idx, color='r', linestyle='--', label='Protein Index')
-                #     plt.axvline(sat_idx, color='g', linestyle='--', label='Saturated Lipid Index')
-                #     plt.axvline(lipid_idx, color='b', linestyle='--', label='Lipid Index')
-                #     plt.axvline(unsat_idx, color='m', linestyle='--', label='Unsaturated Lipid Index')
-                #     plt.title('Standardized Spectrum with Macromolecule Indices')
-                #     plt.xlabel('Channel Index')
-                #     plt.ylabel('Intensity')
-                #     plt.legend()
-                #     plt.show()
+                if i == 0 and quant and show_plots:
+                    spectra_mean = np.mean(spectra, axis=0)
+                    plt.figure(figsize=(10, 6))
+                    plt.plot(spectra_mean, label='Standardized Spectrum')
+                    plt.axvline(protein_idx, color='r', linestyle='--', label='Protein Index')
+                    plt.axvline(sat_idx, color='g', linestyle='--', label='Saturated Lipid Index')
+                    plt.axvline(lipid_idx, color='b', linestyle='--', label='Lipid Index')
+                    plt.axvline(unsat_idx, color='m', linestyle='--', label='Unsaturated Lipid Index')
+                    plt.title('Standardized Spectrum with Macromolecule Indices')
+                    plt.xlabel('Channel Index')
+                    plt.ylabel('Intensity')
+                    plt.legend()
+                    plt.show()
 
                 if quant:
                     # Map extraction (Max in range)
@@ -310,22 +319,26 @@ def main():
                     lipid_map.reshape(-1)[i:end_i] = np.max(spectra[:, lipid_idx-2:lipid_idx+2], axis=1)
                     unsat_map.reshape(-1)[i:end_i] = np.max(spectra[:, unsat_idx-2:unsat_idx+2], axis=1)
 
-                # Write to 3D stack
-                for ch_idx in range(num_samp):
-                    norm_stack.reshape(num_samp, -1)[ch_idx, i:end_i] = spectra[:, ch_idx]
-                        
-                    # # Update macro-maps
-                    # chunk_h = (end_i - i) // w # This might be tricky for partial rows, simpler to use indices
-                    
-                    # # Indices in the 2D maps
-                    # y_coords = np.arange(i, end_i) // w
-                    # x_coords = np.arange(i, end_i) % w
-
-                norm_stack.flush()
+                if bg_subtract:
+                    # Write to 3D stack
+                    for ch_idx in range(num_samp):
+                        norm_stack.reshape(num_samp, -1)[ch_idx, i:end_i] = spectra[:, ch_idx]
+                    norm_stack.flush()
                 
                 if quant:
-                    # Save macromolecule images
-                    output_dir = os.path.join(os.path.dirname(os.path.dirname(img_path)), os.path.join(f'Normalized_Images_{os.path.basename(os.path.dirname(img_path))}', f"{sample.replace('.tif','')}"))
+                    # Determine macromolecule output dir prefix based on parameters
+                    if bg_subtract:
+                        if normalize:
+                            folder_prefix = "Normalized_BackgroundRemoved_Images"
+                        else:
+                            folder_prefix = "BackgroundRemoved_Images"
+                    else:
+                        if normalize:
+                            folder_prefix = "Normalized_Images"
+                        else:
+                            folder_prefix = "Images"
+
+                    output_dir = os.path.join(os.path.dirname(os.path.dirname(img_path)), os.path.join(f'{folder_prefix}_{os.path.basename(os.path.dirname(img_path))}', f"{sample.replace('.tif','')}"))
                     os.makedirs(output_dir, exist_ok=True)
                     
                     protein_map = np.maximum(protein_map, 0)
@@ -346,23 +359,37 @@ def main():
                     
                     # Ratios
                     p_img = np.maximum(protein_map - lipid_map, 0)
-                    p_img[p_img > 50] = 0
+                    # p_img[p_img > 50] = 0
                     l_img = np.maximum(5 * lipid_map - 0.4 * protein_map, 0)
-                    l_img[l_img > 50] = 0
+                    # l_img[l_img > 50] = 0
                     
                     tifffile.imwrite(os.path.join(output_dir, f"P_image-{sample}"), p_img, resolution=res, imagej=True, metadata=meta)
                     tifffile.imwrite(os.path.join(output_dir, f"L_image-{sample}"), l_img, resolution=res, imagej=True, metadata=meta)
                     
                     unsat_ratio = np.where(sat_map == 0, 0, unsat_map / (sat_map + unsat_map + 1e-6))
                     lipid_ratio = np.where(protein_map == 0, 0, lipid_map / (protein_map + lipid_map + 1e-6))
-                    
-                    ratio_dir = os.path.join(os.path.dirname(os.path.dirname(img_path)), f'Ratio_{os.path.basename(os.path.dirname(img_path))}', f"{sample.replace('.tif','')}")
+
+                    # Determine ratio output dir based on parameters
+                    if bg_subtract:
+                        if normalize:
+                            ratio_folder_prefix = "Ratio_Normalized_BackgroundRemoved"
+                        else:
+                            ratio_folder_prefix = "Ratio_BackgroundRemoved"
+                    else:
+                        if normalize:
+                            ratio_folder_prefix = "Ratio_Normalized"
+                        else:
+                            ratio_folder_prefix = "Ratio"
+
+                    ratio_dir = os.path.join(os.path.dirname(os.path.dirname(img_path)), f'{ratio_folder_prefix}_{os.path.basename(os.path.dirname(img_path))}', f"{sample.replace('.tif','')}")
                     os.makedirs(ratio_dir, exist_ok=True)
                     tifffile.imwrite(os.path.join(ratio_dir, f"{sample.replace('.tif','')}-Lipid_Unsaturation-ratio.tif"), unsat_ratio.astype('float32'), resolution=res, imagej=True, metadata=meta)
                     tifffile.imwrite(os.path.join(ratio_dir, f"{sample.replace('.tif','')}-Lipid_to_Protein-ratio.tif"), lipid_ratio.astype('float32'), resolution=res, imagej=True, metadata=meta)
 
             # Cleanup
-            del img_mmap, norm_stack
+            if bg_subtract:
+                del norm_stack
+            del img_mmap
             import gc
             gc.collect()
 
