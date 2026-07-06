@@ -5,9 +5,10 @@ This script uses the structure tensor method (similar to OrientationJ in Fiji) t
 Much faster and more robust than Gabor filters while preserving directional continuity.
 
 Key Functions:
-1. compute_structure_tensor(image_path): Computes orientation and coherence using structure tensor
-2. visualize_structure_tensor_analysis(): Creates similar visualizations to the Gabor version
-3. compare_methods(): Side-by-side comparison of Gabor vs Structure Tensor
+1. compute_structure_tensor(image): Computes orientation and coherence using structure tensor
+2. compute_thickness(image): Computes thickness of collagen fibers (distance to background)
+3. visualize_preferential_orientation_vector_map(image, orientation, coherence): Visualizes the preferential orientation of collagen fibers
+
 
 """
 import os
@@ -26,23 +27,37 @@ from skimage.measure import block_reduce
 from tqdm import tqdm
 import time
 
-import time
+import tkinter as tk
+from tkinter import filedialog
 
 image_path = r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\SRS_data\05-14-25 Xenium S-2211-0003960 Ref\WSI-SHG-1031nm-700mw-4us-500V-zoom1.5_Cycle_03\SHG.tif"
-output_dir = os.path.join(os.path.dirname(image_path), f"{os.path.basename(image_path).split('.')[0]}_collagen_output")
-os.makedirs(output_dir, exist_ok=True)
+image_name = os.path.basename(image_path).split('.')[0]
+output_dir = os.path.join(os.path.dirname(image_path), f"{image_name}_collagen_output")
 
+# Choose thresholding method based on your ROI:
+# - 'otsu': Best for small, clean ROIs with clear background/signal distinction
+# - 'li': Better for larger ROIs with more complex intensity distributions
+# - 'yen': Good for unimodal distributions
+# - 'percentile': Manual control - e.g., threshold_value=50 removes bottom 50% of intensities
+# - 'none': No thresholding (analyze raw image)
+# image = load_image(image_path, threshold_method='otsu')
+
+# For larger ROIs with poor Otsu performance, try one of:
+# image = load_image(image_path, threshold_method='li')
+# image = load_image(image_path, threshold_method='percentile', threshold_value=75)
 
 CONFIG = {
     'image_path': image_path,
     'output_dir': output_dir,
+    'image_name': image_name,
     'pixel_size_um': 1.3258,
+    'map_type': 'distance_um',
     'sigma_gradient': 0.5,
     'sigma_tensor': 1.0,
-    'bin_size': None,
     'threshold_method': 'percentile',
     'threshold_value': 50,
     'distance_map_threshold_sigma': 1.0,
+    'plot_images': True,
 }
 
 
@@ -56,10 +71,6 @@ PLOT_STYLE = {
     'cbar_fraction': 0.046,
     'cbar_pad': 0.04
 }
-
-
-
-
 
 def save_standalone_colorbar(mappable, filename, label, ticks=None, tick_labels=None):
     """
@@ -127,11 +138,91 @@ def _auto_downsample_2d(*arrays, max_pixels=80_000_000):
     downs = tuple(arr[::stride, ::stride] for arr in arrays)
     return downs, stride
 
+
+def load_image(image_path, threshold_method='otsu', threshold_value=None):
+    """
+    Load and convert image to grayscale.
+    Apply thresholding to remove background noise before structure tensor.
+    
+    Args:
+        image_path (str): Path to image file
+        threshold_method (str): Thresholding method:
+            - 'otsu': Otsu's method (good for bimodal distributions)
+            - 'li': Li's method (more robust for complex histograms)
+            - 'yen': Yen's method (better for unimodal distributions)
+            - 'percentile': Manual percentile threshold (use threshold_value parameter)
+            - 'none': No thresholding, returns raw image
+        threshold_value (float): For 'percentile' method, the percentile (0-100) to use as threshold
+        
+    Returns:
+        image (ndarray): Grayscale image with background removed
+    """
+    try:
+        image = tifffile.imread(image_path)
+        print(f"Loaded image: {image.shape}, dtype: {image.dtype}")
+    except Exception as e:
+        print(f"Error reading image: {e}")
+        return None
+    
+    if image.ndim == 3:
+        print("Converting multi-channel to grayscale")
+        image = rgb2gray(image)
+    
+    # Use float16 for large images to reduce memory pressure.
+    if image.dtype != np.float16:
+        image = image.astype(np.float16)
+        print(f"Converted to float16: range [{image.min():.3f}, {image.max():.3f}]")
+    
+    # Apply thresholding based on selected method
+    if threshold_method.lower() == 'none':
+        print("No thresholding applied")
+        print(f"  Background pixels (0): {np.sum(image == 0)}")
+        print(f"  Signal pixels (>0): {np.sum(image > 0)}")
+        return image
+    
+    elif threshold_method.lower() == 'otsu':
+        threshold = filters.threshold_otsu(image)
+        image[image <= threshold] = 0
+        print(f"Applied Otsu threshold: {threshold:.3f}")
+    
+    elif threshold_method.lower() == 'li':
+        otsu_threshold = filters.threshold_otsu(image)
+        threshold = filters.threshold_li(image, initial_guess=otsu_threshold)
+        image[image <= threshold] = 0
+        print(f"Applied Li's threshold: {threshold:.3f}")
+    
+    elif threshold_method.lower() == 'yen':
+        threshold = filters.threshold_yen(image)
+        image[image <= threshold] = 0
+        print(f"Applied Yen's threshold: {threshold:.3f}")
+    
+    elif threshold_method.lower() == 'percentile':
+        if threshold_value is None:
+            print("ERROR: percentile method requires threshold_value parameter (0-100)")
+            return None
+        threshold = np.percentile(image[image>1e-4], threshold_value)
+        image[image <= threshold] = 0
+        print(f"Applied percentile {threshold_value}% threshold: {threshold:.3f}")
+    
+    else:
+        print(f"ERROR: Unknown threshold_method '{threshold_method}'")
+        return None
+    
+    print(f"  Background pixels: {np.sum(image == 0)}")
+    print(f"  Signal pixels: {np.sum(image > 0)}")
+    print(f"Threshold BEFORE structure tensor prevents boundary artifacts")
+
+    return image
+
+
+
 def compute_thickness(
     image,
     pixel_size_um=1.0,
     map_type='distance_um',
     threshold_sigma=1.0,
+    file_name="thickness.tif",
+    output_dir=None
 ):
     """
     Compute quantitative distance/thickness maps from collagen mask.
@@ -150,18 +241,15 @@ def compute_thickness(
     """
 
     if len(image.shape) > 2:
-        raise Exception("Input image must be grayscale")
+        raise Exception("Input image must be 2D grayscale")
 
     print(f"Computing quantitative map: {map_type} (pixel_size_um={pixel_size_um})...")
-    # smoothed = filters.gaussian(image, sigma=threshold_sigma)
-    # threshold = filters.threshold_li(image)
-    # binary = image > threshold
 
     binary = image > 0
 
     # Distance to background in pixels, converted to microns.
     distance_px = ndimage.distance_transform_edt(binary)
-    distance_um = distance_px.astype(np.float32, copy=False) * float(pixel_size_um)
+    distance_um = distance_px.astype(np.float16, copy=False) * float(pixel_size_um)
 
     if map_type == 'distance_um':
         # Each foreground pixel stores distance to nearest background.
@@ -178,17 +266,46 @@ def compute_thickness(
         )
 
     # Keep background at zero explicitly.
-    out_map = np.where(binary, out_map, 0).astype(np.float32, copy=False)
+    out_map = np.where(binary, out_map, 0).astype(np.float16, copy=False)
 
     print(
         f"  Map stats: min={out_map.min():.3f} um, max={out_map.max():.3f} um, "
         f"nonzero={np.count_nonzero(out_map)}"
     )
+    
+    # Save as float16 TIF
+    if output_dir is not None:
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+    else:
+        # Use tkinter to ask user to select folder if not provided  
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)  # Forces popup to the front of other windows
+
+        output_dir = filedialog.askdirectory(title="Select Folder")
+        root.destroy()
+
+    if not output_dir:
+        print("Save cancelled: No output directory selected.")
+        return out_map
+
+    # Construct full file path
+    full_path = os.path.join(output_dir, f"{file_name}")
+    # Save the image
+    tifffile.imwrite(full_path, out_map)
+    print(f"Saved quantitative map: {map_type} to {full_path}")
+
     return out_map
 
-
-
-def compute_structure_tensor(image, sigma_gradient=1.0, sigma_tensor=2.0, bin_size=None):
+def compute_structure_tensor(
+    image,
+    sigma_gradient=1.0,
+    sigma_tensor=2.0,
+    output_dir=None,
+    coherence_file_name=None,
+    orientation_file_name=None
+):
     """
     Compute fiber orientation and anisotropy using structure tensor method.
     This is the mathematical foundation of OrientationJ.
@@ -197,7 +314,6 @@ def compute_structure_tensor(image, sigma_gradient=1.0, sigma_tensor=2.0, bin_si
         image (ndarray): Input grayscale image of collagen fibers
         sigma_gradient (float): Gaussian smoothing for gradient computation
         sigma_tensor (float): Gaussian smoothing for tensor. Larger = more robust to noise
-        bin_size (int): Optional spatial averaging bin size
         
     Returns:
         orientation (ndarray): Dominant fiber angle at each pixel (0 to pi)
@@ -206,8 +322,8 @@ def compute_structure_tensor(image, sigma_gradient=1.0, sigma_tensor=2.0, bin_si
 
     image_tup, ds =  _auto_downsample_2d(image, max_pixels=120000000)
     image = image_tup[0]
-    # Normalize to 0-1 in float32 to keep memory bounded on large images.
-    image = image.astype(np.float32, copy=False)
+    # Normalize to 0-1 in float16 to keep memory bounded on large images.
+    image = image.astype(np.float16, copy=False)
     if image.max() > 1.0:
         image = (image - image.min()) / (image.max() - image.min() + 1e-8)
     
@@ -275,9 +391,9 @@ def compute_structure_tensor(image, sigma_gradient=1.0, sigma_tensor=2.0, bin_si
     # Coherence/Anisotropy = (lambda_max - lambda_min) / (lambda_max + lambda_min)
     # This ranges from 0 (isotropic) to 1 (perfectly aligned)
     denominator = lambda_max + lambda_min
-    coherence = np.zeros_like(denominator, dtype=np.float32)
+    coherence = np.zeros_like(denominator, dtype=np.float16)
     valid = denominator > 1e-10
-    coherence[valid] = np.square((lambda_max[valid] - lambda_min[valid]) / denominator[valid]).astype(np.float32)
+    coherence[valid] = np.square((lambda_max[valid] - lambda_min[valid]) / denominator[valid]).astype(np.float16)
     
     # Orientation from eigenvector of largest eigenvalue
     # For 2x2 symmetric matrix, if lambda is eigenvalue, eigenvector is proportional to
@@ -288,7 +404,7 @@ def compute_structure_tensor(image, sigma_gradient=1.0, sigma_tensor=2.0, bin_si
     # For fiber analysis, we want the PERPENDICULAR direction (along which fibers align)
     # So we rotate by 90 degrees = π/2
     # We use -2*Txy to flip to a Right-Handed Cartesian system (y-up relative to horizontal)
-    orientation = (0.5 * np.arctan2(-2*Txy, Txx - Tyy) + np.pi/2).astype(np.float32)
+    orientation = (0.5 * np.arctan2(-2*Txy, Txx - Tyy) + np.pi/2).astype(np.float16)
     # Normalize to [0, pi]
     orientation = orientation % np.pi
 
@@ -299,210 +415,121 @@ def compute_structure_tensor(image, sigma_gradient=1.0, sigma_tensor=2.0, bin_si
     print(f"  Coherence range: [{coherence.min():.3f}, {coherence.max():.3f}]")
     print(f"  Orientation range: [{orientation.min():.3f}, {orientation.max():.3f}] rad")
     
+    # Save TIF files if file names are provided
+    if coherence_file_name is not None or orientation_file_name is not None:
+        if output_dir is None:
+            # Use tkinter to ask user to select folder if not provided  
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)  # Forces popup to the front of other windows
+
+            output_dir = filedialog.askdirectory(title="Select Folder to Save Structure Tensor Maps")
+            root.destroy()
+            
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            
+            if coherence_file_name is not None:
+                # Work on a float16 copy and mask in-place to avoid an extra full-size array.
+                coherence_float16 = coherence.astype(np.float16, copy=True)
+                coherence_float16[image <= 0] = 0
+                np.clip(coherence_float16, 0.0, 1.0, out=coherence_float16)
+                
+                full_path_coh = os.path.join(output_dir, coherence_file_name)
+                tifffile.imwrite(full_path_coh, coherence_float16)
+                print(f"Saved coherence heatmap TIF to: {full_path_coh}")
+                del coherence_float16
+                
+            if orientation_file_name is not None:
+                orientation_work = orientation.astype(np.float16, copy=True)
+                orientation_work[image <= 0] = 0
+                
+                # Convert from radians (0-pi) to degrees (0-180)
+                orientation_degrees = np.degrees(orientation_work)
+                orientation_degrees = np.clip(orientation_degrees, 0, 180)
+                orientation_float16 = orientation_degrees.astype(np.float16)
+                
+                full_path_ori = os.path.join(output_dir, orientation_file_name)
+                tifffile.imwrite(full_path_ori, orientation_float16)
+                print(f"Saved orientation TIF to: {full_path_ori}")
+                
+                del orientation_work, orientation_degrees, orientation_float16
+        else:
+            print("Save cancelled: No output directory selected.")
+            
     return image, orientation, coherence
 
-
-def load_image(image_path, threshold_method='otsu', threshold_value=None):
+def visualize_orientation_heatmap(image, orientation, coherence=None, coherence_threshold=0.1, 
+                                  filename_png="orientation_heatmap_viz.png", 
+                                  figsize=None, sigma_smooth=0.5):
     """
-    Load and convert image to grayscale.
-    Apply thresholding to remove background noise before structure tensor.
+    Create and save a high-contrast orientation heatmap using HSV colormap.
     
     Args:
-        image_path (str): Path to image file
-        threshold_method (str): Thresholding method:
-            - 'otsu': Otsu's method (good for bimodal distributions)
-            - 'li': Li's method (more robust for complex histograms)
-            - 'yen': Yen's method (better for unimodal distributions)
-            - 'percentile': Manual percentile threshold (use threshold_value parameter)
-            - 'none': No thresholding, returns raw image
-        threshold_value (float): For 'percentile' method, the percentile (0-100) to use as threshold
+        image (ndarray): Original image for masking background
+        orientation (ndarray): Orientation map in radians (0 to pi)
+        coherence (ndarray): Coherence map for optional additional filtering
+        coherence_threshold (float): Minimum coherence to display (0-1)
+        filename_png (str): Output filename
+        figsize (tuple): Figure size
+        sigma_smooth (float): Gaussian smoothing sigma
         
     Returns:
-        image (ndarray): Grayscale image with background removed
+        fig: Matplotlib figure object
     """
-    try:
-        image = tifffile.imread(image_path)
-        print(f"Loaded image: {image.shape}, dtype: {image.dtype}")
-    except Exception as e:
-        print(f"Error reading image: {e}")
-        return None
     
-    if image.ndim == 3:
-        print("Converting multi-channel to grayscale")
-        image = rgb2gray(image)
-    
-    # Use float32 for large images to reduce memory pressure.
-    if image.dtype != np.float32:
-        image = image.astype(np.float32)
-        print(f"Converted to float32: range [{image.min():.3f}, {image.max():.3f}]")
-    
-    # Apply thresholding based on selected method
-    if threshold_method.lower() == 'none':
-        print("No thresholding applied")
-        print(f"  Background pixels (0): {np.sum(image == 0)}")
-        print(f"  Signal pixels (>0): {np.sum(image > 0)}")
-        return image
-    
-    elif threshold_method.lower() == 'otsu':
-        threshold = filters.threshold_otsu(image)
-        image[image <= threshold] = 0
-        print(f"Applied Otsu threshold: {threshold:.3f}")
-    
-    elif threshold_method.lower() == 'li':
-        otsu_threshold = filters.threshold_otsu(image)
-        threshold = filters.threshold_li(image, initial_guess=otsu_threshold)
-        image[image <= threshold] = 0
-        print(f"Applied Li's threshold: {threshold:.3f}")
-    
-    elif threshold_method.lower() == 'yen':
-        threshold = filters.threshold_yen(image)
-        image[image <= threshold] = 0
-        print(f"Applied Yen's threshold: {threshold:.3f}")
-    
-    elif threshold_method.lower() == 'percentile':
-        if threshold_value is None:
-            print("ERROR: percentile method requires threshold_value parameter (0-100)")
-            return None
-        threshold = np.percentile(image[image>1e-4], threshold_value)
-        image[image <= threshold] = 0
-        print(f"Applied percentile {threshold_value}% threshold: {threshold:.3f}")
-    
+    # Downsample for visualization if image is very large.
+    if coherence is not None:
+        (image_ds, orientation_ds, coherence_ds), ds = _auto_downsample_2d(image, orientation, coherence, max_pixels=120000000)
     else:
-        print(f"ERROR: Unknown threshold_method '{threshold_method}'")
-        return None
+        (image_ds, orientation_ds), ds = _auto_downsample_2d(image, orientation, max_pixels=120000000)
+        coherence_ds = None
+
+    if ds > 1:
+        print(f"Orientation heatmap downsampled by {ds}x for memory safety")
+
+    # Define overall mask: intensity signal AND well-defined orientation (coherence)
+    mask = image_ds > 0
+    if coherence_ds is not None:
+        mask = mask & (coherence_ds >= coherence_threshold)
     
-    print(f"  Background pixels: {np.sum(image == 0)}")
-    print(f"  Signal pixels: {np.sum(image > 0)}")
-    print(f"Threshold BEFORE structure tensor prevents boundary artifacts")
-
-    return image
-
-
-
-def visualize_structure_tensor_results(image, orientation, coherence, eigenvalues_max, 
-                                       bin_size=32, figsize=None, scale_factor=0.25, sigma_smooth=0.5):
-    """
-    Visualize structure tensor results.
+    # Mask background and low-anisotropy regions without creating duplicate where-arrays.
+    orientation_masked = orientation_ds.astype(np.float16, copy=True)
+    orientation_masked[~mask] = np.nan
     
-    Args:
-        image (ndarray): Original image
-        orientation (ndarray): Orientation map
-        coherence (ndarray): Coherence/anisotropy map
-        eigenvalues_max (ndarray): Density-like measure
-        bin_size (int): Downsampling factor for vector visualization
-        figsize (tuple): Figure size
-        scale_factor (float): Downscaling factor for high-resolution images (0.0-1.0)
-        sigma_smooth (float): Gaussian smoothing sigma for visualization (default 0.5 for fine detail)
-    """
-    
-    # Downscale image for memory efficiency
-    original_image = image
-    if scale_factor < 1.0:
-        h, w = original_image.shape
-        new_h, new_w = int(h * scale_factor), int(w * scale_factor)
-        original_image = block_reduce(original_image, block_size=(int(1/scale_factor), int(1/scale_factor)), func=np.mean)
-        coherence_viz = block_reduce(coherence, block_size=(int(1/scale_factor), int(1/scale_factor)), func=np.mean)
+    # Smooth before visualization
+    if sigma_smooth > 0:
+        # Note: smoothed nan is tricky, handle carefully
+        mask = np.isnan(orientation_masked)
+        orient_filled = np.nan_to_num(orientation_masked)
+        smooth_orient = gaussian_filter(orient_filled, sigma=sigma_smooth)
+        # Re-mask
+        smooth_orient[mask] = np.nan
     else:
-        coherence_viz = coherence
+        smooth_orient = orientation_masked
     
-    # Create figure with original and coherence maps
-    if figsize is None:
-        # Total width 12, each panel is 6. Aspect handles height.
-        h, w = original_image.shape[:2]
-        aspect = (2 * w) / h  # Double width due to two panels
-        figsize = (PLOT_STYLE['width'], PLOT_STYLE['width'] / aspect)
-        
-    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    fig, ax = plt.subplots(figsize=figsize)
     
-    # Panel A: Original image with magenta colormap
-    magenta_cmap = mcolors.LinearSegmentedColormap.from_list('magenta', ['black', 'purple', 'magenta'])
-    p_low, p_high = np.percentile(original_image, [1, 99])
-    original_enhanced = np.clip((original_image - p_low) / (p_high - p_low), 0, 1)
+    # Display with HSV colormap (circular)
+    # Map [0, pi] to [0, 1] for colormap
+    im = ax.imshow(smooth_orient, cmap='hsv', vmin=0, vmax=np.pi, aspect='auto')
     
-    axes[0].imshow(original_enhanced, cmap=magenta_cmap, aspect='auto')
-    # axes[0].set_title('Original SHG Image', fontsize=PLOT_STYLE['title_size'])
-    axes[0].axis('off')
+    # ax.set_title('Fiber Orientation Heatmap', fontsize=PLOT_STYLE['title_size'], fontweight='bold')
+    ax.axis('off') 
     
-    # Panel B: Coherence map (anisotropy)
-    smoothed_coherence = gaussian_filter(coherence_viz, sigma=sigma_smooth)
-    im1 = axes[1].imshow(smoothed_coherence, cmap='jet', aspect='auto',
-                        vmin=np.nanpercentile(smoothed_coherence, 5),
-                        vmax=np.nanpercentile(smoothed_coherence, 95))
-    # axes[1].set_title('Structural Coherence', fontsize=PLOT_STYLE['title_size'])
-    axes[1].axis('off')
-    # Colorbar removed from main plot - separate saving not implemented for this multi-panel view
-    # to keep it simple, but can be added if needed.
-    
-    fig.patch.set_facecolor('white')
+    # Save standalone colorbar
+    cbar_filename = filename_png.replace('.png', '_colorbar.png')
+    save_standalone_colorbar(im, cbar_filename, 'Orientation (radians)', 
+                            ticks=[0, np.pi/4, np.pi/2, 3*np.pi/4, np.pi],
+                            tick_labels=['0', 'π/4', 'π/2', '3π/4', 'π'])
+
+    fig.patch.set_facecolor('#f8f8f8')
     plt.tight_layout()
-    plt.savefig("structure_tensor_anisotropy.png", dpi=300, bbox_inches='tight')
-    print("Saved: structure_tensor_anisotropy.png")
+    plt.savefig(filename_png, dpi=300, bbox_inches='tight')
+    print(f"Saved: {filename_png}")
     plt.close(fig)
     
     return fig
-
-
-def save_coherence_heatmap_tif(coherence, filename="coherence_heatmap.tif", image=None):
-    """
-    Save coherence (anisotropy) heatmap as full-resolution TIF image.
-    Same spatial dimensions as original image for direct overlay.
-    
-    Args:
-        coherence (ndarray): Coherence/anisotropy map (values 0-1)
-        filename (str): Output filename for TIF image
-        image (ndarray): Original image for masking (optional)
-    Returns:
-        None. Saves file to disk.
-    """
-    # Work on a float32 copy and mask in-place to avoid an extra full-size array.
-    coherence_float32 = coherence.astype(np.float32, copy=True)
-    if image is not None:
-        coherence_float32[image <= 0] = 0
-
-    # Ensure values are in range [0, 1]
-    np.clip(coherence_float32, 0, 1, out=coherence_float32)
-    
-    # Save as float32 TIF for precision and easy colormap application
-    tifffile.imwrite(filename, coherence_float32)
-    
-    print(f"\nCoherence heatmap TIF saved: {filename}")
-    print(f"  Shape: {coherence_float32.shape}")
-    print(f"  Range: [{coherence_float32.min():.3f}, {coherence_float32.max():.3f}]")
-    print(f"  Use with colormap: plt.imshow(tifffile.imread('{filename}'), cmap='hot', vmin=0, vmax=1)")
-    
-    # Clean up large arrays from memory
-    del coherence_float32
-
-
-def save_thickness_tif(thickness, filename="thickness_map.tif", quantity_label="thickness", unit_label="um"):
-    """
-    Save thickness map as full-resolution TIF image.
-    Same spatial dimensions as original image for direct overlay.
-    
-    Args:
-        thickness (ndarray): Thickness map (values in pixels)
-        filename (str): Output filename for TIF image
-        
-    Returns:
-        None. Saves file to disk.
-    """
-    
-    # Convert to float32 to preserve precision
-    thickness_float32 = thickness.astype(np.float32)
-    
-    # Save as float32 TIF
-    tifffile.imwrite(filename, thickness_float32)
-    
-    print(f"\n{quantity_label.capitalize()} map TIF saved: {filename}")
-    print(f"  Shape: {thickness_float32.shape}")
-    print(f"  Range: [{thickness_float32.min():.2f}, {thickness_float32.max():.2f}] {unit_label}")
-    print(
-        f"  Use with colormap: plt.imshow(tifffile.imread('{filename}'), "
-        f"cmap='turbo', vmin=0, vmax={thickness_float32.max():.1f})"
-    )
-    
-    # Clean up large arrays from memory
-    del thickness_float32
 
 def visualize_coherence_heatmap(coherence, filename_png="coherence_heatmap_viz.png", figsize=None, sigma_smooth=0, image=None):
     """
@@ -528,8 +555,8 @@ def visualize_coherence_heatmap(coherence, filename_png="coherence_heatmap_viz.p
     if ds > 1:
         print(f"Coherence visualization downsampled by {ds}x for memory safety")
 
-    # Mask background in-place on a float32 working copy.
-    coherence_work = coherence_ds.astype(np.float32, copy=True)
+    # Mask background in-place on a float16 working copy.
+    coherence_work = coherence_ds.astype(np.float16, copy=True)
     if image_ds is not None:
         coherence_work[image_ds <= 0] = 0
     
@@ -555,101 +582,6 @@ def visualize_coherence_heatmap(coherence, filename_png="coherence_heatmap_viz.p
     plt.close(fig) 
 
     return fig
-
-
-
-def compare_bin_sizes_structure_tensor(orientation, coherence, 
-                                       bin_sizes=[16, 32, 64], figsize=(15, 5)):
-    """
-    Compare structure tensor vector maps at different bin sizes.
-    """
-    
-    fig, axes = plt.subplots(1, len(bin_sizes), figsize=figsize)
-    if len(bin_sizes) == 1:
-        axes = [axes]
-    
-    for idx, bin_size in enumerate(bin_sizes):
-        small_coherence = block_reduce(coherence, block_size=(bin_size, bin_size), func=np.mean)
-        small_orientation = block_reduce(orientation, block_size=(bin_size, bin_size), func=np.mean)
-        
-        ax = axes[idx]
-        ax.set_facecolor('white')
-        
-        mask = small_coherence > np.percentile(small_coherence, 20)
-        y_pos, x_pos = np.where(mask)
-        coherence_values = small_coherence[mask]
-        
-        # Draw vectors
-        for i in range(len(x_pos)):
-            x_center = x_pos[i]
-            y_center = y_pos[i]
-            
-            angle = small_orientation[y_center, x_center]
-            coherence_val = small_coherence[y_center, x_center]
-            
-            norm_coherence = (coherence_val - coherence_values.min()) / (coherence_values.max() - coherence_values.min())
-            color = plt.cm.coolwarm(np.power(norm_coherence, 0.5))
-            
-            # Simple line segment
-            length = 0.7 + 0.2 * norm_coherence
-            dx = length * np.cos(angle)
-            dy = length * np.sin(angle)
-            
-            ax.plot([x_center - dx/2, x_center + dx/2], 
-                   [y_center - dy/2, y_center + dy/2], 
-                   color=color, linewidth=2, alpha=0.9)
-        
-        ax.set_xlim(-0.5, small_coherence.shape[1] - 0.5)
-        ax.set_ylim(-0.5, small_coherence.shape[0] - 0.5)
-        ax.set_title(f'Bin Size: {bin_size}px', fontsize=20, fontweight='bold')
-        ax.axis('off')
-        ax.invert_yaxis()
-    
-    plt.tight_layout()
-    plt.savefig("structure_tensor_bin_comparison.png", dpi=300, bbox_inches='tight')
-    print("Saved: structure_tensor_bin_comparison.png")
-    plt.close(fig)
-    
-    return fig
-
-
-def save_orientation_tif(orientation, filename="orientation_map.tif", image=None):
-    """
-    Save orientation map as a TIF image with values in degrees (0-180).
-    Same spatial dimensions as original image for direct overlay with colormap.
-    
-    Args:
-        orientation (ndarray): Orientation map in radians (0 to pi)
-        filename (str): Output filename for TIF image
-        image (ndarray): Original image for masking (optional)
-    Returns:
-        None. Saves file to disk.
-    """
-    orientation_work = orientation.astype(np.float32, copy=True)
-    if image is not None:
-        orientation_work[image <= 0] = 0
-        
-    
-    # Convert from radians (0-pi) to degrees (0-180)
-    orientation_degrees = np.degrees(orientation_work)
-    
-    # Ensure values are in range [0, 180]
-    orientation_degrees = np.clip(orientation_degrees, 0, 180)
-    
-    # Convert to float32 to preserve precision
-    orientation_float32 = orientation_degrees.astype(np.float32)
-    
-    # Save as TIF
-    tifffile.imwrite(filename, orientation_float32)
-    
-    print(f"\nOrientation TIF saved: {filename}")
-    print(f"  Shape: {orientation_float32.shape}")
-    print(f"  Range: [{orientation_float32.min():.1f}, {orientation_float32.max():.1f}] degrees")
-    print(f"  Use with colormap: plt.imshow(tifffile.imread('{filename}'), cmap='hsv', vmin=0, vmax=180)")
-    
-    # Clean up large arrays from memory
-    del orientation_degrees, orientation_float32
-
 
 def visualize_preferential_orientation_vector_map(orientation, coherence, image=None, 
                                                   bin_size=32, figsize=None, 
@@ -752,12 +684,12 @@ def visualize_preferential_orientation_vector_map(orientation, coherence, image=
     
     # Optionally show original image in background
     if overlay_image and image is not None:
-        # Render as single-channel float32 with colormap, avoiding explicit RGBA expansion.
+        # Render as single-channel float 16 with colormap, avoiding explicit RGBA expansion.
         ds = 1
         if max_display_dim is not None and max(h, w) > max_display_dim:
             ds = int(np.ceil(max(h, w) / float(max_display_dim)))
 
-        img_display = image[::ds, ::ds].astype(np.float32, copy=False)
+        img_display = image[::ds, ::ds].astype(np.float16, copy=False)
         valid = img_display > 0
         if np.any(valid):
             p_low, p_high = np.percentile(img_display[valid], [1, 99])
@@ -852,108 +784,8 @@ def visualize_preferential_orientation_vector_map(orientation, coherence, image=
     return fig
 
 
-def plot_orientation_histogram(image, orientation, coherence=None, coherence_threshold=0.1, 
-                               bin_count=36, figsize=None, filename="orientation_histogram.png"):
-    """
-    Create histogram of fiber orientation distribution with colormap overlay.
-    Shows pixel count per orientation angle, with colors matching HSV colormap.
-    
-    Args:
-        image (ndarray): Original image (for validation)
-        orientation (ndarray): Orientation map in radians (0 to pi)
-        coherence (ndarray): Coherence/anisotropy map (for optional filtering)
-        coherence_threshold (float): Minimum coherence to include in histogram (0-1)
-        bin_count (int): Number of bins for histogram (default 36 = 5 degree bins)
-        figsize (tuple): Figure size
-        filename (str): Output filename
-        
-    Returns:
-        fig: Matplotlib figure object
-    """
-    
-    # Downsample for histogram calculations on very large images.
-    if coherence is not None:
-        (image_ds, orientation_ds, coherence_ds), ds = _auto_downsample_2d(image, orientation, coherence, max_pixels=120000000)
-    else:
-        (image_ds, orientation_ds), ds = _auto_downsample_2d(image, orientation, max_pixels=120000000)
-        coherence_ds = None
-
-    if ds > 1:
-        print(f"Orientation histogram downsampled by {ds}x for memory safety")
-
-    # Define overall mask: intensity signal AND well-defined orientation (coherence)
-    mask = image_ds > 0
-    if coherence_ds is not None:
-        mask = mask & (coherence_ds >= coherence_threshold)
-    
-    orientation = orientation[mask]
-
-    # Convert to degrees (0-180)
-    orientation_degrees = np.degrees(orientation_ds).flatten()
-    
-    # Create bins from 0 to 180
-    bins = np.linspace(0, 180, bin_count + 1)
-    bin_centers = (bins[:-1] + bins[1:]) / 2
-    
-    # Compute histogram
-    counts, bin_edges = np.histogram(orientation_degrees, bins=bins)
-    
-    # Create figure
-    if figsize is None:
-        width = PLOT_STYLE['width']
-        figsize = (width, width * 0.6)  # Standard landscape aspect for histogram
-        
-    fig, ax = plt.subplots(figsize=figsize)
-    
-    # Use HSV colormap for bins (matches typical orientation visualization)
-    cmap = plt.cm.hsv
-    colors = cmap(bin_centers / 180.0)  # Normalize to [0, 1]
-    
-    # Create bar plot
-    bars = ax.bar(bin_centers, counts, width=(180 / bin_count), color=colors, 
-                   edgecolor='black', linewidth=0.5, alpha=0.8)
-    
-    ax.set_xlabel('Orientation (degrees)', fontsize=PLOT_STYLE['label_size'], fontweight='bold')
-    ax.set_ylabel('Pixel Count', fontsize=PLOT_STYLE['label_size'], fontweight='bold')
-    # ax.set_title('Fiber Orientation Distribution', fontsize=PLOT_STYLE['title_size'], fontweight='bold')
-    ax.set_xlim(0, 180)
-    
-    # Add grid
-    ax.grid(axis='y', alpha=0.3, linestyle='--')
-    ax.set_axisbelow(True)
-    
-    # Add colorbar to show orientation color mapping
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=180))
-    sm.set_array([])
-    # Save standalone colorbar
-    cbar_filename = filename.replace('.png', '_colorbar.png')
-    save_standalone_colorbar(sm, cbar_filename, 'Orientation (degrees)')
-    print(f"\nSaved: {filename}")
-    plt.close(fig)
-    
-    return fig
-
-
-def circular_mean(angles_rad):
-    """
-    Compute circular mean of angles in radians.
-    Accounts for the circular nature of orientation angles.
-    
-    Args:
-        angles_rad (ndarray): Angles in radians
-        
-    Returns:
-        float: Circular mean in radians
-    """
-    sin_sum = np.sin(angles_rad).sum()
-    cos_sum = np.cos(angles_rad).sum()
-    mean_angle = np.arctan2(sin_sum, cos_sum)
-    return mean_angle % np.pi  # Ensure within [0, pi]
-
-
-def plot_polar_orientation_histogram(image, orientation, coherence=None, 
-                                     coherence_threshold=0.1, bin_count=36, 
-                                     figsize=None, filename="orientation_rose_plot.png"):
+def plot_polar_orientation_histogram(image, orientation, coherence=None, coherence_threshold=0.1, 
+                                     bin_count=36, figsize=None, filename_png="orientation_rose_plot.png"):
     """
     Create a polar rose plot of fiber orientation distribution.
     Mirror the 0-180 degree distribution to 180-360 degrees to show bidirectional nature.
@@ -965,7 +797,7 @@ def plot_polar_orientation_histogram(image, orientation, coherence=None,
         coherence_threshold (float): Minimum coherence to include (0-1)
         bin_count (int): Number of bins for the half-circle (default 36)
         figsize (tuple): Figure size
-        filename (str): Output filename
+        filename_png (str): Output filename
         
     Returns:
         fig: Matplotlib figure object
@@ -1023,8 +855,8 @@ def plot_polar_orientation_histogram(image, orientation, coherence=None,
     # Customize polar plot
     ax.set_theta_zero_location('E')  # 0 degrees is East (right)
     ax.set_theta_direction(1)        # Counter-clockwise
-    # ax.set_title('Fiber Orientation Rose Diagram\n(Bidirectional Symmetry)', 
-    #              fontsize=PLOT_STYLE['title_size'], fontweight='bold', pad=20)
+    ax.set_title('Fiber Orientation Rose Diagram\n(Bidirectional Symmetry)', 
+                 fontsize=PLOT_STYLE['title_size'], fontweight='bold', pad=20)
     
     # Add angle labels in degrees
     ax.set_xticks(np.deg2rad(np.arange(0, 360, 45)))
@@ -1034,79 +866,6 @@ def plot_polar_orientation_histogram(image, orientation, coherence=None,
     ax.set_yticklabels([])
     
     plt.tight_layout()
-    plt.savefig(filename, dpi=300, bbox_inches='tight')
-    print(f"Saved: {filename}")
-    plt.close(fig)
-    
-    return fig
-
-
-def visualize_orientation_heatmap(image, orientation, coherence=None, coherence_threshold=0.1, 
-                                  filename_png="orientation_heatmap_viz.png", 
-                                  figsize=None, sigma_smooth=0.5):
-    """
-    Create and save a high-contrast orientation heatmap using HSV colormap.
-    
-    Args:
-        image (ndarray): Original image for masking background
-        orientation (ndarray): Orientation map in radians (0 to pi)
-        coherence (ndarray): Coherence map for optional additional filtering
-        coherence_threshold (float): Minimum coherence to display (0-1)
-        filename_png (str): Output filename
-        figsize (tuple): Figure size
-        sigma_smooth (float): Gaussian smoothing sigma
-        
-    Returns:
-        fig: Matplotlib figure object
-    """
-    
-    # Downsample for visualization if image is very large.
-    if coherence is not None:
-        (image_ds, orientation_ds, coherence_ds), ds = _auto_downsample_2d(image, orientation, coherence, max_pixels=120000000)
-    else:
-        (image_ds, orientation_ds), ds = _auto_downsample_2d(image, orientation, max_pixels=120000000)
-        coherence_ds = None
-
-    if ds > 1:
-        print(f"Orientation heatmap downsampled by {ds}x for memory safety")
-
-    # Define overall mask: intensity signal AND well-defined orientation (coherence)
-    mask = image_ds > 0
-    if coherence_ds is not None:
-        mask = mask & (coherence_ds >= coherence_threshold)
-    
-    # Mask background and low-anisotropy regions without creating duplicate where-arrays.
-    orientation_masked = orientation_ds.astype(np.float32, copy=True)
-    orientation_masked[~mask] = np.nan
-    
-    # Smooth before visualization
-    if sigma_smooth > 0:
-        # Note: smoothed nan is tricky, handle carefully
-        mask = np.isnan(orientation_masked)
-        orient_filled = np.nan_to_num(orientation_masked)
-        smooth_orient = gaussian_filter(orient_filled, sigma=sigma_smooth)
-        # Re-mask
-        smooth_orient[mask] = np.nan
-    else:
-        smooth_orient = orientation_masked
-    
-    fig, ax = plt.subplots(figsize=figsize)
-    
-    # Display with HSV colormap (circular)
-    # Map [0, pi] to [0, 1] for colormap
-    im = ax.imshow(smooth_orient, cmap='hsv', vmin=0, vmax=np.pi, aspect='auto')
-    
-    # ax.set_title('Fiber Orientation Heatmap', fontsize=PLOT_STYLE['title_size'], fontweight='bold')
-    ax.axis('off')
-    
-    # Save standalone colorbar
-    cbar_filename = filename_png.replace('.png', '_colorbar.png')
-    save_standalone_colorbar(im, cbar_filename, 'Orientation (radians)', 
-                            ticks=[0, np.pi/4, np.pi/2, 3*np.pi/4, np.pi],
-                            tick_labels=['0', 'π/4', 'π/2', '3π/4', 'π'])
-
-    fig.patch.set_facecolor('#f8f8f8')
-    plt.tight_layout()
     plt.savefig(filename_png, dpi=300, bbox_inches='tight')
     print(f"Saved: {filename_png}")
     plt.close(fig)
@@ -1114,106 +873,79 @@ def visualize_orientation_heatmap(image, orientation, coherence=None, coherence_
     return fig
 
 if __name__ == "__main__":
-
     try:
-        
         # Compute structure tensor with optimized parameters
         start_time = time.time()
-
-        # Choose thresholding method based on your ROI:
-        # - 'otsu': Best for small, clean ROIs with clear background/signal distinction
-        # - 'li': Better for larger ROIs with more complex intensity distributions
-        # - 'yen': Good for unimodal distributions
-        # - 'percentile': Manual control - e.g., threshold_value=50 removes bottom 50% of intensities
-        # - 'none': No thresholding (analyze raw image)
-        # image = load_image(image_path, threshold_method='otsu')
-        
-        # For larger ROIs with poor Otsu performance, try one of:
-        # image = load_image(image_path, threshold_method='li')
-        # image = load_image(image_path, threshold_method='percentile', threshold_value=75)
-        image = load_image(image_path, threshold_method=CONFIG['threshold_method'], threshold_value=CONFIG['threshold_value'])
-
         pixel_size_um = CONFIG['pixel_size_um']
+        
+        image = load_image(
+            image_path=CONFIG['image_path'], 
+            threshold_method=CONFIG['threshold_method'], 
+            threshold_value=CONFIG['threshold_value']
+        )
 
+        # Quantitative per-pixel distance to background (in microns)
+        distance_um_map = compute_thickness(
+            image,
+            pixel_size_um=pixel_size_um,
+            map_type=CONFIG['map_type'],
+            file_name=f'{CONFIG["image_name"]}_{CONFIG["map_type"]}.tif',
+            output_dir=output_dir
+        )
 
-
-        #         # Quantitative per-pixel distance to background (in microns)
-        # distance_um_map = compute_thickness(
-        #     image,
-        #     pixel_size_um=CONFIG['pixel_size_um'],
-        #     map_type='distance_um',
-        # )
-
-        # image = load_image(image_path, threshold_method='yen')
         image, orientation, coherence = compute_structure_tensor(
             image, 
             sigma_gradient=CONFIG['sigma_gradient'] / pixel_size_um,  # Gradient smoothing (stabilize Sobel) in pixels
             sigma_tensor=CONFIG['sigma_tensor'] / pixel_size_um,    # ← Tensor smoothing in pixels
-            bin_size=None
+            coherence_file_name=f'{CONFIG["image_name"]}_coherence.tif',
+            orientation_file_name=f'{CONFIG["image_name"]}_orientation.tif',
+            output_dir=output_dir
         )
-
 
         elapsed = time.time() - start_time
         print(f"\nComputation time: {elapsed:.2f} seconds")
         
-        if orientation is not None and image is not None:
-
-
-            # # Save quantitative distance-to-background map as TIF
-            # print("\nSaving distance-to-background map (um) as TIF...")
-            # save_thickness_tif(
-            #     distance_um_map,
-            #     filename=os.path.join(output_dir, "ckd-wsi-wsi-Collagen_Thickness-ratio.tif"),
-            #     quantity_label="distance-to-background",
-            #     unit_label="um",
-            # )
-
+        if CONFIG['plot_images']:
             # Calculate figure size to match image aspect ratio
             image_figsize = get_figsize(image.shape)
 
-            #             # Visualization 2: Save coherence as full-resolution TIF for overlay
-            # print("\nSaving coherence heatmap as TIF...")
-            # save_coherence_heatmap_tif(coherence, filename=os.path.join(output_dir, "ckd-wsi-wsi-Collagen_Coherence-ratio.tif"), image=image)
+            # Create coherence heatmap visualization png
+            print("\nCreating coherence heatmap...")
+            visualize_coherence_heatmap(
+                coherence,
+                filename_png=os.path.join(output_dir, "coherence_heatmap_viz.png"),
+                image=image
+            )
 
-            # # Visualization 2b: Visualize coherence heatmap
-            # print("\nCreating coherence heatmap visualization...")
-            # visualize_coherence_heatmap(coherence, filename_png=os.path.join(output_dir, "coherence_heatmap_viz.png"), 
-            #                             image=image, figsize=image_figsize)
+            # Create orientation heatmap visualization png
+            print("\nCreating orientation heatmap...")
+            visualize_orientation_heatmap(
+                image,
+                orientation,
+                coherence=coherence,
+                coherence_threshold=0.1,
+                filename_png=os.path.join(output_dir, "orientation_heatmap_viz.png")
+            )
 
-
-            # # Visualization 4: Save orientation as TIF
-            # print("\nSaving orientation map as TIF...")
-            # save_orientation_tif(orientation, filename=os.path.join(output_dir, "orientation_map.tif"), image=image)
-
-            # # Visualization 5: Orientation histograms
-            # print("\nCreating orientation histogram...")
-            # plot_orientation_histogram(image, orientation, coherence=coherence, 
-            #                            coherence_threshold=0.1, bin_count=36, 
-            #                            filename=os.path.join(output_dir, "orientation_histogram.png"))
-            
-            # print("\nCreating orientation rose plot...")
-            # plot_polar_orientation_histogram(image, orientation, coherence=coherence, 
-            #                                coherence_threshold=0.1, bin_count=36,
-            #                                filename=os.path.join(output_dir, "orientation_rose_plot.png"))
-
-            # # Visualization 5b: Orientation heatmap visualization
-            # print("\nCreating orientation heatmap visualization...")
-            # visualize_orientation_heatmap(image, orientation, coherence=coherence, coherence_threshold=0.1,
-            #                               filename_png=os.path.join(output_dir, "orientation_heatmap_viz.png"),
-            #                               figsize=image_figsize)
-
-            # Visualization 6: Preferential orientation vector map
+            # Create preferential orientation vector map (transparent)
             print("\nCreating preferential orientation vector map...")
             visualize_preferential_orientation_vector_map(
                 orientation, coherence, image=image, 
-                bin_size= int(32 * (image.size/ 70000000)),  # Adjust this for different levels of detail
+                bin_size= int(64 * (image.size/ 100000000)),  # Adjust this for different levels of detail
                 overlay_image=False,
                 coherence_threshold=0.1,  # Only show vectors with coherence > 0.1
                 vector_length_scale=1.0,
-                filename=os.path.join(output_dir, "preferential_orientation_vector_map.png"),
+                filename_png=os.path.join(output_dir, "preferential_orientation_vector_map.png"),
                 figsize=image_figsize
             )
-        print(f"\nPlots and figures saved to: {output_dir}")
+
+            # Create polar rose plot of orientation (polar)
+            print("\nPlotting rose plot of polar orientation...")
+            plot_polar_orientation_histogram(
+                image, orientation, coherence=coherence, coherence_threshold=0.1,
+                filename_png=os.path.join(output_dir, "orientation_rose_plot.png"))
+            
+        print(f"\nAll plots and figures saved to: {output_dir}")
     except Exception as e:
         print(f"Error: {e}")
         import traceback
