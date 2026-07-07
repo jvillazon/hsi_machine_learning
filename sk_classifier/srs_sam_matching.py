@@ -489,8 +489,8 @@ if __name__ == '__main__':
                 temp_best_idx = np.where(sorted_indices[:, 0] == target_names.index(background_name[0]), sorted_indices[:,1], sorted_indices[:, 0])
                 chunk_best_idx = np.where(chunk_similarity[np.arange(len(temp_best_idx)), temp_best_idx] > CONFIG['similarity_threshold'], temp_best_idx, -1)
 
-                # chunk_best_idx = np.argmin(effective_angles, axis=1)
-                chunk_best_sim = np.max(chunk_similarity, axis=1)
+                # Use the similarity of the selected candidate rather than the absolute maximum (which could be the skipped background)
+                chunk_best_sim = chunk_similarity[np.arange(len(temp_best_idx)), temp_best_idx]
 
                 top_k_indices = np.argsort(effective_angles, axis=1)[:, :top_k]
                 all_top_indices[start_p:end_p] = top_k_indices

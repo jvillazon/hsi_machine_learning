@@ -797,8 +797,8 @@ def main():
             temp_best_idx = np.where(sorted_indices[:, 0] == target_names.index(background_name[0]), sorted_indices[:,1], sorted_indices[:, 0])
             chunk_best_idx = np.where(chunk_similarity[np.arange(len(temp_best_idx)), temp_best_idx] > CONFIG['similarity_threshold'], temp_best_idx, -1)
 
-            # chunk_best_idx = np.argmin(effective_angles, axis=1)
-            chunk_best_sim = np.max(chunk_similarity, axis=1)
+            # Use the similarity of the selected candidate rather than the absolute maximum (which could be the skipped background)
+            chunk_best_sim = chunk_similarity[np.arange(len(temp_best_idx)), temp_best_idx]
 
             top_k_indices = np.argsort(effective_angles, axis=1)[:, :top_k]
             all_top_indices[start_p:end_p] = top_k_indices
@@ -832,13 +832,13 @@ def main():
         class_map_mmap.flush()
         best_sim_mmap.flush()
 
-        # target_names_idx_map = #{i: name for i, name in enumerate(target_names)}
+        # Save target names and RGB to CSV
         target_names_id = target_names.copy()[:-1]
         target_names_id.insert(0, "No Match")
-        target_names_rgb_id = [f"#{int(PALETTE[i][0]*255):02x}{int(PALETTE[i][1]*255):02x}{int(PALETTE[i][2]*255):02x}" for i, name in enumerate(target_names)][:-1]
-        target_names_rgb_id.insert(0, "#000000")
-        target_names_df = pd.DataFrame({"Molecules": target_names_id, "RGB": target_names_rgb_id})
-        target_names_df.to_csv(os.path.join(img_out_dir, f"{img_base}_target_names.csv"), index=True)
+        target_names_hexcodes = [f"#{int(PALETTE[i][0]*255):02x}{int(PALETTE[i][1]*255):02x}{int(PALETTE[i][2]*255):02x}" for i, name in enumerate(target_names)][:-1]
+        target_names_hexcodes.insert(0, "#000000")
+        target_names_df = pd.DataFrame({"Molecules": target_names_id, "Hexcodes": target_names_hexcodes})
+        target_names_df.to_csv(os.path.normpath(os.path.join(img_out_dir, f"{img_base}_target_names.csv")), index=False)
 
         indices, best_match_idx_sample, similarity_sample = plot_diagnostic_samples(
             img_out_dir, image_mmap, shifted_ref_matrix, mol_names
