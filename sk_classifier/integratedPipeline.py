@@ -193,84 +193,84 @@ if perform_masking:
         wide_df.to_csv(output_ratio_wide_csv, index=False)
         print(f"Saved unified wide DataFrame to {output_ratio_wide_csv}")
         
-        # Reconstruct long-format percentages_df and ratios_df for downstream compatibility
-        meta_cols = ['centroid_x', 'centroid_y', 'Instance_Label', 'Unit', 'Image_Name', 'Source_ID', 'Group_ID', 'n_pixels']
-        actual_meta_cols = [c for c in meta_cols if c in wide_df.columns]
+#         # Reconstruct long-format percentages_df and ratios_df for downstream compatibility
+#         meta_cols = ['centroid_x', 'centroid_y', 'Instance_Label', 'Unit', 'Image_Name', 'Source_ID', 'Group_ID', 'n_pixels']
+#         actual_meta_cols = [c for c in meta_cols if c in wide_df.columns]
         
-        # Reconstruct percentages_df from RF_ columns
-        rf_cols = [c for c in wide_df.columns if c.startswith('RF_')]
-        if rf_cols:
-            percentages_df = pd.melt(wide_df, id_vars=actual_meta_cols, value_vars=rf_cols, var_name='Molecule', value_name='Percentage')
-            percentages_df['Molecule'] = percentages_df['Molecule'].str.replace('RF_', '')
-            percentages_df.to_csv(output_csv, index=False)
-            print(f"Saved reconstructed percentages_df to {output_csv}")
+#         # Reconstruct percentages_df from RF_ columns
+#         rf_cols = [c for c in wide_df.columns if c.startswith('RF_')]
+#         if rf_cols:
+#             percentages_df = pd.melt(wide_df, id_vars=actual_meta_cols, value_vars=rf_cols, var_name='Molecule', value_name='Percentage')
+#             percentages_df['Molecule'] = percentages_df['Molecule'].str.replace('RF_', '')
+#             percentages_df.to_csv(output_csv, index=False)
+#             print(f"Saved reconstructed percentages_df to {output_csv}")
             
-        # Reconstruct ratios_df from ratio and collagen columns
-        ratio_cols = [c for c in wide_df.columns if c not in actual_meta_cols and not c.startswith('RF_') and not c.startswith('SAM_') and not c.startswith('CH')]
-        if ratio_cols:
-            ratios_df = pd.melt(wide_df, id_vars=actual_meta_cols, value_vars=ratio_cols, var_name='Ratio_Type', value_name='Mean_Ratio')
-            ratios_df.to_csv(output_ratio_csv, index=False)
-            print(f"Saved reconstructed ratios_df to {output_ratio_csv}")
-else:
-    print("Masking disabled. Loading pre-computed files...")
-    if os.path.exists(output_ratio_wide_csv):
-        wide_df = pd.read_csv(output_ratio_wide_csv)
-    if os.path.exists(output_csv):
-        percentages_df = pd.read_csv(output_csv)
-    if os.path.exists(output_ratio_csv):
-        ratios_df = pd.read_csv(output_ratio_csv)
+#         # Reconstruct ratios_df from ratio and collagen columns
+#         ratio_cols = [c for c in wide_df.columns if c not in actual_meta_cols and not c.startswith('RF_') and not c.startswith('SAM_') and not c.startswith('CH')]
+#         if ratio_cols:
+#             ratios_df = pd.melt(wide_df, id_vars=actual_meta_cols, value_vars=ratio_cols, var_name='Ratio_Type', value_name='Mean_Ratio')
+#             ratios_df.to_csv(output_ratio_csv, index=False)
+#             print(f"Saved reconstructed ratios_df to {output_ratio_csv}")
+# else:
+#     print("Masking disabled. Loading pre-computed files...")
+#     if os.path.exists(output_ratio_wide_csv):
+#         wide_df = pd.read_csv(output_ratio_wide_csv)
+#     if os.path.exists(output_csv):
+#         percentages_df = pd.read_csv(output_csv)
+#     if os.path.exists(output_ratio_csv):
+#         ratios_df = pd.read_csv(output_ratio_csv)
 
-# Ensure wide_df is constructed if loading pre-computed long files
-if wide_df is None:
-    index_cols = ['Image_Name', 'Unit', 'Instance_Label', 'Source_ID']
-    percentages_wide_df = None
-    ratios_wide_df = None
+# # Ensure wide_df is constructed if loading pre-computed long files
+# if wide_df is None:
+#     index_cols = ['Image_Name', 'Unit', 'Instance_Label', 'Source_ID']
+#     percentages_wide_df = None
+#     ratios_wide_df = None
     
-    if percentages_df is not None:
-        if 'Group_ID' in percentages_df.columns:
-            index_cols.append('Group_ID')
-        percentages_wide_df = percentages_df.pivot(index=index_cols, columns='Molecule', values='Percentage').reset_index()
+#     if percentages_df is not None:
+#         if 'Group_ID' in percentages_df.columns:
+#             index_cols.append('Group_ID')
+#         percentages_wide_df = percentages_df.pivot(index=index_cols, columns='Molecule', values='Percentage').reset_index()
 
-    if ratios_df is not None:
-        if 'Group_ID' in ratios_df.columns and 'Group_ID' not in index_cols:
-            index_cols.append('Group_ID')
-        ratios_wide_df = ratios_df.pivot(index=index_cols, columns='Ratio_Type', values='Mean_Ratio').reset_index()
+#     if ratios_df is not None:
+#         if 'Group_ID' in ratios_df.columns and 'Group_ID' not in index_cols:
+#             index_cols.append('Group_ID')
+#         ratios_wide_df = ratios_df.pivot(index=index_cols, columns='Ratio_Type', values='Mean_Ratio').reset_index()
 
-    if percentages_wide_df is not None and ratios_wide_df is not None:
-        wide_df = pd.merge(percentages_wide_df, ratios_wide_df, on=index_cols)
-    elif percentages_wide_df is not None:
-        wide_df = percentages_wide_df
-    elif ratios_wide_df is not None:
-        wide_df = ratios_wide_df
-# Apply global filters
-if selected_values is not None and filter_col:
-    print(f"Applying global filters on column '{filter_col}' with values {selected_values}...")
-    if percentages_df is not None and filter_col in percentages_df.columns:
-        percentages_df = percentages_df[percentages_df[filter_col].isin(selected_values)].copy()
-    if ratios_df is not None and filter_col in ratios_df.columns:
-        ratios_df = ratios_df[ratios_df[filter_col].isin(selected_values)].copy()
-    if wide_df is not None and filter_col in wide_df.columns:
-        wide_df = wide_df[wide_df[filter_col].isin(selected_values)].copy()
-if 'Unnamed: 0' in wide_df.columns:
-    wide_df = wide_df.drop(columns="Unnamed: 0")
-# Filter by size
-if 'Group_ID' in wide_df.columns and wide_df['Group_ID'].notna().any():
-    unit_sizes = wide_df.groupby('Unit').size()
-    unit_group_sizes = wide_df.groupby(['Unit', 'Group_ID']).size()
+#     if percentages_wide_df is not None and ratios_wide_df is not None:
+#         wide_df = pd.merge(percentages_wide_df, ratios_wide_df, on=index_cols)
+#     elif percentages_wide_df is not None:
+#         wide_df = percentages_wide_df
+#     elif ratios_wide_df is not None:
+#         wide_df = ratios_wide_df
+# # Apply global filters
+# if selected_values is not None and filter_col:
+#     print(f"Applying global filters on column '{filter_col}' with values {selected_values}...")
+#     if percentages_df is not None and filter_col in percentages_df.columns:
+#         percentages_df = percentages_df[percentages_df[filter_col].isin(selected_values)].copy()
+#     if ratios_df is not None and filter_col in ratios_df.columns:
+#         ratios_df = ratios_df[ratios_df[filter_col].isin(selected_values)].copy()
+#     if wide_df is not None and filter_col in wide_df.columns:
+#         wide_df = wide_df[wide_df[filter_col].isin(selected_values)].copy()
+# if 'Unnamed: 0' in wide_df.columns:
+#     wide_df = wide_df.drop(columns="Unnamed: 0")
+# # Filter by size
+# if 'Group_ID' in wide_df.columns and wide_df['Group_ID'].notna().any():
+#     unit_sizes = wide_df.groupby('Unit').size()
+#     unit_group_sizes = wide_df.groupby(['Unit', 'Group_ID']).size()
 
-    df = wide_df.copy()
-    df = df.merge(unit_group_sizes.rename('unit_group_size'), on=['Unit', 'Group_ID'])
-    df = df.merge(unit_sizes.rename('unit_size'), on='Unit')
-    if "clusters" in mask_type.lower():
-        df_filtered = df[df['unit_group_size'] / df['unit_size'] >= 0.01] # Keep groups that represent at least 5% of the unit's instances
-    else:
-        df_filtered = df
+#     df = wide_df.copy()
+#     df = df.merge(unit_group_sizes.rename('unit_group_size'), on=['Unit', 'Group_ID'])
+#     df = df.merge(unit_sizes.rename('unit_size'), on='Unit')
+#     if "clusters" in mask_type.lower():
+#         df_filtered = df[df['unit_group_size'] / df['unit_size'] >= 0.01] # Keep groups that represent at least 5% of the unit's instances
+#     else:
+#         df_filtered = df
 
-    df = df_filtered.copy()
-    has_groups = True
-else:
-    has_groups = False
-    df = wide_df.copy()
+#     df = df_filtered.copy()
+#     has_groups = True
+# else:
+#     has_groups = False
+#     df = wide_df.copy()
 
 # df_dict = {}
 # # Separate by source
@@ -303,8 +303,8 @@ if ratios_df is not None and 'Ratio_Type' in ratios_df.columns:
 if percentages_df is not None and 'Molecule' in percentages_df.columns: 
     values_to_plot.append('Molecule')
 
-if "Group_ID" in df.columns:
-    df = df[df['Group_ID'].isin(subgroups)] if subgroups and has_groups else df
+# if "Group_ID" in df.columns:
+#     df = df[df['Group_ID'].isin(subgroups)] if subgroups and has_groups else df
 
 for value in values_to_plot:
     if value=="Ratio_Type":

@@ -30,7 +30,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog
 
-image_path = r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\collagen\ckd-roi2-SHG.ome.tiff"
+image_path = r"C:\Users\jvill\OneDrive - UC San Diego\integrated_pipeline\WSI_data\SRS\collagen\S24-K21_273_3-collagen.ome.tiff"
 image_name = os.path.basename(image_path).split('.')[0]
 output_dir = os.path.join(os.path.dirname(image_path), f"{image_name}_collagen_output")
 
@@ -50,7 +50,7 @@ CONFIG = {
     'image_path': image_path,
     'output_dir': output_dir,
     'image_name': image_name,
-    'pixel_size_um': 1.3258,
+    'pixel_size_um': 0.65,
     'map_type': 'distance_um',
     'sigma_gradient': 0.5,
     'sigma_tensor': 1.0,
