@@ -699,7 +699,8 @@ class HSI_Visualizer:
             ratio_type = ratio_basename.replace(f"{img_name}-", "").replace("-ratio", "")
         
         # Load mask files supporting both -mask.tif and -Mask.tif
-        mask_files = glob(os.path.join(mask_list_path, '*-mask.tif')) 
+        for ext in ["*.tiff", "*.tiff"]:
+            mask_files = glob(os.path.join(mask_list_path, f'*-mask{ext}'))
         if not mask_files:
             raise ValueError(f"No mask TIFF files found in {mask_list_path}")
         
@@ -878,6 +879,364 @@ class HSI_Visualizer:
             tif.close()
             
         return results_per_unit
+
+
+    def _parse_mask_basename(self, basename, prefix, subgroups):
+        """Return cleaned unit_name and optional subgroup from a mask basename."""
+        unit_name = basename
+        if prefix and unit_name.startswith(f"{prefix}-"):
+            unit_name = unit_name[len(prefix) + 1:]
+
+        for suffix in ['-mask.tif', '-Mask.tif', '-mask.ome.tiff', "-mask.tiff"]:
+            if unit_name.endswith(suffix):
+                unit_name = unit_name[:-len(suffix)]
+
+        subgroup = None
+        if "_" in unit_name and subgroups:
+            
+            unit_parts = unit_name.split("_")
+            
+            # Handle the specific 2-part logic
+            if len(unit_parts) == 2:
+                match0 = subgroups.get(unit_parts[0])
+                match1 = subgroups.get(unit_parts[1])
+                
+                if match0:
+                    subgroup = match0  # Maps to the dictionary value
+                    unit_name = unit_parts[1]
+                elif match1:
+                    subgroup = match1  # Maps to the dictionary value
+                    unit_name = unit_parts[0]
+
+            # Handle the fallback multi-part logic if no match was found yet
+            if subgroup is None:
+                for i, part in enumerate(unit_parts):
+                    match = subgroups.get(part)
+                    if match:
+                        subgroup = match  # Maps to the dictionary value
+                        remaining = [p for j, p in enumerate(unit_parts) if i != j]
+                        unit_name = "_".join(remaining)
+                        break
+
+        return unit_name, subgroup
+
+
+    def unified_applied_masking(self, data_configs, mask_list_path, target_names=None, mol_groups=None, prefix=None, mask_dict=None,
+                                subgroups=None, img_name=None, classes_to_ignore=None, min_instance_size=100, output_flat_csv=None):
+        """
+        Unified masking quantification for all data types in data_configs in a single pass.
+        Avoids repeatedly loading and segmenting masks by generating instances once.
+        
+        Returns a wide pandas DataFrame with one row per mask instance and columns for all
+        quantified values.
+        """
+        for ext in ["*.tiff", "*.tiff"]:
+            mask_files = glob(os.path.join(mask_list_path, f'*-mask{ext}'))
+        if not mask_files:
+            raise ValueError(f'No mask TIFF files found in {mask_list_path}')
+
+        if mask_list_path is None:
+            raise ValueError('mask_list_path is required')
+
+        # Defaults
+        if classes_to_ignore is None:
+            classes_to_ignore = ['Masked', 'Kidney Background', 'No Match']
+        classes_to_ignore_set = {c.strip() for c in classes_to_ignore}
+
+        local_img_name = img_name
+        
+        # Pre-load/open data sources to avoid redundant file IO
+        loaded_sources = []
+        try:
+            for config in data_configs:
+                mode = config['mode']
+                files = config['files']
+                dilations = config.get('dilations', 2)
+                col_prefix = config.get('column_prefix', '')
+                
+                for f in files:
+                    if not os.path.exists(f):
+                        print(f"Warning: File not found {f}, skipping from masking analysis.")
+                        continue
+                        
+                    if mode == 'ratios':
+                        # Use TiffFile for robust, lazy page access
+                        tif_handle = tifffile.TiffFile(f)
+                        num_pages = len(tif_handle.pages)
+                        ratio_basename = os.path.splitext(os.path.basename(f))[0]
+                        if '-ratio' in ratio_basename:
+                            ratio_basename = ratio_basename.split('-')[-2]
+                        
+                        if local_img_name is None:
+                            local_img_name = os.path.splitext(os.path.basename(f))[0]
+                            if '-ratio' in local_img_name:
+                                local_img_name = local_img_name.split('-')[0]
+                                
+                        loaded_sources.append({
+                            'type': 'ratios',
+                            'file_path': f,
+                            'handle': tif_handle,
+                            'num_pages': num_pages,
+                            'ratio_basename': ratio_basename,
+                            'dilations': dilations,
+                            'column_prefix': col_prefix
+                        })
+
+                    elif mode == 'collagen':
+                        tif_handle  = tifffile.TiffFile(f)
+                        num_pages   = len(tif_handle.pages)
+                        base_no_ext = os.path.splitext(os.path.basename(f))[0]
+                        if base_no_ext.endswith('-collagen'):
+                            base_no_ext = base_no_ext[:-len('-collagen')]
+                        ratio_basename = base_no_ext.split('-')[-1]
+
+                        if local_img_name is None:
+                            local_img_name = os.path.splitext(os.path.basename(f))[0].split('-')[0]
+
+                        loaded_sources.append({
+                            'type': 'ratios',
+                            'file_path': f,
+                            'handle': tif_handle,
+                            'num_pages': num_pages,
+                            'ratio_basename': ratio_basename,
+                            'dilations': dilations,
+                            'column_prefix': 'Collagen_'
+                        })
+
+                    elif mode == 'sam_classmap':
+                        sam_class_map = tifffile.imread(f)
+                        if sam_class_map.ndim > 2:
+                            sam_class_map = np.squeeze(sam_class_map)
+
+                        if local_img_name is None:
+                            local_img_name = os.path.splitext(os.path.basename(f))[0]
+
+                        class_names = []
+                        if target_names is not None:
+                            class_names = [target.strip() for target in target_names if target.strip() not in classes_to_ignore_set]
+
+                        loaded_sources.append({
+                            'type': 'sam_classmap',
+                            'file_path': f,
+                            'matrix': sam_class_map,
+                            'class_names': class_names,
+                            'dilations': dilations,
+                            'column_prefix': col_prefix
+                        })
+
+                    elif mode == 'predictions':
+                        data_df = pd.read_csv(f, header=None, index_col=False)
+                        rf_class_map = data_df.values
+                        if rf_class_map.ndim > 2:
+                            rf_class_map = np.squeeze(rf_class_map)
+
+                        if local_img_name is None:
+                            local_img_name = os.path.basename(f).replace('_predictions.csv', '')
+
+                        loaded_sources.append({
+                            'type': 'predictions',
+                            'file_path': f,
+                            'matrix': rf_class_map,
+                            'dilations': dilations,
+                            'column_prefix': col_prefix
+                        })
+
+                    elif mode == 'hsi':
+                        hsi_data = tifffile.imread(f)
+                        if hsi_data.ndim > 2:
+                            if hsi_data.shape[0] > hsi_data.shape[2]:
+                                hsi_data = np.transpose(hsi_data, (2, 0, 1))
+                        else:
+                            hsi_data = np.expand_dims(hsi_data, axis=0)
+                            
+                        if local_img_name is None:
+                            local_img_name = os.path.splitext(os.path.basename(f))[0]
+                            
+                        loaded_sources.append({
+                            'type': 'hsi',
+                            'file_path': f,
+                            'matrix': hsi_data,
+                            'dilations': dilations,
+                            'column_prefix': col_prefix
+                        })
+
+            # Process each mask file
+            records = []
+            for mask_file in tqdm(mask_files, desc='Processing masks...'):
+                mask_basename = os.path.basename(mask_file)
+                mask_img = tifffile.imread(mask_file)
+                if mask_img.ndim > 2:
+                    mask_img = np.squeeze(mask_img)
+
+                # Determine mask slices & units
+                slices_to_process = []
+                if mask_img.ndim == 3 and mask_img.shape[0] > 1:
+                    if mask_dict is None:
+                        raise Exception(f"Mask image {mask_basename} has multiple channels but no mask_dict provided for indexing.")
+                    for idx, unit in mask_dict.items():
+                        mask_slice = mask_img[int(idx)]
+                        unit_name = unit
+                        subgroup = None
+                        if subgroups is not None:
+                            for sg in subgroups:
+                                if sg.lower() in unit_name.lower():
+                                    unit_name = unit_name.replace(sg, '')[:-1]
+                                    subgroup = sg
+                                    break
+                        slices_to_process.append((mask_slice, unit_name, subgroup))
+                else:
+                    unit_name, subgroup = self._parse_mask_basename(mask_basename, prefix, subgroups)
+                    if subgroups is not None and subgroup is None:
+                        continue
+                    slices_to_process.append((mask_img, unit_name, subgroup))
+
+                # Segment and process each slice
+                for mask_slice, unit_name, subgroup in slices_to_process:
+                    labeled_mask, num_features = ndi.label(mask_slice > 0)
+                    if num_features == 0:
+                        continue
+
+                    object_slices = ndi.find_objects(labeled_mask)
+                    for label, obj_slice in enumerate(object_slices, start=1):
+                        if obj_slice is None:
+                            continue
+
+                        # Calculate original centroid coords
+                        rows, cols = np.nonzero(labeled_mask[obj_slice] == label)
+                        rows += obj_slice[0].start
+                        cols += obj_slice[1].start
+                        centroid_y = int(np.mean(rows))
+                        centroid_x = int(np.mean(cols))
+
+                        # Base metadata record
+                        inst_record = {
+                            'Image_Name': local_img_name,
+                            'Unit': unit_name,
+                            'Instance_Label': f"{int(label)}",
+                            'Source_ID': local_img_name.split('-')[0] if local_img_name else None,
+                            'Group_ID': subgroup,
+                            'centroid_x': centroid_x,
+                            'centroid_y': centroid_y,
+                        }
+                        
+                        has_any_data = False
+
+                        # Extract data from each loaded source
+                        for source in loaded_sources:
+                            dilations = source['dilations']
+                            y_slice, x_slice = obj_slice
+                            y_start = max(0, y_slice.start - dilations)
+                            y_end = min(labeled_mask.shape[0], y_slice.stop + dilations)
+                            x_start = max(0, x_slice.start - dilations)
+                            x_end = min(labeled_mask.shape[1], x_slice.stop + dilations)
+                            padded_slice = (slice(y_start, y_end), slice(x_start, x_end))
+
+                            local_labels = labeled_mask[padded_slice]
+                            instance_mask = local_labels == label
+
+                            npx = int(np.sum(instance_mask))
+                            if npx < min_instance_size:
+                                continue
+
+                            if dilations > 0:
+                                instance_mask = ndi.binary_dilation(instance_mask, iterations=dilations-1)
+
+                            # Set pixels count if not already set (at first valid source)
+                            if 'n_pixels' not in inst_record:
+                                inst_record['n_pixels'] = npx
+
+                            if source['type'] == 'ratios':
+                                for slice_idx in range(source['num_pages']):
+                                    data_slice = source['handle'].pages[slice_idx].asarray()
+                                    ratio_basename = source['ratio_basename']
+                                    r_type_slice = f"{ratio_basename}_{slice_idx + 1}" if source['num_pages'] > 1 else ratio_basename
+                                    col_name = f"{source['column_prefix']}{r_type_slice}"
+                                    
+                                    masked_vals = data_slice[padded_slice][instance_mask]
+                                    vals = masked_vals[(masked_vals > 0) & np.isfinite(masked_vals)]
+                                    if vals.size > 0:
+                                        mean_ratio = float(np.nanmean(vals))
+                                        inst_record[col_name] = mean_ratio
+                                        has_any_data = True
+                                        
+                            elif source['type'] == 'sam_classmap':
+                                patch = source['matrix'][padded_slice][instance_mask]
+                                labels, counts = np.unique(patch, return_counts=True)
+                                name_counts = {}
+                                for lbl, cnt in zip(labels, counts):
+                                    lbl_int = int(lbl)
+                                    if lbl_int <= 0:
+                                        continue
+                                    class_idx = lbl_int - 1
+                                    if class_idx < len(source['class_names']):
+                                        name_counts[source['class_names'][class_idx]] = int(cnt)
+                                class_total = sum(name_counts.values())
+                                if class_total > 0:
+                                    for mol, cnt in name_counts.items():
+                                        pct = (cnt / class_total) * 100.0
+                                        col_name = f"SAM_{mol}"
+                                        inst_record[col_name] = float(pct)
+                                        has_any_data = True
+                                        
+                            elif source['type'] == 'predictions':
+                                preds = source['matrix'][padded_slice][instance_mask]
+                                unique_classes, counts = np.unique(preds, return_counts=True)
+                                class_counts = {}
+                                for k, v in zip(unique_classes, counts):
+                                    k_str = str(k).strip()
+                                    if mol_groups is not None and k_str in mol_groups:
+                                        mapped_name = mol_groups[k_str]
+                                    else:
+                                        mapped_name = k_str
+                                    class_counts[mapped_name] = class_counts.get(mapped_name, 0) + int(v)
+                                    
+                                for c in classes_to_ignore_set:
+                                    if c in class_counts:
+                                        del class_counts[c]
+                                        
+                                class_total = sum(class_counts.values())
+                                if class_total > 0:
+                                    for mol, cnt in class_counts.items():
+                                        pct = (cnt / class_total) * 100.0
+                                        col_name = f"RF_{mol}"
+                                        inst_record[col_name] = float(pct)
+                                        has_any_data = True
+                                        
+                            elif source['type'] == 'hsi':
+                                hsi_data = source['matrix']
+                                num_channels = hsi_data.shape[0]
+                                for ch_idx in range(num_channels):
+                                    col_name = f"CH{ch_idx + 1}"
+                                    masked_vals = hsi_data[ch_idx][padded_slice][instance_mask]
+                                    vals = masked_vals[np.isfinite(masked_vals)]
+                                    if vals.size > 0:
+                                        inst_record[col_name] = float(np.nanmean(vals))
+                                        has_any_data = True
+
+                        if has_any_data:
+                            records.append(inst_record)
+
+        finally:
+            for source in loaded_sources:
+                if source['type'] == 'ratios' and 'handle' in source:
+                    try:
+                        source['handle'].close()
+                    except Exception as e:
+                        print(f"Failed to close TIFF handle: {e}")
+
+        if not records:
+            raise ValueError('No valid instances found across all masks.')
+
+        df_out = pd.DataFrame.from_records(records)
+        
+        pct_cols = [c for c in df_out.columns if c.startswith(('RF_', 'SAM_'))]
+        if pct_cols:
+            df_out[pct_cols] = df_out[pct_cols].fillna(0.0)
+
+        if output_flat_csv:
+            df_out.to_csv(output_flat_csv, index=False)
+
+        return df_out
 
 
     def quantify_unit_class_percentages_nested(self, units_dict, unit_mappings=None):
@@ -3607,7 +3966,7 @@ class HSI_Visualizer:
                                                        units_to_display=None, cmap='RdBu_r',
                                                        min_size_to_plot=10, remove_outliers=True,
                                                        show_values=True, cmap_scale=None,
-                                                       cbar_label='Mean Ratio'):
+                                                       cbar_label='Mean Ratio', dpi=300):
         """
         Create a spatial gradient heatmap of ratios/molecules across ordered subgroups per unit,
         taking a wide format DataFrame where metrics are separate columns.
@@ -3830,7 +4189,7 @@ class HSI_Visualizer:
         n_cols = len(combined_columns)
         n_rows = len(valid_subgroups)
         fig_width = max(8, n_cols * 0.6 + 2)
-        fig_height = max(fig_width, n_rows * 0.5 + 2)
+        fig_height = max(3, n_rows * 0.5 + 2)  # Decoupled from fig_width to prevent massive height when many columns are present
         
         fig, ax = plt.subplots(figsize=(fig_width, fig_height))
         
@@ -3872,7 +4231,7 @@ class HSI_Visualizer:
             safe_name = str(value_cols[0]).replace(':', '').replace('/', '_').replace(' ', '_')
         else:
             safe_name = 'ratio_types_combined'
-        plt.savefig(os.path.join(output_dir, f"subgroup_gradient_transposed_{safe_name}.png"), dpi=600, bbox_inches='tight', facecolor='white')
+        plt.savefig(os.path.join(output_dir, f"subgroup_gradient_transposed_{safe_name}.png"), dpi=dpi, bbox_inches='tight', facecolor='white')
         plt.close()
         
         # 6. Save standalone colorbar
@@ -3881,7 +4240,7 @@ class HSI_Visualizer:
         cbar = cb_fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), cax=cb_ax, orientation='vertical')
         cbar.set_label(cbar_label, color='black', fontsize=12)
         cb_fig.tight_layout()
-        cb_fig.savefig(os.path.join(output_dir, f"subgroup_gradient_transposed_{safe_name}_colorbar.png"), dpi=600, bbox_inches='tight', facecolor='white')
+        cb_fig.savefig(os.path.join(output_dir, f"subgroup_gradient_transposed_{safe_name}_colorbar.png"), dpi=dpi, bbox_inches='tight', facecolor='white')
         plt.close(cb_fig)
         
         print(f"  Generated transposed subgroup gradient heatmap: {os.path.join(output_dir, f'subgroup_gradient_transposed_{safe_name}.png')}")

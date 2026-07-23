@@ -131,6 +131,8 @@ def generate_ion_umaps(
         if 'Unit' in subset_df.columns:
             subset_df['Unit_Display'] = subset_df['Unit'].map(lambda x: unit_names.get(x, x))
 
+        subset_df.to_csv(os.path.join(output_dir, f"{mode_name}-embeddings.csv"))
+
         # Generate plots for each label type
         for color_by in ['Unit', 'Group_ID']:
             if color_by not in subset_df.columns: continue
@@ -185,7 +187,8 @@ def generate_ion_umaps(
             )
 
             # Remove top and right spines
-            sns.despine(ax=ax)
+            sns.despine(ax=ax, top=True, right=True, left=True, bottom=True)
+            ax.tick_params(left=False, bottom=False)
 
             # Remove x-axis labels
             ax.set_xticklabels([])  # Removes tick labels

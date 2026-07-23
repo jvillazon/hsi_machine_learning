@@ -15,11 +15,11 @@ base_directories =[
     # r"E:\Data\Jorge\01_HumanKidney_HuBMAP\05-14-25 Xenium Ref KPMP_038 S-2211-0003960\ROI2X glomeruli middle\tifs",
     # r"E:\Data\Jorge\01_HumanKidney_HuBMAP\05-15-25 Xenium CKD 3990\ROI1 glomeruli bottom right\tifs",
     # r"E:\Data\Jorge\01_HumanKidney_HuBMAP\05-15-25 Xenium CKD 3990\ROI2 glomeruli middle\tifs",
-    r"C:\Users\jvill\Downloads\KPMP_QC_images\HSI"
+    r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\data"
 ]
 
 CONFIG = {
-    'num_samples' : 81,
+    'num_samples' : 61,
     'wn_1' : 2700,
     'wn_2' : 3100,
     'srs_params_path' : 'params_dataset/srs_params_61.npz',
@@ -176,11 +176,11 @@ def main():
                         plt.legend(['Original/Standardized Spectrum'])
                     plt.show()
 
-                # if CONFIG['quant']:
-                    # spectral_std = spectra_standard.std(axis=1)
-                    # threshold = np.mean(spectra_standard[:, :ch_start].std(axis=1)) + 2 * np.std(spectra_standard[:, :ch_start].std(axis=1))
-                    # valid_mask = spectral_std > threshold
-                    # spectra_standard[~valid_mask] = 0  # Zero out low-variance spectra
+                if CONFIG['quant'] and CONFIG['bg_subtract']:
+                    spectral_std = spectra_standard.std(axis=1)
+                    threshold = np.mean(spectra_standard[:, :ch_start].std(axis=1)) + 2 * np.std(spectra_standard[:, :ch_start].std(axis=1))
+                    valid_mask = spectral_std > threshold
+                    spectra_standard[~valid_mask] = 0  # Zero out low-variance spectra
 
                 spectra = spectra_standard - np.median(spectra_standard[:, :ch_start], axis=1)[:, np.newaxis]
                 

@@ -16,7 +16,7 @@ import seaborn as sns
 
 image_dir = r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\Normalized_xenium-HSI"
 base_dir = os.path.dirname(image_dir)
-output_dir = os.path.join(base_dir, f'{os.path.basename(image_dir)}_sam_outputs')
+output_dir = os.path.join(base_dir, f'{os.path.basename(image_dir)}_sam_outputs_molecules')
 os.makedirs(output_dir, exist_ok=True)
 
 CONFIG = {
@@ -31,68 +31,67 @@ CONFIG = {
     'chunk_size': 1_000_000, # Number of pixels per batch for large images
     'max_csv_pixels': 1_000_000, # Skip full CSV if image is larger than this
     'exclude_molecules': [],
-
-    'mol_groups': {
-        'Sterols': [
-            'Cholesterol (ovine)'
-            ],
-        'Sterol Esters': [
-            '18:1 Cholesterol Ester'
-        ],
-        'Cardiolipins': [
-            '16:0 Cardiolipin'
-            ],
-        'Phospholipids': [
-            'PC Mix', 
-            'DOPC', 
-            'DSPC',
-            'PE Mix', 
-            'DOPE',
-            'PS Mix',
-            'PI Mix',
-            'PG Mix'
-            ],
-        'Lysophospholipids': [
-            '18:0 Lyso PA', 
-            '18:1 LPA'
-            ],
-        'Diglycerides': [
-            'DAG 16:0', 
-            'DAG 18:0 and 24:0 '
-            '16:0 CDP DG'
-            ],
-        'Triglycerides': [
-            'TAG Mix'
-            'TAG 16:0', 
-            'TAG 18:1',
-            ],
-        'Sphingolipids': [
-            'Sphingosine'
-            'Cer 18:1-12:0'
-            'Cer 18:1-18:0', 
-            'Cer 18:1-18:1'
-            'Cer 18:1-22:0', 
-            'Cer 18:1-24:0', 
-            'Cer 18:1-24:1'
-            ],
-        'Glucosylsphingolipids': [
-            "Glucosylceramide (Gaucher's Spleen)"
-            ],
-        'Dihydroceramides': [
-            'Cer 18:0-14:0', 
-            'Cer 18:1-24:1(15Z)'
-            ],
-        'Deoxyceramides' : ['Cer m18:1-16:0', 'Cer m18:1-24:1'],
-        'SFA': ['Stearic Acid', 'Palmitic Acid'],
-        'PUFA': ['Docosahexaenoic Acid', 'Tetracosapentaenoic Acid'],
-        'Carnitines': [
-            # 'C8 L-Carnitine',
-            'C12 Carnitine', 
-            'C16 Carnitine', 
-            'C18 Carnitine (d9-cis)'
-            ],
-        'Background' : ['Kidney Background']
-    },
+    'mol_groups': None,
+    # 'mol_groups': {
+    #     'Sterols': [
+    #         'Cholesterol (ovine)'
+    #         ],
+    #     'Sterol Esters': [
+    #         '18:1 Cholesterol Ester'
+    #     ],
+    #     'Cardiolipins': [
+    #         '16:0 Cardiolipin'
+    #         ],
+    #     'Phospholipids': [
+    #         'PC Mix', 
+    #         'DOPC', 
+    #         'DSPC',
+    #         'PE Mix', 
+    #         'DOPE',
+    #         'PS Mix',
+    #         'PI Mix',
+    #         'PG Mix'
+    #         ],
+    #     'Lysophospholipids': [
+    #         '18:0 Lyso PA', 
+    #         '18:1 LPA'
+    #         ],
+    #     'Diglycerides': [
+    #         'DAG 16:0', 
+    #         'DAG 18:0 and 24:0 '
+    #         '16:0 CDP DG'
+    #         ],
+    #     'Triglycerides': [
+    #         'TAG Mix'
+    #         'TAG 16:0', 
+    #         'TAG 18:1',
+    #         ],
+    #     'Sphingolipids': [
+    #         'Sphingosine'
+    #         'Cer 18:1-12:0'
+    #         'Cer 18:1-18:0', 
+    #         'Cer 18:1-18:1'
+    #         'Cer 18:1-22:0', 
+    #         'Cer 18:1-24:0', 
+    #         'Cer 18:1-24:1'
+    #         ],
+    #     'Glucosylsphingolipids': [
+    #         "Glucosylceramide (Gaucher's Spleen)"
+    #         ],
+    #     'Dihydroceramides': [
+    #         'Cer 18:0-14:0', 
+    #         'Cer 18:1-24:1(15Z)'
+    #         ],
+    #     'Deoxyceramides' : ['Cer m18:1-16:0', 'Cer m18:1-24:1'],
+    #     'SFA': ['Stearic Acid', 'Palmitic Acid'],
+    #     'PUFA': ['Docosahexaenoic Acid', 'Tetracosapentaenoic Acid'],
+    #     'Carnitines': [
+    #         'C12 Carnitine', 
+    #         'C16 Carnitine', 
+    #         'C18 Carnitine (d9-cis)'
+    #         ],
+    #     'Background' : ['Kidney Background']
+    # },
     # 'mol_groups': {
     #     'Background': ['Kidney Background'],
     #     'Sterols': [
@@ -523,11 +522,11 @@ if __name__ == '__main__':
             best_sim_mmap.flush()
 
             # Save target names and RGB to CSV
-            target_names_id = target_names.copy()[:-1]
+            target_names_id = target_names.copy()
             target_names_id.insert(0, "No Match")
-            target_names_hexcodes = [f"#{int(PALETTE[i][0]*255):02x}{int(PALETTE[i][1]*255):02x}{int(PALETTE[i][2]*255):02x}" for i, name in enumerate(target_names)][:-1]
+            target_names_hexcodes = [f"#{int(PALETTE[i][0]*255):02x}{int(PALETTE[i][1]*255):02x}{int(PALETTE[i][2]*255):02x}" for i, name in enumerate(target_names)]
             target_names_hexcodes.insert(0, "#000000")
-            target_names_df = pd.DataFrame({"Molecules": target_names_id, "Hexcodes": target_names_hexcodes})
+            target_names_df = pd.DataFrame({"ID Number": list(range(len(target_names_id))), "Molecules": target_names_id, "Hexcodes": target_names_hexcodes})
             target_names_df.to_csv(os.path.normpath(os.path.join(img_out_dir, f"{img_base}_target_names.csv")), index=False)
 
             indices, best_match_idx_sample, similarity_sample = plot_diagnostic_samples(

@@ -55,7 +55,7 @@ bubble_unit_order = heatmap_unit_order[::-1]
 print("\n✓ Configuration loaded successfully")
 
 workspace_dir = str(Path.cwd())
-base_directory = r"C:\Users\jvill\Documents\integrated_pipeline\WSI_data\WSI_data\data"
+base_directory = r"C:\Users\jvill\OneDrive - UC San Diego\integrated_pipeline\WSI_data\WSI_data\data"
 
 # SRS parameters
 wn_1, wn_2, num_samp = 2700, 3100, 61
@@ -73,39 +73,45 @@ visualizer = HSI_Visualizer(
 plots_directory = os.path.join(os.path.dirname(base_directory), f'plots_{mask_type}')
 
 
-# Create dataset
-dataset = HSI_Unlabeled_Dataset(
-    base_directory, ch_start, image_normalization=True, min_max_normalization=False,
-    num_samples=num_samp, wavenumber_start=wn_1, wavenumber_end=wn_2, compute_stats=perform_RF_classification
-)
-labeled_dataset = HSI_Labeled_Dataset(
-    molecule_dataset_path=os.path.join(workspace_dir, 'molecule_dataset', 'lipid_subtype_wn_61_test'),
-    srs_params_path=os.path.join(workspace_dir, 'params_dataset', 'srs_params_61'),
-    num_samples_per_class=10000, compute_min_max=True
-)
-
-# Initialize classifier
+# Create dataset & classifier only if classification is required
 output_base = os.path.join(os.path.dirname(base_directory), f"{chosen_model_name}_outputs")
-classifier = HSI_Classifier(dataset, model_path=model_path, output_base=output_base, 
-                    visualizer=visualizer, labeled_dataset=labeled_dataset)
-
-
-
-
-
 percentages_df, ratios_df = None, None
-print("✓ Dataset and classifier initialized successfully")
+wide_df = None
 
 if perform_RF_classification:
+    print("Initializing HSI datasets and classifier model...")
+    dataset = HSI_Unlabeled_Dataset(
+        base_directory, ch_start, image_normalization=True, min_max_normalization=False,
+        num_samples=num_samp, wavenumber_start=wn_1, wavenumber_end=wn_2, compute_stats=perform_RF_classification
+    )
+    labeled_dataset = HSI_Labeled_Dataset(
+        molecule_dataset_path=os.path.join(workspace_dir, 'molecule_dataset', 'lipid_subtype_wn_61_test'),
+        srs_params_path=os.path.join(workspace_dir, 'params_dataset', 'srs_params_61'),
+        num_samples_per_class=10000, compute_min_max=True
+    )
+    classifier = HSI_Classifier(dataset, model_path=model_path, output_base=output_base, 
+                        visualizer=visualizer, labeled_dataset=labeled_dataset)
+    img_list = dataset.img_list
+
     if os.path.exists(model_path):
-
-
         print("Running RandomForest inference...")
         classifier.predict(alpha=10, generate_shap=True)
     else:
         print(f"No model found at {model_path}")
 else:
-    print("RF classification disabled")
+    print("RF classification disabled. Skipping dataset, labeled_dataset, and classifier initialization.")
+    dataset = None
+    labeled_dataset = None
+    classifier = None
+    
+    # Manually discover images without loading/instantiating HSI datasets
+    discovered_paths = []
+    for ext in ['*.tif', '*.tiff', '*.TIF', '*.TIFF']:
+        discovered_paths.extend(glob(os.path.join(base_directory, ext)))
+    unique_paths = {}
+    for path in discovered_paths:
+        unique_paths[os.path.normcase(os.path.normpath(path))] = path
+    img_list = sorted(unique_paths.values())
 
 masked_output_dir = os.path.join(os.path.dirname(base_directory), f"{mask_type}_output_csv")
 os.makedirs(masked_output_dir, exist_ok=True)
@@ -115,143 +121,138 @@ output_ratio_wide_csv = os.path.join(masked_output_dir, 'masked_ratio_means-wide
 
 if perform_masking:
     mask_prefix = mask_type.split("_")[0]  
-    print("Processing masks and quantifying results...")
+    print("Processing masks using unified_applied_masking...")
     
-    predictions_per_unit, ratios_per_unit = {}, {}
-    
-    for img_idx, img_path in enumerate(dataset.img_list):
+    df_list = []
+    for img_idx, img_path in enumerate(img_list):
         img_name_no_ext = os.path.splitext(os.path.basename(img_path))[0]
         mask_folder = os.path.join(os.path.dirname(base_directory), mask_type, img_name_no_ext)
-        csv_path = os.path.join(classifier.output_base, img_name_no_ext, f"{img_name_no_ext}_predictions.csv")
+        csv_path = os.path.join(output_base, img_name_no_ext, f"{img_name_no_ext}_predictions.csv")
         ratio_folder = os.path.join(os.path.dirname(base_directory), 'Ratio', img_name_no_ext)
         
-        if not os.path.exists(mask_folder): continue
+        if not os.path.exists(mask_folder):
+            continue
 
+        data_configs = []
+        
+        # 1. Predictions (Random Forest class maps)
         if os.path.exists(csv_path):
-            res = visualizer.apply_rf_masking(
-                prediction_csv_path=csv_path, 
-                mask_list_path=mask_folder, 
-                subgroups=subgroups, 
-                img_name=img_name_no_ext, 
-                prefix=mask_prefix,
-                min_instance_size=100,
-                group_subclasses=True)
-            for u, e in res.items(): predictions_per_unit.setdefault(u, []).extend(e)
+            data_configs.append({
+                'mode': 'predictions',
+                'files': [csv_path],
+                'dilations': 2,
+                'column_prefix': 'RF_'
+            })
         
+        # 2. Ratios & Collagen
         if os.path.exists(ratio_folder):
-            file_exts = ['*.tif', "*.tiff"]
-            for ext in file_exts:
-                for r_tif in glob(os.path.join(ratio_folder, ext)):
-                    if 'Collagen' in r_tif:
-                        print(f"Collagen image in {r_tif}")
-                        dilations = 10
-                    else:
-                        dilations = 2
-                    res = visualizer.apply_rf_masking(ratio_tiff_path=r_tif, mask_list_path=mask_folder, subgroups=subgroups, img_name=img_name_no_ext, prefix=mask_prefix, min_instance_size=100,dilations=dilations)
-                    for u, e in res.items(): ratios_per_unit.setdefault(u, []).extend(e)
-    
-    index_cols = ['Image_Name', 'Unit', 'Instance_Label', 'Source_ID']
-    if predictions_per_unit:
-        percentages_df = visualizer.quantify_unit_class_percentages_nested(predictions_per_unit, unit_mappings=unit_mappings)
-        percentages_df.to_csv(output_csv, index=False)
+            ratio_files = []
+            for ext in ['*.tif', '*.tiff']:
+                ratio_files.extend(glob(os.path.join(ratio_folder, ext)))
+            
+            normal_ratio_files = [f for f in ratio_files if 'Collagen' not in f]
+            collagen_files = [f for f in ratio_files if 'Collagen' in f]
+            
+            if normal_ratio_files:
+                data_configs.append({
+                    'mode': 'ratios',
+                    'files': normal_ratio_files,
+                    'dilations': 2,
+                    'column_prefix': ''
+                })
+            if collagen_files:
+                data_configs.append({
+                    'mode': 'collagen',
+                    'files': collagen_files,
+                    'dilations': 10,
+                    'column_prefix': 'Collagen_'
+                })
 
+        if data_configs:
+            print(f"Running unified masking for image {img_name_no_ext}...")
+            unified_df = visualizer.unified_applied_masking(
+                data_configs=data_configs,
+                mask_list_path=mask_folder,
+                target_names=None,
+                mol_groups=None,
+                prefix=mask_prefix,
+                mask_dict=None,
+                subgroups=subgroups,
+                img_name=img_name_no_ext,
+                min_instance_size=100
+            )
+            
+            # Apply unit mapping to the "Unit" column if present
+            if 'Unit' in unified_df.columns and unit_mappings:
+                unified_df['Unit'] = unified_df['Unit'].apply(lambda u: unit_mappings.get(u.lower(), u) if isinstance(u, str) else u)
+                
+            df_list.append(unified_df)
 
-        # 1. Pivot the dataframe
-        if 'Group_ID' in percentages_df.columns:
-            index_cols.append('Group_ID')
-
-        percentages_wide_df = percentages_df.pivot(index=index_cols, columns='Molecule', values='Percentage').reset_index()
-        percentages_wide_df.to_csv(output_ratio_wide_csv)
-    
-    if ratios_per_unit:
-        ratios_df = visualizer.quantify_unit_ratio_means_nested(ratios_per_unit, unit_mappings=unit_mappings)
-        ratios_df.to_csv(output_ratio_csv, index=False)
-
-        group_cols = ['Image_Name', 'Unit', 'Instance_Label', 'Group_ID', 'Source_ID','centroid_x', 'centroid_y']
-        has_lipid_protein = ratios_df[ratios_df['Ratio_Type'] == 'Lipid_to_Protein'][group_cols].drop_duplicates()
-        has_unsaturation = ratios_df[ratios_df['Ratio_Type'] == 'Lipid_Unsaturation'][group_cols].drop_duplicates()
-        valid_instances = pd.merge(has_lipid_protein, has_unsaturation, on=group_cols)
-        df = pd.merge(ratios_df, valid_instances, on=group_cols, how='inner')
-
-        # 1. Pivot the dataframe
-        if 'Group_ID' in df.columns:
-            index_cols.append('Group_ID')
-
-        ratios_wide_df = df.pivot(index=index_cols, columns='Ratio_Type', values='Mean_Ratio').reset_index()
-        ratios_wide_df.to_csv(output_ratio_wide_csv)
+    if df_list:
+        wide_df = pd.concat(df_list, ignore_index=True)
+        wide_df.to_csv(output_ratio_wide_csv, index=False)
+        print(f"Saved unified wide DataFrame to {output_ratio_wide_csv}")
         
-        if percentages_df is not None:
-            wide_df = pd.merge(percentages_wide_df, ratios_wide_df, on=index_cols)
-        else:
-            wide_df = ratios_wide_df.copy()
-
-
-
-else:
-    print("Masking disabled")
-
-
-masked_output_dir = os.path.join(os.path.dirname(base_directory), f"{mask_type}_output_csv")
-os.makedirs(masked_output_dir, exist_ok=True)
-output_csv = os.path.join(masked_output_dir, 'masked_predictions_percentages.csv')
-output_ratio_csv = os.path.join(masked_output_dir, 'masked_ratio_means.csv')
-output_ratio_wide_csv = os.path.join(masked_output_dir, 'masked_ratio_means-wide.csv')
-
-
-if display_units_boxplots:
-    display_units_boxplots_type = f"{display_units_boxplots[0]}-{display_units_boxplots[-1]}"
-
-
-if display_units_boxplots:
-    print("Currently selected boxplot units:")
-    for i, unit in enumerate(display_units_boxplots):
+        # Reconstruct long-format percentages_df and ratios_df for downstream compatibility
+        meta_cols = ['centroid_x', 'centroid_y', 'Instance_Label', 'Unit', 'Image_Name', 'Source_ID', 'Group_ID', 'n_pixels']
+        actual_meta_cols = [c for c in meta_cols if c in wide_df.columns]
         
-        dname = unit_display_names.get(unit, unit)
-        print(f"  {i+1}. {unit}: {dname}")
+        # Reconstruct percentages_df from RF_ columns
+        rf_cols = [c for c in wide_df.columns if c.startswith('RF_')]
+        if rf_cols:
+            percentages_df = pd.melt(wide_df, id_vars=actual_meta_cols, value_vars=rf_cols, var_name='Molecule', value_name='Percentage')
+            percentages_df['Molecule'] = percentages_df['Molecule'].str.replace('RF_', '')
+            percentages_df.to_csv(output_csv, index=False)
+            print(f"Saved reconstructed percentages_df to {output_csv}")
+            
+        # Reconstruct ratios_df from ratio and collagen columns
+        ratio_cols = [c for c in wide_df.columns if c not in actual_meta_cols and not c.startswith('RF_') and not c.startswith('SAM_') and not c.startswith('CH')]
+        if ratio_cols:
+            ratios_df = pd.melt(wide_df, id_vars=actual_meta_cols, value_vars=ratio_cols, var_name='Ratio_Type', value_name='Mean_Ratio')
+            ratios_df.to_csv(output_ratio_csv, index=False)
+            print(f"Saved reconstructed ratios_df to {output_ratio_csv}")
 else:
-    print("No specific units designated - will default to all available units.")
-
-if display_plots:
-    if percentages_df is None and os.path.exists(output_csv): 
+    print("Masking disabled. Loading pre-computed files...")
+    if os.path.exists(output_ratio_wide_csv):
+        wide_df = pd.read_csv(output_ratio_wide_csv)
+    if os.path.exists(output_csv):
         percentages_df = pd.read_csv(output_csv)
-    if ratios_df is None and os.path.exists(output_ratio_csv): 
+    if os.path.exists(output_ratio_csv):
         ratios_df = pd.read_csv(output_ratio_csv)
-    
+
+# Ensure wide_df is constructed if loading pre-computed long files
+if wide_df is None:
     index_cols = ['Image_Name', 'Unit', 'Instance_Label', 'Source_ID']
+    percentages_wide_df = None
+    ratios_wide_df = None
     
     if percentages_df is not None:
-
-        # 1. Pivot the dataframe
         if 'Group_ID' in percentages_df.columns:
             index_cols.append('Group_ID')
         percentages_wide_df = percentages_df.pivot(index=index_cols, columns='Molecule', values='Percentage').reset_index()
-        percentages_wide_df.to_csv(output_ratio_wide_csv)
 
     if ratios_df is not None:
         if 'Group_ID' in ratios_df.columns and 'Group_ID' not in index_cols:
             index_cols.append('Group_ID')
-        
         ratios_wide_df = ratios_df.pivot(index=index_cols, columns='Ratio_Type', values='Mean_Ratio').reset_index()
-        ratios_wide_df.to_csv(output_ratio_wide_csv)
 
-        if percentages_df is not None:
-            wide_df = pd.merge(percentages_wide_df, ratios_wide_df, on=index_cols)
-        else:
-            wide_df = ratios_wide_df.copy()
-else:  
-    # Apply global filters
-    if selected_values is not None and filter_col:
-        for df in [percentages_df, ratios_df]:
-            if df is not None and filter_col in df.columns:
-                df = df[df[filter_col].isin(selected_values)].copy()
-
-
-
-
-
-
+    if percentages_wide_df is not None and ratios_wide_df is not None:
+        wide_df = pd.merge(percentages_wide_df, ratios_wide_df, on=index_cols)
+    elif percentages_wide_df is not None:
+        wide_df = percentages_wide_df
+    elif ratios_wide_df is not None:
+        wide_df = ratios_wide_df
+# Apply global filters
+if selected_values is not None and filter_col:
+    print(f"Applying global filters on column '{filter_col}' with values {selected_values}...")
+    if percentages_df is not None and filter_col in percentages_df.columns:
+        percentages_df = percentages_df[percentages_df[filter_col].isin(selected_values)].copy()
+    if ratios_df is not None and filter_col in ratios_df.columns:
+        ratios_df = ratios_df[ratios_df[filter_col].isin(selected_values)].copy()
+    if wide_df is not None and filter_col in wide_df.columns:
+        wide_df = wide_df[wide_df[filter_col].isin(selected_values)].copy()
 if 'Unnamed: 0' in wide_df.columns:
-    wide_df.drop(columns="Unnamed: 0")
+    wide_df = wide_df.drop(columns="Unnamed: 0")
 # Filter by size
 if 'Group_ID' in wide_df.columns and wide_df['Group_ID'].notna().any():
     unit_sizes = wide_df.groupby('Unit').size()
@@ -302,8 +303,8 @@ if ratios_df is not None and 'Ratio_Type' in ratios_df.columns:
 if percentages_df is not None and 'Molecule' in percentages_df.columns: 
     values_to_plot.append('Molecule')
 
-# if "Group_ID" in df.columns:
-#     df = df[df['Group_ID'].isin(subgroups)] if subgroups and has_groups else df
+if "Group_ID" in df.columns:
+    df = df[df['Group_ID'].isin(subgroups)] if subgroups and has_groups else df
 
 for value in values_to_plot:
     if value=="Ratio_Type":
@@ -317,28 +318,28 @@ for value in values_to_plot:
         data_type = 'Percentage'
         tmp_df = df.copy()
     
-    inter_unit_dir = os.path.join(plots_directory, f'{name_change}', f'{data_type}_inter-unit_{plot_type}-plots')
-    visualizer.create_individual_barplots(
-        df=tmp_df[tmp_df['Group_ID'].isin(subgroups)] if subgroups and has_groups else tmp_df,
-        value_col=None,        # Not needed for wide format
-        grouping_col=None,     # Signal that we are using Wide format
-        items_list=items_list, # The column names
-        output_dir=inter_unit_dir,
-        data_type=data_type,
-        units_to_display=display_units_boxplots,
-        consolidate_Group_IDs=True,
-        plot_type=plot_type,
-        sig_style='stars_only' if len(display_units_boxplots) > 6 else 'brackets',
-        show_plots=False,
-        display_name_map=display_names,
-        unit_color_map=unit_colors,
-        unit_display_map=unit_display_names,
-        subgroup_list = subgroups,
-        remove_outliers=True,
-        show_scatter=True,
-        show_empty_subgroups=True,
+#     inter_unit_dir = os.path.join(plots_directory, f'{name_change}', f'{data_type}_inter-unit_{plot_type}-plots')
+#     visualizer.create_individual_barplots(
+#         df=tmp_df[tmp_df['Group_ID'].isin(subgroups)] if subgroups and has_groups else tmp_df,
+#         value_col=None,        # Not needed for wide format
+#         grouping_col=None,     # Signal that we are using Wide format
+#         items_list=items_list, # The column names
+#         output_dir=inter_unit_dir,
+#         data_type=data_type,
+#         units_to_display=display_units_boxplots,
+#         consolidate_Group_IDs=True,
+#         plot_type=plot_type,
+#         sig_style='stars_only' if len(display_units_boxplots) > 6 else 'brackets',
+#         show_plots=False,
+#         display_name_map=display_names,
+#         unit_color_map=unit_colors,
+#         unit_display_map=unit_display_names,
+#         subgroup_list = subgroups,
+#         remove_outliers=True,
+#         show_scatter=True,
+#         show_empty_subgroups=True,
         # orientation='horizontal'
-    )
+    # )
 
     # if subgroups:
     #     intra_unit_dir = os.path.join(plots_directory, f'{name_change}', f'{data_type}_intra-unit_{plot_type}-plots')
@@ -390,21 +391,21 @@ for value in values_to_plot:
 
 
 
-# output_dir = os.path.join(plots_directory, 'regions_gradient_heatmaps')
+output_dir = os.path.join(plots_directory, 'regions_gradient_heatmaps')
 
-# visualizer.plot_subgroup_gradient_heatmap_wide(df, ratio_types , subgroups,
-#                                             output_dir=output_dir, display_name_map=display_names,
-#                                             unit_display_map=unit_display_names, unit_order=display_units_boxplots,
-#                                             units_to_display=display_units_boxplots, cmap='RdBu_r',
-#                                             min_size_to_plot=5, remove_outliers=True,
-#                                             show_values=False, 
-#                                             cmap_scale={
-#                                                 # 'Lipid_to_Protein': [0.2975, 0.3175],
-#                                                 # 'Lipid_Unsaturation' : [0.425, 0.465],
-#                                                 # 'Redox' : [0.12, 0.24]
-#                                             },
-#                                             cbar_label='Mean Value', display_significance=True
-#                                             )
+visualizer.plot_subgroup_gradient_heatmap_wide(df, ratio_types , subgroups,
+                                            output_dir=output_dir, display_name_map=display_names,
+                                            unit_display_map=unit_display_names, unit_order=display_units_boxplots,
+                                            units_to_display=display_units_boxplots, cmap='RdBu_r',
+                                            min_size_to_plot=5, remove_outliers=True,
+                                            show_values=False, 
+                                            cmap_scale={
+                                                # 'Lipid_to_Protein': [0.2975, 0.3175],
+                                                # 'Lipid_Unsaturation' : [0.425, 0.465],
+                                                # 'Redox' : [0.12, 0.24]
+                                            },
+                                            cbar_label='Mean Value', display_significance=True
+                                            )
 # visualizer.plot_subgroup_gradient_heatmap_wide_transposed(tmp_df[tmp_df['Group_ID'].isin(subgroups)] if subgroups and has_groups else tmp_df, ratio_types , subgroups,  
 #                                             output_dir=output_dir, display_name_map=display_names,unit_order=display_units_boxplots,
 #                                             unit_display_map=unit_display_names, units_to_display=display_units_boxplots, cmap='RdBu_r',
@@ -581,27 +582,27 @@ for value in values_to_plot:
 #     "Distal Nephron",
 #     "Vasculature"
 # ]
-# display_units = display_units_boxplots if display_units_boxplots else None
-# selected_units = display_units_boxplots
+display_units = display_units_boxplots if display_units_boxplots else None
+selected_units = display_units_boxplots
 
-# selected_groups = ['M','CM', 'C3', 'C2', 'C1']
-# selected_ratios = list(ratios_df['Ratio_Type'].unique())
+selected_groups = ['IS','OS', 'CM', 'IC', 'oc']
+selected_ratios = list(ratios_df['Ratio_Type'].unique())
 
-# # Define output directory
-# umap_output_dir = os.path.join(plots_directory, 'a-S21-regions_umaps')
+# Define output directory
+umap_output_dir = os.path.join(plots_directory, 'S21-regions_umaps')
 
-# # Execute the filtered UMAP analysis
-# generate_ion_umaps(
-#     df_wide=df, 
-#     unit_colors=unit_colors, 
-#     unit_names=unit_display_names, 
-#     plots_directory=plots_directory,
-#     output_dir=umap_output_dir,
-#     selected_units=selected_units,   
-#     selected_groups=selected_groups, 
-#     selected_ratios=selected_ratios,
-#     display_units=display_units  
-# )
+# Execute the filtered UMAP analysis
+generate_ion_umaps(
+    df_wide=df, 
+    unit_colors=unit_colors, 
+    unit_names=unit_display_names, 
+    plots_directory=plots_directory,
+    output_dir=umap_output_dir,
+    selected_units=selected_units,   
+    selected_groups=selected_groups, 
+    selected_ratios=selected_ratios,
+    display_units=display_units  
+)
 
 # unit_group = [
 #     "Cluster2",

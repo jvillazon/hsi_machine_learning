@@ -30,7 +30,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog
 
-image_path = r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\SRS_data\05-14-25 Xenium S-2211-0003960 Ref\WSI-SHG-1031nm-700mw-4us-500V-zoom1.5_Cycle_03\SHG.tif"
+image_path = r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\collagen\ckd-roi2-SHG.ome.tiff"
 image_name = os.path.basename(image_path).split('.')[0]
 output_dir = os.path.join(os.path.dirname(image_path), f"{image_name}_collagen_output")
 
@@ -55,7 +55,7 @@ CONFIG = {
     'sigma_gradient': 0.5,
     'sigma_tensor': 1.0,
     'threshold_method': 'percentile',
-    'threshold_value': 50,
+    'threshold_value': 10,
     'distance_map_threshold_sigma': 1.0,
     'plot_images': True,
 }
@@ -169,8 +169,8 @@ def load_image(image_path, threshold_method='otsu', threshold_value=None):
         image = rgb2gray(image)
     
     # Use float16 for large images to reduce memory pressure.
-    if image.dtype != np.float16:
-        image = image.astype(np.float16)
+    if image.dtype != np.float32:
+        image = image.astype(np.float32)
         print(f"Converted to float16: range [{image.min():.3f}, {image.max():.3f}]")
     
     # Apply thresholding based on selected method
@@ -249,7 +249,7 @@ def compute_thickness(
 
     # Distance to background in pixels, converted to microns.
     distance_px = ndimage.distance_transform_edt(binary)
-    distance_um = distance_px.astype(np.float16, copy=False) * float(pixel_size_um)
+    distance_um = distance_px.astype(np.float32, copy=False) * float(pixel_size_um)
 
     if map_type == 'distance_um':
         # Each foreground pixel stores distance to nearest background.
@@ -266,7 +266,7 @@ def compute_thickness(
         )
 
     # Keep background at zero explicitly.
-    out_map = np.where(binary, out_map, 0).astype(np.float16, copy=False)
+    out_map = np.where(binary, out_map, 0).astype(np.float32, copy=False)
 
     print(
         f"  Map stats: min={out_map.min():.3f} um, max={out_map.max():.3f} um, "
@@ -323,7 +323,7 @@ def compute_structure_tensor(
     image_tup, ds =  _auto_downsample_2d(image, max_pixels=120000000)
     image = image_tup[0]
     # Normalize to 0-1 in float16 to keep memory bounded on large images.
-    image = image.astype(np.float16, copy=False)
+    image = image.astype(np.float32, copy=False)
     if image.max() > 1.0:
         image = (image - image.min()) / (image.max() - image.min() + 1e-8)
     
@@ -391,9 +391,9 @@ def compute_structure_tensor(
     # Coherence/Anisotropy = (lambda_max - lambda_min) / (lambda_max + lambda_min)
     # This ranges from 0 (isotropic) to 1 (perfectly aligned)
     denominator = lambda_max + lambda_min
-    coherence = np.zeros_like(denominator, dtype=np.float16)
+    coherence = np.zeros_like(denominator, dtype=np.float32)
     valid = denominator > 1e-10
-    coherence[valid] = np.square((lambda_max[valid] - lambda_min[valid]) / denominator[valid]).astype(np.float16)
+    coherence[valid] = np.square((lambda_max[valid] - lambda_min[valid]) / denominator[valid]).astype(np.float32)
     
     # Orientation from eigenvector of largest eigenvalue
     # For 2x2 symmetric matrix, if lambda is eigenvalue, eigenvector is proportional to
@@ -404,7 +404,7 @@ def compute_structure_tensor(
     # For fiber analysis, we want the PERPENDICULAR direction (along which fibers align)
     # So we rotate by 90 degrees = π/2
     # We use -2*Txy to flip to a Right-Handed Cartesian system (y-up relative to horizontal)
-    orientation = (0.5 * np.arctan2(-2*Txy, Txx - Tyy) + np.pi/2).astype(np.float16)
+    orientation = (0.5 * np.arctan2(-2*Txy, Txx - Tyy) + np.pi/2).astype(np.float32)
     # Normalize to [0, pi]
     orientation = orientation % np.pi
 
@@ -431,7 +431,7 @@ def compute_structure_tensor(
             
             if coherence_file_name is not None:
                 # Work on a float16 copy and mask in-place to avoid an extra full-size array.
-                coherence_float16 = coherence.astype(np.float16, copy=True)
+                coherence_float16 = coherence.astype(np.float32, copy=True)
                 coherence_float16[image <= 0] = 0
                 np.clip(coherence_float16, 0.0, 1.0, out=coherence_float16)
                 
@@ -441,13 +441,13 @@ def compute_structure_tensor(
                 del coherence_float16
                 
             if orientation_file_name is not None:
-                orientation_work = orientation.astype(np.float16, copy=True)
+                orientation_work = orientation.astype(np.float32, copy=True)
                 orientation_work[image <= 0] = 0
                 
                 # Convert from radians (0-pi) to degrees (0-180)
                 orientation_degrees = np.degrees(orientation_work)
                 orientation_degrees = np.clip(orientation_degrees, 0, 180)
-                orientation_float16 = orientation_degrees.astype(np.float16)
+                orientation_float16 = orientation_degrees.astype(np.float32)
                 
                 full_path_ori = os.path.join(output_dir, orientation_file_name)
                 tifffile.imwrite(full_path_ori, orientation_float16)
@@ -494,7 +494,7 @@ def visualize_orientation_heatmap(image, orientation, coherence=None, coherence_
         mask = mask & (coherence_ds >= coherence_threshold)
     
     # Mask background and low-anisotropy regions without creating duplicate where-arrays.
-    orientation_masked = orientation_ds.astype(np.float16, copy=True)
+    orientation_masked = orientation_ds.astype(np.float32, copy=True)
     orientation_masked[~mask] = np.nan
     
     # Smooth before visualization
@@ -556,7 +556,7 @@ def visualize_coherence_heatmap(coherence, filename_png="coherence_heatmap_viz.p
         print(f"Coherence visualization downsampled by {ds}x for memory safety")
 
     # Mask background in-place on a float16 working copy.
-    coherence_work = coherence_ds.astype(np.float16, copy=True)
+    coherence_work = coherence_ds.astype(np.float32, copy=True)
     if image_ds is not None:
         coherence_work[image_ds <= 0] = 0
     
@@ -586,7 +586,7 @@ def visualize_coherence_heatmap(coherence, filename_png="coherence_heatmap_viz.p
 def visualize_preferential_orientation_vector_map(orientation, coherence, image=None, 
                                                   bin_size=32, figsize=None, 
                                                   overlay_image=True, coherence_threshold=0.1,
-                                                  vector_length_scale=1.0, filename="vector_map.png",
+                                                  vector_length_scale=1.0, filename_png="vector_map.png",
                                                   max_display_dim=3500):
     """
     Visualize preferential fiber orientation as a vector map with spatial binning.
@@ -689,7 +689,7 @@ def visualize_preferential_orientation_vector_map(orientation, coherence, image=
         if max_display_dim is not None and max(h, w) > max_display_dim:
             ds = int(np.ceil(max(h, w) / float(max_display_dim)))
 
-        img_display = image[::ds, ::ds].astype(np.float16, copy=False)
+        img_display = image[::ds, ::ds].astype(np.float32, copy=False)
         valid = img_display > 0
         if np.any(valid):
             p_low, p_high = np.percentile(img_display[valid], [1, 99])
@@ -767,7 +767,7 @@ def visualize_preferential_orientation_vector_map(orientation, coherence, image=
                                                                    vmax=bin_coherences.max()))
         sm.set_array([])
         # Save standalone colorbar
-        cbar_filename = filename.replace('.png', '_colorbar.png')
+        cbar_filename = filename_png.replace('.png', '_colorbar.png')
         save_standalone_colorbar(sm, cbar_filename, 'Mean Coherence')
     
     if not overlay_image:
@@ -777,8 +777,8 @@ def visualize_preferential_orientation_vector_map(orientation, coherence, image=
         fig.patch.set_facecolor('black')
         ax.set_facecolor('black')
         
-    plt.savefig(filename, dpi=600, transparent=True)
-    print(f"Saved: {filename}")
+    plt.savefig(filename_png, dpi=600, transparent=True)
+    print(f"Saved: {filename_png}")
     plt.close(fig)
     
     return fig
@@ -931,7 +931,7 @@ if __name__ == "__main__":
             print("\nCreating preferential orientation vector map...")
             visualize_preferential_orientation_vector_map(
                 orientation, coherence, image=image, 
-                bin_size= int(64 * (image.size/ 100000000)),  # Adjust this for different levels of detail
+                bin_size= int(64 * (image.size/ 50000000)),  # Adjust this for different levels of detail
                 overlay_image=False,
                 coherence_threshold=0.1,  # Only show vectors with coherence > 0.1
                 vector_length_scale=1.0,
