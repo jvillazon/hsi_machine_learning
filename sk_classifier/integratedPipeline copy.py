@@ -107,7 +107,7 @@ if perform_RF_classification:
 else:
     print("RF classification disabled")
 
-masked_output_dir = os.path.join(os.path.dirname(base_directory), f"{mask_type}_output_csv")
+masked_output_dir = os.path.join(os.path.dirname(base_directory), f"{mask_type}_output_csv-test")
 os.makedirs(masked_output_dir, exist_ok=True)
 output_csv = os.path.join(masked_output_dir, 'masked_predictions_percentages.csv')
 output_ratio_csv = os.path.join(masked_output_dir, 'masked_ratio_means.csv')
@@ -218,7 +218,7 @@ if display_plots:
     if ratios_df is None and os.path.exists(output_ratio_csv): 
         ratios_df = pd.read_csv(output_ratio_csv)
     
-    index_cols = ['Image_Name', 'Unit', 'Instance_Label', 'Source_ID']
+    index_cols = ['Image_Name', 'Unit', 'Instance_Label', 'Source_ID', 'centroid_x', 'centroid_y']
     
     if percentages_df is not None:
 

@@ -787,7 +787,7 @@ class HSI_Visualizer:
                     img_name = img_name.split('-')[0]
             
             # Extract ratio type from filename
-            ratio_basename = os.path.splitext(os.path.basename(ratio_tiff_path))[0]
+            ratio_basename = os.path.basename(ratio_tiff_path).split('.')[0]
             ratio_type = ratio_basename.replace(f"{img_name}-", "").replace("-ratio", "")
         
         # Load mask files supporting both -mask.tif and -Mask.tif
@@ -800,7 +800,7 @@ class HSI_Visualizer:
             results_per_unit = {}
         
         # Process each mask file
-        for mask_file in tqdm(mask_files, desc="Processing masks"):
+        for mask_file in tqdm(mask_files[:2], desc="Processing masks"):
 
             mask_basename = os.path.basename(mask_file)
 
@@ -849,10 +849,10 @@ class HSI_Visualizer:
                     continue
                 
                 # # Resize mask if needed
-                # if mask_img.shape != target_shape:
-                #     print(f"  Resizing mask {mask_basename} from {mask_img.shape} to {target_shape} due to downsampling...")
-                #     zoom_factors = (target_shape[0] / mask_img.shape[0], target_shape[1] / mask_img.shape[1])
-                #     mask_img = ndi.zoom(mask_img, zoom_factors, order=0)
+                if mask_img.shape != target_shape:
+                    print(f"  Resizing mask {mask_basename} from {mask_img.shape} to {target_shape} due to downsampling...")
+                    zoom_factors = (target_shape[0] / mask_img.shape[0], target_shape[1] / mask_img.shape[1])
+                    mask_img = ndi.zoom(mask_img, zoom_factors, order=0)
                 
                 # Label mask for instance segmentation
                 instance_metadata = self._instance_masking(
