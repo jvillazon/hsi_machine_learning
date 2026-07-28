@@ -44,9 +44,9 @@ UNIT_DICT = {
     "Cluster9": "TAL | UMOD",
     "Cluster10": "TAL | UMOD",
     "Cluster11": "DCT | SLC12a3",
-    "Cluster12": "DN | Cyto8 (N1)",
-    "Cluster13": "DN | Cyto8 (N2)",
-    "Cluster14": "DN | Cyto8 (N3)",
+    "Cluster12": "DN | Cyto8",
+    "Cluster13": "DN | Cyto8",
+    "Cluster14": "DN | Cyto8",
     "Cluster15": "DN | Cyto8, Bcat",
     "Cluster16": "DN | Cyto8, Bcat, Ecad",
     "Cluster17": "DN | Cyto8, Ecad",
@@ -124,7 +124,7 @@ VAL_DICTS = {
     21: {'slice_name':"SM 42:2;2O (+H)"},
     22: {'slice_name':"SM 42:1;2O (+H)"},
     23: {'slice_name':"SM 41:0;3O (+H)"},
-    24: {'slice_name':"SM 42:0;3O (+H)}"}
+    24: {'slice_name':"SM 42:0;3O (+H)"}
   },
 }
 
