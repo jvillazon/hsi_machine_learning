@@ -6,7 +6,6 @@ import tifffile
 from scipy.interpolate import CubicSpline
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 import seaborn as sns
 
 
@@ -14,26 +13,26 @@ import seaborn as sns
 # CONFIGURATION
 # =========================================================================
 
-image_dir = r"E:\integrated_pipeline\HSI_data\data_processed"
+image_dir = r"C:\Users\jvill\Downloads\OneDrive_1_7-31-2026\hsi" # Image (input) directory
 base_dir = os.path.dirname(image_dir)
-output_dir = os.path.join(base_dir, f'{os.path.basename(image_dir)}_sam_outputs_molecules')
+output_dir = os.path.join(base_dir, f'{os.path.basename(image_dir)}_sam_outputs_molecules-76') # Output directory
 os.makedirs(output_dir, exist_ok=True)
 
 CONFIG = {
     'image_dir': image_dir,
     'output_dir': output_dir,
-    'spectra_csv': r'C:\Users\jvill\OneDrive\Documents\GitHub\hsi_machine_learning\unprocessed_data\averaged_spectra.csv',
-    'background_csv' : r'C:\Users\jvill\OneDrive\Documents\GitHub\hsi_machine_learning\unprocessed_data\water_HSI_71.csv',
+    'spectra_csv': r'C:\Users\jvill\Documents\GitHub\hsi_machine_learning\unprocessed_data\averaged_spectra.csv', # Path to molecule reference spectra
+    'background_csv' : r'C:\Users\jvill\Documents\GitHub\hsi_machine_learning\unprocessed_data\water_HSI_76.csv', # Path to background
     'wavenumber_start': 2700,
     'wavenumber_end': 3100,
-    'num_samples': 61,
+    'num_samples': 81,
     'max_shift_cm': 50,  # Max shift in cm^-1
     'similarity_threshold': 0.8, # Min similarity (0-1) to be considered a match
     'chunk_size': 1_000_000, # Number of pixels per batch for large images
-    'max_csv_pixels': 10_000_000, # Skip full CSV if image is larger than this
+    'max_csv_pixels': 5_000_000, # Skip full CSV if image is larger than this
     'export_individual_stack_images': True,
     'exclude_molecules': [],
-    'mol_groups': None,
+    'mol_groups': None, # Default (no mol groups)
     # 'mol_groups': {
     #     'Sterols': [
     #         'Cholesterol (ovine)'
@@ -150,8 +149,6 @@ CONFIG = {
     # },
 }
 
-
-
 # Derived configuration
 WN_STEP = (CONFIG['wavenumber_end'] - CONFIG['wavenumber_start']) / (CONFIG['num_samples'] - 1)
 MAX_SHIFT_CHANNELS = int(np.ceil(CONFIG['max_shift_cm'] / WN_STEP))
@@ -261,72 +258,71 @@ def estimate_best_shift(image_mean, background_ref, max_shift_ch):
             
     return best_shift
 
-def plot_diagnostic_samples(out_dir, image_mmap, shifted_ref_matrix, mol_names, ch_order_flip=False):
-    """
-    Pick best, worst, and random matches to visualize SAM performance for large images.
-    Since angles/similarity are not globally stored, we perform a quick scan of 1M random pixels.
-    """
-    print("Generating diagnostic plots from sampled pixels...")
-    h, w = image_mmap.shape[-2], image_mmap.shape[-1]
-    n_pixels = h * w
+# def plot_diagnostic_samples(out_dir, image_mmap, shifted_ref_matrix, mol_names):
+#     """
+#     Pick best, worst, and random matches to visualize SAM performance for large images.
+#     Since angles/similarity are not globally stored, we perform a quick scan of 1M random pixels.
+#     """
+#     print("Generating diagnostic plots from sampled pixels...")
+#     h, w = image_mmap.shape[-2], image_mmap.shape[-1]
+#     n_pixels = h * w
     
-    # Sample 1M pixels (or all if fewer)
-    sample_size = min(n_pixels, 1_000_000)
-    indices = np.random.choice(n_pixels, sample_size, replace=False)
+#     # Sample 1M pixels (or all if fewer)
+#     sample_size = min(n_pixels, 1_000_000)
+#     indices = np.random.choice(n_pixels, sample_size, replace=False)
     
-    # Load and process sample
-    image_flat = image_mmap.reshape(image_mmap.shape[0], -1).T
-    chunk = image_flat[indices]
-    if ch_order_flip:
-        chunk = np.flip(chunk, axis=1)
-    chunk = chunk.astype(np.float32)
+#     # Load and process sample
+#     image_flat = image_mmap.reshape(image_mmap.shape[0], -1).T
+#     image_flat = np.flip(image_flat)
+#     chunk = image_flat[indices]
+#     chunk = chunk.astype(np.float32)
     
-    # Baseline subtraction
-    silent_baseline = np.mean(chunk[:, :CH_START], axis=1, keepdims=True)
-    chunk_proc = chunk - silent_baseline
+#     # Baseline subtraction
+#     silent_baseline = np.mean(chunk[:, :CH_START], axis=1, keepdims=True)
+#     chunk_proc = chunk - silent_baseline
     
-    # SAM
-    angles = calculate_sam(chunk_proc, shifted_ref_matrix)
-    similarity = 1.0 - (angles / np.pi)
-    best_match_idx = np.argmin(angles, axis=1)
-    best_similarity = np.max(similarity, axis=1)
+#     # SAM
+#     angles = calculate_sam(chunk_proc, shifted_ref_matrix)
+#     similarity = 1.0 - (angles / np.pi)
+#     best_match_idx = np.argmin(angles, axis=1)
+#     best_similarity = np.max(similarity, axis=1)
     
-    # Pick 3 samples from the chunk
-    diag_indices = [
-        np.argmax(best_similarity), # Best in sample
-        np.argmin(best_similarity), # Worst in sample
-        np.random.randint(0, sample_size) # Random in sample
-    ]
-    diag_labels = ['Best_Match', 'Worst_Match', 'Random_Match']
+#     # Pick 3 samples from the chunk
+#     diag_indices = [
+#         np.argmax(best_similarity), # Best in sample
+#         np.argmin(best_similarity), # Worst in sample
+#         np.random.randint(0, sample_size) # Random in sample
+#     ]
+#     diag_labels = ['Best_Match', 'Worst_Match', 'Random_Match']
     
-    wn = np.linspace(CONFIG['wavenumber_start'], CONFIG['wavenumber_end'], CONFIG['num_samples'])
+#     wn = np.linspace(CONFIG['wavenumber_start'], CONFIG['wavenumber_end'], CONFIG['num_samples'])
     
-    for local_idx, label in zip(diag_indices, diag_labels):
-        global_p_idx = indices[local_idx]
-        q = chunk_proc[local_idx]
-        m_idx = best_match_idx[local_idx]
-        r = shifted_ref_matrix[m_idx]
-        angle = angles[local_idx, m_idx]
+#     for local_idx, label in zip(diag_indices, diag_labels):
+#         global_p_idx = indices[local_idx]
+#         q = chunk_proc[local_idx]
+#         m_idx = best_match_idx[local_idx]
+#         r = shifted_ref_matrix[m_idx]
+#         angle = angles[local_idx, m_idx]
         
-        # Unit normalization for visual comparison
-        q_unit = q / (np.linalg.norm(q) + 1e-10)
-        r_unit = r / (np.linalg.norm(r) + 1e-10)
+#         # Unit normalization for visual comparison
+#         q_unit = q / (np.linalg.norm(q) + 1e-10)
+#         r_unit = r / (np.linalg.norm(r) + 1e-10)
         
-        plt.figure(figsize=(10, 5))
-        plt.plot(wn, q_unit, 'b-', label='Pixel Spectrum (Unit Vector)')
-        plt.plot(wn, r_unit, 'r--', label=f'Matched Ref: {mol_names[m_idx]} (Unit Vector)')
+#         plt.figure(figsize=(10, 5))
+#         plt.plot(wn, q_unit, 'b-', label='Pixel Spectrum (Unit Vector)')
+#         plt.plot(wn, r_unit, 'r--', label=f'Matched Ref: {mol_names[m_idx]} (Unit Vector)')
         
-        plt.title(f"{label} (Pixel {global_p_idx})\nAngle: {angle:.4f} rad ({np.degrees(angle):.2f} deg)")
-        plt.xlabel("Wavenumber (cm^-1)")
-        plt.ylabel("Unit Normalized Intensity")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
+#         plt.title(f"{label} (Pixel {global_p_idx})\nAngle: {angle:.4f} rad ({np.degrees(angle):.2f} deg)")
+#         plt.xlabel("Wavenumber (cm^-1)")
+#         plt.ylabel("Unit Normalized Intensity")
+#         plt.legend()
+#         plt.grid(True, alpha=0.3)
         
-        out_path = os.path.join(out_dir, f"diagnostic_{label.lower()}.png")
-        plt.savefig(out_path, dpi=100)
-        plt.close()
+#         out_path = os.path.join(out_dir, f"diagnostic_{label.lower()}.png")
+#         plt.savefig(out_path, dpi=100)
+#         plt.close()
         
-    return indices, best_match_idx, similarity # Return samples for summary plot if needed
+#     return indices, best_match_idx, similarity # Return samples for summary plot if needed
 
 
 def sanitize_name_for_filename(name):
@@ -438,7 +434,6 @@ if __name__ == '__main__':
         image_flat = image_mmap.reshape(ch, -1).T if ch_axis == 0 else image_mmap.reshape(-1, ch)
         image_flat = np.flip(image_flat)
 
-
         # Stage 2: Batched Shift Estimation
         print("  Estimating global shift in batches...")
         sum_spectra = np.zeros(CONFIG['num_samples'], dtype=np.float64)
@@ -516,6 +511,7 @@ if __name__ == '__main__':
             temp_start = chunk[:, :CH_START]
             spectra_magnitude = np.mean(temp_end, axis=1) - np.mean(temp_start, axis=1)
 
+
             silent_baseline = np.mean(temp_start, axis=1, keepdims=True)
             chunk_proc = chunk - silent_baseline
 
@@ -549,6 +545,42 @@ if __name__ == '__main__':
             candidate_sim = chunk_similarity[np.arange(len(candidate_idx)), candidate_idx]
             valid_mask = candidate_sim > CONFIG['similarity_threshold']
 
+            if start_p == 0:
+                indices = list(range(0, CONFIG['chunk_size']))
+
+                diag_indices = [
+                    np.argmax(candidate_sim), # Best in sample
+                    np.argmin(candidate_sim), # Worst in sample
+                    np.random.randint(0, CONFIG['chunk_size']) # Random in sample
+                ]
+                diag_labels = ['Best_Match', 'Worst_Match', 'Random_Match']
+                wn = np.linspace(CONFIG['wavenumber_start'], CONFIG['wavenumber_end'], CONFIG['num_samples'])
+                
+                for local_idx, label in zip(diag_indices, diag_labels):
+                    global_p_idx = indices[local_idx]
+                    q = chunk_proc[local_idx]
+                    m_idx = candidate_idx[local_idx]
+                    r = shifted_ref_matrix[m_idx]
+                    angle = effective_angles[local_idx, m_idx]
+                    
+                    # Unit normalization for visual comparison
+                    q_unit = q / (np.linalg.norm(q) + 1e-10)
+                    r_unit = r / (np.linalg.norm(r) + 1e-10)
+                    
+                    plt.figure(figsize=(10, 5))
+                    plt.plot(wn, q_unit, 'b-', label='Pixel Spectrum (Unit Vector)')
+                    plt.plot(wn, r_unit, 'r--', label=f'Matched Ref: {mol_names[m_idx]} (Unit Vector)')
+                    
+                    plt.title(f"{label} (Pixel {global_p_idx})\nAngle: {angle:.4f} rad ({np.degrees(angle):.2f} deg)")
+                    plt.xlabel("Wavenumber (cm^-1)")
+                    plt.ylabel("Unit Normalized Intensity")
+                    plt.legend()
+                    plt.grid(True, alpha=0.3)
+                    
+                    out_path = os.path.join(img_out_dir, f"diagnostic_{label.lower()}.png")
+                    plt.savefig(out_path, dpi=100)
+                    plt.close()
+
             # Class 0 is reserved for "No Match".
             chunk_best_idx = np.zeros(len(candidate_idx), dtype=np.uint16)
             chunk_best_idx[valid_mask] = (candidate_idx[valid_mask] + 1).astype(np.uint16)
@@ -573,7 +605,7 @@ if __name__ == '__main__':
             for t_idx in range(len(target_names)):
                 sim_stack_flat[t_idx, start_p:end_p] = chunk_similarity[:, t_idx]
                 best_match_mask = valid_mask & (candidate_idx == t_idx)
-                class_stack_flat[t_idx, start_p:end_p] = best_match_mask.astype(np.uint8)
+                class_stack_flat[t_idx, start_p:end_p] = (best_match_mask*255).astype(np.uint8)
                 rgb_chunk[best_match_mask] = palette_u8[t_idx]
 
             rows = np.arange(start_p, end_p)
@@ -601,10 +633,6 @@ if __name__ == '__main__':
         target_names_hexcodes.insert(0, "#000000")
         target_names_df = pd.DataFrame({"ID Number": list(range(len(target_names_id))), "Molecules": target_names_id, "Hexcodes": target_names_hexcodes})
         target_names_df.to_csv(os.path.normpath(os.path.join(img_out_dir, f"{img_base}_target_names.csv")), index=False)
-
-        indices, best_match_idx_sample, similarity_sample = plot_diagnostic_samples(
-            img_out_dir, image_mmap, shifted_ref_matrix, mol_names
-        )
 
         print(f"  Generating summary result ({'CSV' if save_csv else 'Parquet'}) with Top 5 contenders...")
         mol_names_ext = ["No Match"] + target_names
@@ -638,33 +666,6 @@ if __name__ == '__main__':
                 summary_df.to_csv(csv_out, index=False)
 
         del all_top_indices, all_top_sims, summary_df
-
-        plt.figure(figsize=(12, 5))
-        cmap_colors = plt.cm.tab20(np.linspace(0, 1, len(target_names)))
-        cmap_colors = np.vstack([cmap_colors, [0.5, 0.5, 0.5, 1.0]])
-        cmap = mcolors.ListedColormap(cmap_colors)
-
-        plt.subplot(1, 2, 1)
-        plt.imshow(class_map_mmap, cmap=cmap, vmin=0, vmax=len(target_names))
-        plt.title("SAM Classification Map\n(Grey = No Match)")
-        plt.axis('off')
-
-        plt.subplot(1, 2, 2)
-        wn = np.linspace(CONFIG['wavenumber_start'], CONFIG['wavenumber_end'], CONFIG['num_samples'])
-        plt.plot(wn, image_mean_norm, 'k-', label='Image Mean', linewidth=2, alpha=0.5)
-        max_sim_per_mol = np.max(similarity_sample, axis=0)
-        top_3_indices = np.argsort(max_sim_per_mol)[-3:][::-1]
-        for idx in top_3_indices:
-            plt.plot(wn, shifted_ref_matrix[idx], color=cmap_colors[idx % len(target_names)], linestyle='--',
-                        label=f"{mol_names[idx]} (max sim: {max_sim_per_mol[idx]:.3f})")
-        plt.title(f"Spectral Overlay (Shift: {best_shift})")
-        plt.legend(fontsize=8, loc='upper left')
-        plt.xlabel("Wavenumber (cm^-1)")
-        plt.grid(True, alpha=0.2)
-        plt.tight_layout()
-        plt.savefig(os.path.join(img_out_dir, f"{img_base}_sam_summary.png"), dpi=150)
-        plt.close()
-
         del sim_stack_mmap, rgb_stack_mmap, class_map_mmap, best_sim_mmap, class_stack_mmap
         import gc
         gc.collect()
