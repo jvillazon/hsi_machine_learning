@@ -13,19 +13,19 @@ import seaborn as sns
 # CONFIGURATION
 # =========================================================================
 
-image_dir = r"C:\Users\jvill\Downloads\OneDrive_1_7-31-2026\hsi" # Image (input) directory
+image_dir = r"E:\Data\Jorge\01_HumanKidney_HuBMAP\dataset\processed data" # Image (input) directory
 base_dir = os.path.dirname(image_dir)
-output_dir = os.path.join(base_dir, f'{os.path.basename(image_dir)}_sam_outputs_molecules-76') # Output directory
+output_dir = os.path.join(base_dir, f'{os.path.basename(image_dir)}_sam_outputs_molecules') # Output directory
 os.makedirs(output_dir, exist_ok=True)
 
 CONFIG = {
     'image_dir': image_dir,
     'output_dir': output_dir,
     'spectra_csv': r'C:\Users\jvill\Documents\GitHub\hsi_machine_learning\unprocessed_data\averaged_spectra.csv', # Path to molecule reference spectra
-    'background_csv' : r'C:\Users\jvill\Documents\GitHub\hsi_machine_learning\unprocessed_data\water_HSI_76.csv', # Path to background
+    'background_csv' : r'C:\Users\jvill\Documents\GitHub\hsi_machine_learning\unprocessed_data\water_HSI_71.csv', # Path to background
     'wavenumber_start': 2700,
     'wavenumber_end': 3100,
-    'num_samples': 81,
+    'num_samples': 61,
     'max_shift_cm': 50,  # Max shift in cm^-1
     'similarity_threshold': 0.8, # Min similarity (0-1) to be considered a match
     'chunk_size': 1_000_000, # Number of pixels per batch for large images
@@ -147,6 +147,7 @@ CONFIG = {
     #         'C18 Carnitine (d9-cis)'
     #     ]
     # },
+    'num_contenders': 5,
 }
 
 # Derived configuration
@@ -342,8 +343,6 @@ def export_stack_slices_as_tiff(stack_mmap, target_names, out_dir, subfolder):
         out_path = os.path.join(slices_dir, f"{safe_name}.tif")
         tifffile.imwrite(out_path, stack_mmap[t_idx])
 
-
-
 if __name__ == '__main__':
 
     ref_dict = load_reference_spectra(
@@ -498,7 +497,7 @@ if __name__ == '__main__':
         class_map_mmap[:] = 0
         best_sim_mmap[:] = 0
 
-        top_k = 5
+        top_k = np.max(CONFIG['num_contenders'], len(target_names))
         all_top_indices = np.zeros((n_pixels, top_k), dtype=np.uint16)
         all_top_sims = np.zeros((n_pixels, top_k), dtype=np.float32)
         save_csv = n_pixels < CONFIG['max_csv_pixels']
@@ -546,18 +545,16 @@ if __name__ == '__main__':
             valid_mask = candidate_sim > CONFIG['similarity_threshold']
 
             if start_p == 0:
-                indices = list(range(0, CONFIG['chunk_size']))
 
                 diag_indices = [
                     np.argmax(candidate_sim), # Best in sample
                     np.argmin(candidate_sim), # Worst in sample
-                    np.random.randint(0, CONFIG['chunk_size']) # Random in sample
+                    np.random.randint(0, candidate_sim.shape[0]) # Random in sample
                 ]
                 diag_labels = ['Best_Match', 'Worst_Match', 'Random_Match']
                 wn = np.linspace(CONFIG['wavenumber_start'], CONFIG['wavenumber_end'], CONFIG['num_samples'])
                 
                 for local_idx, label in zip(diag_indices, diag_labels):
-                    global_p_idx = indices[local_idx]
                     q = chunk_proc[local_idx]
                     m_idx = candidate_idx[local_idx]
                     r = shifted_ref_matrix[m_idx]
@@ -571,7 +568,7 @@ if __name__ == '__main__':
                     plt.plot(wn, q_unit, 'b-', label='Pixel Spectrum (Unit Vector)')
                     plt.plot(wn, r_unit, 'r--', label=f'Matched Ref: {mol_names[m_idx]} (Unit Vector)')
                     
-                    plt.title(f"{label} (Pixel {global_p_idx})\nAngle: {angle:.4f} rad ({np.degrees(angle):.2f} deg)")
+                    plt.title(f"{label} (Pixel {local_idx})\nAngle: {angle:.4f} rad ({np.degrees(angle):.2f} deg)")
                     plt.xlabel("Wavenumber (cm^-1)")
                     plt.ylabel("Unit Normalized Intensity")
                     plt.legend()

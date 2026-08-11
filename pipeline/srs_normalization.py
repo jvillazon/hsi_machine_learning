@@ -8,26 +8,19 @@ import glob
 import tifffile
 
 base_directories =[
-    # r"E:\Data\Jorge\01_HumanKidney_HuBMAP\05-13-25 Xenium AKI 3782 K2200093_5\ROI left side\tifs",
-    # r"E:\Data\Jorge\01_HumanKidney_HuBMAP\05-13-25 Xenium AKI 3782 K2200093_5\ROI1X left side\tifs",
-    # r"E:\Data\Jorge\01_HumanKidney_HuBMAP\05-13-25 Xenium AKI 3782 K2200093_5\ROI2X bottom center\tifs",
-    # r"E:\Data\Jorge\01_HumanKidney_HuBMAP\05-14-25 Xenium Ref KPMP_038 S-2211-0003960\ROI1X glomeruli top left\tifs",
-    # r"E:\Data\Jorge\01_HumanKidney_HuBMAP\05-14-25 Xenium Ref KPMP_038 S-2211-0003960\ROI2X glomeruli middle\tifs",
-    # r"E:\Data\Jorge\01_HumanKidney_HuBMAP\05-15-25 Xenium CKD 3990\ROI1 glomeruli bottom right\tifs",
-    # r"E:\Data\Jorge\01_HumanKidney_HuBMAP\05-15-25 Xenium CKD 3990\ROI2 glomeruli middle\tifs",
-    r"D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\data"
+    r"E:\Data\Jorge\01_HumanKidney_HuBMAP\dataset\processed data"
 ]
 
 CONFIG = {
-    'num_samples' : 61,
-    'wn_1' : 2700,
-    'wn_2' : 3100,
-    'srs_params_path' : 'params_dataset/srs_params_61.npz',
-    'background_csv': r'C:\Users\jvill\OneDrive\Documents\GitHub\hsi_machine_learning\unprocessed_data\water_HSI_76.csv',
-    'quant' : True,
-    'flip' : True,
-    'bg_subtract' : False,
-    'show_plots' : False
+    'num_samples' : 61, # num channels in HSI
+    'wn_1' : 2700, # first cm-1
+    'wn_2' : 3100, # last cm-1
+    'background_csv': r'C:\Users\jvill\Documents\GitHub\hsi_machine_learning\unprocessed_data\water_HSI_71.csv', # dirctory to background .csv
+    'quant' : True, # create macromolecule images
+    'flip' : True, # reverse order to match cm-1
+    'bg_subtract' : True, # subtract background 
+    'show_plots' : True, # show plots of background subtraction and peak assignment (debuging)
+    'shift': 20, # determined by plotted overlap of peaks with known annotations
 }
 
 
@@ -62,7 +55,7 @@ def main():
     if CONFIG['flip']:
         background = np.flip(background)  # Flip to match spectra order if needed
     #Shift background
-    shift = 10
+    shift = CONFIG['shift']
     # if shift > 0:
     #     background = np.pad(background, (shift, 0), mode='constant')
     # Interpolate background to match num_samp if needed
