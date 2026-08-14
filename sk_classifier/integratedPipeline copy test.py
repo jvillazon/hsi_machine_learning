@@ -149,8 +149,8 @@ def run(df, group_cols, items_list, col_order, combine, filter_values, palette, 
         item_name = re.sub(r"[^\w\s]", "", item) 
         if len(group_cols) == 1:
             group_col = group_cols[0]
-            fig, ax = plt.subplots(figsize=(max(4, 1.2 * len(col_order)), 5))
-            anova, posthoc = plot_single_grouping(df, item, next(iter(col_order)), group_col, ax=ax, palette=palette)
+            fig, ax = plt.subplots(figsize=(max(4, 1.2 * len(col_order[group_col])), 5))
+            anova, posthoc = plot_single_grouping(df, item, col_order[group_col], group_col, ax=ax, palette=palette)
             fig.tight_layout()
             
             fig.savefig(os.path.join(output_dir, f"{item_name}.png"), dpi=200)
@@ -368,7 +368,7 @@ def main():
     df['mask_name'] = pd.Categorical(df['mask_name'], categories=unit_order, ordered=True)
     df['group'] = pd.Categorical(df['group'], categories=group_order, ordered=True)
     for i, val_col in enumerate(df.columns[7:]):
-        df[val_col] = df[val_col].fillna(df.groupby(['group', 'mask_name'])[val_col].transform('median'))
+        df[val_col] = df[val_col].fillna(df.groupby(['group', 'mask_name', 'tissue_id'])[val_col].transform('median'))
 
     # df[df.columns[7:]] = df[df.columns[7:]].fillna(0)
 
@@ -466,8 +466,10 @@ def main():
 
     plot_df = df[(df[items_list] != 0).all(axis=1)].copy()
 
-    scaler = StandardScaler()
-    plot_df[items_list]= scaler.fit_transform(plot_df[items_list])
+    # scaler = StandardScaler()
+    # plot_df[items_list]= scaler.fit_transform(plot_df[items_list])
+
+    plot_df[items_list] = plot_df[items_list].apply(lambda x: (x - x.mean()) / (x.std() + 1e-8))
 
     # visualizer.create_individual_barplots(
     #     df=plot_df, 
@@ -492,15 +494,15 @@ def main():
     # )
 
     # items_list = ['ORR']
-    output_dir = os.path.join(workspace_dir, 'group_plots', 'dn')
+    output_dir = os.path.join('/Users/jorgevillazon/Library/CloudStorage/OneDrive-UCSanDiego/integrated_pipeline/new_plots_WSI', 'nongrouped_plots', 'all')
     os.makedirs(output_dir,exist_ok=True)
-    group_cols = ['group', 'mask_name']
+    group_cols = ['mask_name']
     filter_cluster = [
         # "Cluster1",
-        # "Cluster2",
-        # #   "Cluster3",
-        # "Cluster4",
-        # "Cluster5",
+        "Cluster2",
+        #   "Cluster3",
+        "Cluster4",
+        "Cluster5",
         # "Cluster6",
         # "Cluster7",
         # "Cluster8",
@@ -513,10 +515,10 @@ def main():
         # "Cluster15",
         # "Cluster16",
         # "Cluster17",
-        "Cluster18",
-        "Cluster19",
-        "Cluster20",
-        "Cluster21",
+        # "Cluster18",
+        # "Cluster19",
+        # "Cluster20",
+        # "Cluster21",
         # "Cluster22",
         # "Cluster23",
         # "Cluster24",
