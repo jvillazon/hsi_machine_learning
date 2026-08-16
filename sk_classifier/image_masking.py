@@ -2,6 +2,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import scipy.ndimage as ndi
+import cv2
 
 import tqdm
 
@@ -9,13 +10,15 @@ import tifffile
 import zarr
 
 
+
+
 CONFIG = {
-    'base_dir': r'C:\Users\jvill\OneDrive - UC San Diego\integrated_pipeline\WSI_data\WSI_data\Dataset_Root',
+    'base_dir': r'/Users/jorgevillazon/Library/CloudStorage/OneDrive-UCSanDiego/integrated_pipeline/WSI_data/WSI_data/Dataset_Root',
     
     'values_dir': 'values',
     'img_extensions' : ('.tif', '.ome.tiff', '.tiff'),
 
-    'mask_dir': 'cluster_regions-masks',
+    'mask_dir': 'fib-masks',
     'subgroups' : {
       "C1": "Outer Cortex",
       "C2": "Middle Cortex",
@@ -30,36 +33,648 @@ CONFIG = {
     'min_instance_size' : 100,
 }
 
-MASK_DICTS = {}
-
-UNIT_DICT = {
-    "Cluster1": "Glomeruli | Podo, CD31",
-    "Cluster2": "PT | LRP2",
-    "Cluster3": "PT | LRP2, AQP1, CD90",
-    "Cluster4": "PT | THY1",
-    "Cluster5": "PT | PROM1/VCAM1",
-    "Cluster6": "TDL | AQP1, Cyto8 (N1)",
-    "Cluster7": "TDL | AQP1, Cyto8 (N2)",
-    "Cluster8": "TAL | NaK/UMOD",
-    "Cluster9": "TAL | UMOD",
-    "Cluster10": "TAL | UMOD",
-    "Cluster11": "DCT | SLC12a3",
-    "Cluster12": "DN | Cyto8",
-    "Cluster13": "DN | Cyto8",
-    "Cluster14": "DN | Cyto8",
-    "Cluster15": "DN | Cyto8, Bcat",
-    "Cluster16": "DN | Cyto8, Bcat, Ecad",
-    "Cluster17": "DN | Cyto8, Ecad",
-    "Cluster18": "Endothelium | CD31",
-    "Cluster19": "Endothelium | CD31, Podo",
-    "Cluster20": "Pericytes | CD90, CD31(-)",
-    "Cluster21": "VSMCs | aSMA",
-    "Cluster22": "Immune | CD20",
-    "Cluster23": "Immune - MP | CD45, CD206",
-    "Cluster24": "Immune - T | CD3, CD4",
-    "Cluster25": "Immune - T | CD3, CD8",
-    "Cluster26": "Interstitial cells | IGFBP7"
+MASK_DICTS = {
+    "CFIB_cluster":{
+        0: {
+            'slice_name': "Cluster26",
+            'unit': "Interstitial cells | IGFBP7",
+            'group': "CFIB"
+            },
+        1: {
+            'slice_name': "Cluster18",
+            'unit': "Endothelium | CD31",
+            'group': "CFIB"
+            },
+        2: {
+            'slice_name': "Cluster19",
+            'unit': "Endothelium | CD31, Podo",
+            'group': "CFIB"
+            },
+        3: {
+            'slice_name': "Cluster20",
+            'unit': "Pericytes | CD90, CD31(-)",
+            'group': "CFIB"
+            },
+        4: {
+            'slice_name': "Cluster21",
+            'unit': "VSMCs | aSMA",
+            'group': "CFIB"
+            },
+        5: {
+            'slice_name': "Cluster22",
+            'unit': "Immune | CD20",
+            'group': "CFIB"
+            },
+        6: {
+            'slice_name': "Cluster23",
+            'unit': "Immune - MP | CD45, CD206",
+            'group': "CFIB"
+        },
+        7: {
+            'slice_name': "Cluster24",
+            'unit': "Immune - T | CD3, CD4",
+            'group': "CFIB"
+        },
+        8: {
+            'slice_name': "Cluster25",
+            'unit': "Immune - T | CD3, CD8",
+            'group': "CFIB"
+        }   
+    },
+    "CMFIB_cluster":{
+        0: {
+            'slice_name': "Cluster26",
+            'unit': "Interstitial cells | IGFBP7",
+            'group': "CMFIB"
+            },
+        1: {
+            'slice_name': "Cluster18",
+            'unit': "Endothelium | CD31",
+            'group': "CMFIB"
+            },
+        2: {
+            'slice_name': "Cluster19",
+            'unit': "Endothelium | CD31, Podo",
+            'group': "CMFIB"
+            },
+        3: {
+            'slice_name': "Cluster20",
+            'unit': "Pericytes | CD90, CD31(-)",
+            'group': "CMFIB"
+            },
+        4: {
+            'slice_name': "Cluster21",
+            'unit': "VSMCs | aSMA",
+            'group': "CMFIB"
+            },
+        5: {
+            'slice_name': "Cluster22",
+            'unit': "Immune | CD20",
+            'group': "CMFIB"
+            },
+        6: {
+            'slice_name': "Cluster23",
+            'unit': "Immune - MP | CD45, CD206",
+            'group': "CMFIB"
+        },
+        7: {
+            'slice_name': "Cluster24",
+            'unit': "Immune - T | CD3, CD4",
+            'group': "CMFIB"
+        },
+        8: {
+            'slice_name': "Cluster25",
+            'unit': "Immune - T | CD3, CD8",
+            'group': "CMFIB"
+        }
+    },
+    "CMYOF_cluster":{
+        0: {
+            'slice_name': "Cluster26",
+            'unit': "Interstitial cells | IGFBP7",
+            'group': "CMYOF"
+            },
+        1: {
+            'slice_name': "Cluster18",
+            'unit': "Endothelium | CD31",
+            'group': "CMYOF"
+            },
+        2: {
+            'slice_name': "Cluster19",
+            'unit': "Endothelium | CD31, Podo",
+            'group': "CMYOF"
+            },
+        3: {
+            'slice_name': "Cluster20",
+            'unit': "Pericytes | CD90, CD31(-)",
+            'group': "CMYOF"
+            },
+        4: {
+            'slice_name': "Cluster21",
+            'unit': "VSMCs | aSMA",
+            'group': "CMYOF"
+            },
+        5: {
+            'slice_name': "Cluster22",
+            'unit': "Immune | CD20",
+            'group': "CMYOF"
+            },
+        6: {
+            'slice_name': "Cluster23",
+            'unit': "Immune - MP | CD45, CD206",
+            'group': "CMYOF"
+        },
+        7: {
+            'slice_name': "Cluster24",
+            'unit': "Immune - T | CD3, CD4",
+            'group': "CMYOF"
+        },
+        8: {
+            'slice_name': "Cluster25",
+            'unit': "Immune - T | CD3, CD8",
+            'group': "CMYOF"
+        }
+    },
+    "dFIB_cluster":{
+        0: {
+            'slice_name': "Cluster26",
+            'unit': "Interstitial cells | IGFBP7",
+            'group': "dFIB"
+            },
+        1: {
+            'slice_name': "Cluster18",
+            'unit': "Endothelium | CD31",
+            'group': "dFIB"
+            },
+        2: {
+            'slice_name': "Cluster19",
+            'unit': "Endothelium | CD31, Podo",
+            'group': "dFIB"
+            },
+        3: {
+            'slice_name': "Cluster20",
+            'unit': "Pericytes | CD90, CD31(-)",
+            'group': "dFIB"
+            },
+        4: {
+            'slice_name': "Cluster21",
+            'unit': "VSMCs | aSMA",
+            'group': "dFIB"
+            },
+        5: {
+            'slice_name': "Cluster22",
+            'unit': "Immune | CD20",
+            'group': "dFIB"
+            },
+        6: {
+            'slice_name': "Cluster23",
+            'unit': "Immune - MP | CD45, CD206",
+            'group': "dFIB"
+        },
+        7: {
+            'slice_name': "Cluster24",
+            'unit': "Immune - T | CD3, CD4",
+            'group': "dFIB"
+        },
+        8: {
+            'slice_name': "Cluster25",
+            'unit': "Immune - T | CD3, CD8",
+            'group': "dFIB"
+        }
+    },
+    "dIMFIB_cluster":{
+        0: {
+            'slice_name': "Cluster26",
+            'unit': "Interstitial cells | IGFBP7",
+            'group': "dIMFIB"
+            },
+        1: {
+            'slice_name': "Cluster18",
+            'unit': "Endothelium | CD31",
+            'group': "dIMFIB"
+            },
+        2: {
+            'slice_name': "Cluster19",
+            'unit': "Endothelium | CD31, Podo",
+            'group': "dIMFIB"
+            },
+        3: {
+            'slice_name': "Cluster20",
+            'unit': "Pericytes | CD90, CD31(-)",
+            'group': "dIMFIB"
+            },
+        4: {
+            'slice_name': "Cluster21",
+            'unit': "VSMCs | aSMA",
+            'group': "dIMFIB"
+            },
+        5: {
+            'slice_name': "Cluster22",
+            'unit': "Immune | CD20",
+            'group': "dIMFIB"
+            },
+        6: {
+            'slice_name': "Cluster23",
+            'unit': "Immune - MP | CD45, CD206",
+            'group': "dIMFIB"
+        },
+        7: {
+            'slice_name': "Cluster24",
+            'unit': "Immune - T | CD3, CD4",
+            'group': "dIMFIB"
+        },
+        8: {
+            'slice_name': "Cluster25",
+            'unit': "Immune - T | CD3, CD8",
+            'group': "dIMFIB"
+        }
+    },
+    "dOMFIB_cluster":{
+        0: {
+            'slice_name': "Cluster26",
+            'unit': "Interstitial cells | IGFBP7",
+            'group': "dOMFIB"
+            },
+        1: {
+            'slice_name': "Cluster18",
+            'unit': "Endothelium | CD31",
+            'group': "dOMFIB"
+            },
+        2: {
+            'slice_name': "Cluster19",
+            'unit': "Endothelium | CD31, Podo",
+            'group': "dOMFIB"
+            },
+        3: {
+            'slice_name': "Cluster20",
+            'unit': "Pericytes | CD90, CD31(-)",
+            'group': "dOMFIB"
+            },
+        4: {
+            'slice_name': "Cluster21",
+            'unit': "VSMCs | aSMA",
+            'group': "dOMFIB"
+            },
+        5: {
+            'slice_name': "Cluster22",
+            'unit': "Immune | CD20",
+            'group': "dOMFIB"
+            },
+        6: {
+            'slice_name': "Cluster23",
+            'unit': "Immune - MP | CD45, CD206",
+            'group': "dOMFIB"
+        },
+        7: {
+            'slice_name': "Cluster24",
+            'unit': "Immune - T | CD3, CD4",
+            'group': "dOMFIB"
+        },
+        8: {
+            'slice_name': "Cluster25",
+            'unit': "Immune - T | CD3, CD8",
+            'group': "dOMFIB"
+        }
+    },
+    "IMFIB_cluster":{
+        0: {
+            'slice_name': "Cluster26",
+            'unit': "Interstitial cells | IGFBP7",
+            'group': "IMFIB"
+            },
+        1: {
+            'slice_name': "Cluster18",
+            'unit': "Endothelium | CD31",
+            'group': "IMFIB"
+            },
+        2: {
+            'slice_name': "Cluster19",
+            'unit': "Endothelium | CD31, Podo",
+            'group': "IMFIB"
+            },
+        3: {
+            'slice_name': "Cluster20",
+            'unit': "Pericytes | CD90, CD31(-)",
+            'group': "IMFIB"
+            },
+        4: {
+            'slice_name': "Cluster21",
+            'unit': "VSMCs | aSMA",
+            'group': "IMFIB"
+            },
+        5: {
+            'slice_name': "Cluster22",
+            'unit': "Immune | CD20",
+            'group': "IMFIB"
+            },
+        6: {
+            'slice_name': "Cluster23",
+            'unit': "Immune - MP | CD45, CD206",
+            'group': "IMFIB"
+        },
+        7: {
+            'slice_name': "Cluster24",
+            'unit': "Immune - T | CD3, CD4",
+            'group': "IMFIB"
+        },
+        8: {
+            'slice_name': "Cluster25",
+            'unit': "Immune - T | CD3, CD8",
+            'group': "IMFIB"
+        }
+    },
+    "IMpvFIB_cluster":{
+        0: {
+            'slice_name': "Cluster26",
+            'unit': "Interstitial cells | IGFBP7",
+            'group': "IMpvFIB"
+            },
+        1: {
+            'slice_name': "Cluster18",
+            'unit': "Endothelium | CD31",
+            'group': "IMpvFIB"
+            },
+        2: {
+            'slice_name': "Cluster19",
+            'unit': "Endothelium | CD31, Podo",
+            'group': "IMpvFIB"
+            },
+        3: {
+            'slice_name': "Cluster20",
+            'unit': "Pericytes | CD90, CD31(-)",
+            'group': "IMpvFIB"
+            },
+        4: {
+            'slice_name': "Cluster21",
+            'unit': "VSMCs | aSMA",
+            'group': "IMpvFIB"
+            },
+        5: {
+            'slice_name': "Cluster22",
+            'unit': "Immune | CD20",
+            'group': "IMpvFIB"
+            },
+        6: {
+            'slice_name': "Cluster23",
+            'unit': "Immune - MP | CD45, CD206",
+            'group': "IMpvFIB"
+        },
+        7: {
+            'slice_name': "Cluster24",
+            'unit': "Immune - T | CD3, CD4",
+            'group': "IMpvFIB"
+        },
+        8: {
+            'slice_name': "Cluster25",
+            'unit': "Immune - T | CD3, CD8",
+            'group': "IMpvFIB"
+        }
+    },
+    "OMFIB_cluster":{
+        0: {
+            'slice_name': "Cluster26",
+            'unit': "Interstitial cells | IGFBP7",
+            'group': "OMFIB"
+            },
+        1: {
+            'slice_name': "Cluster18",
+            'unit': "Endothelium | CD31",
+            'group': "OMFIB"
+            },
+        2: {
+            'slice_name': "Cluster19",
+            'unit': "Endothelium | CD31, Podo",
+            'group': "OMFIB"
+            },
+        3: {
+            'slice_name': "Cluster20",
+            'unit': "Pericytes | CD90, CD31(-)",
+            'group': "OMFIB"
+            },
+        4: {
+            'slice_name': "Cluster21",
+            'unit': "VSMCs | aSMA",
+            'group': "OMFIB"
+            },
+        5: {
+            'slice_name': "Cluster22",
+            'unit': "Immune | CD20",
+            'group': "OMFIB"
+            },
+        6: {
+            'slice_name': "Cluster23",
+            'unit': "Immune - MP | CD45, CD206",
+            'group': "OMFIB"
+        },
+        7: {
+            'slice_name': "Cluster24",
+            'unit': "Immune - T | CD3, CD4",
+            'group': "OMFIB"
+        },
+        8: {
+            'slice_name': "Cluster25",
+            'unit': "Immune - T | CD3, CD8",
+            'group': "OMFIB"
+        }
+    },
+    "pvFIB_cluster":{
+        0: {
+            'slice_name': "Cluster26",
+            'unit': "Interstitial cells | IGFBP7",
+            'group': "pvFIB"
+            },
+        1: {
+            'slice_name': "Cluster18",
+            'unit': "Endothelium | CD31",
+            'group': "pvFIB"
+            },
+        2: {
+            'slice_name': "Cluster19",
+            'unit': "Endothelium | CD31, Podo",
+            'group': "pvFIB"
+            },
+        3: {
+            'slice_name': "Cluster20",
+            'unit': "Pericytes | CD90, CD31(-)",
+            'group': "pvFIB"
+            },
+        4: {
+            'slice_name': "Cluster21",
+            'unit': "VSMCs | aSMA",
+            'group': "pvFIB"
+            },
+        5: {
+            'slice_name': "Cluster22",
+            'unit': "Immune | CD20",
+            'group': "pvFIB"
+            },
+        6: {
+            'slice_name': "Cluster23",
+            'unit': "Immune - MP | CD45, CD206",
+            'group': "pvFIB"
+        },
+        7: {
+            'slice_name': "Cluster24",
+            'unit': "Immune - T | CD3, CD4",
+            'group': "pvFIB"
+        },
+        8: {
+            'slice_name': "Cluster25",
+            'unit': "Immune - T | CD3, CD8",
+            'group': "pvFIB"
+        }
+    },
+    "pvMYOF_cluster":{
+        0: {
+            'slice_name': "Cluster26",
+            'unit': "Interstitial cells | IGFBP7",
+            'group': "pvMYOF"
+            },
+        1: {
+            'slice_name': "Cluster18",
+            'unit': "Endothelium | CD31",
+            'group': "pvMYOF"
+            },
+        2: {
+            'slice_name': "Cluster19",
+            'unit': "Endothelium | CD31, Podo",
+            'group': "pvMYOF"
+            },
+        3: {
+            'slice_name': "Cluster20",
+            'unit': "Pericytes | CD90, CD31(-)",
+            'group': "pvMYOF"
+            },
+        4: {
+            'slice_name': "Cluster21",
+            'unit': "VSMCs | aSMA",
+            'group': "pvMYOF"
+            },
+        5: {
+            'slice_name': "Cluster22",
+            'unit': "Immune | CD20",
+            'group': "pvMYOF"
+            },
+        6: {
+            'slice_name': "Cluster23",
+            'unit': "Immune - MP | CD45, CD206",
+            'group': "pvMYOF"
+        },
+        7: {
+            'slice_name': "Cluster24",
+            'unit': "Immune - T | CD3, CD4",
+            'group': "pvMYOF"
+        },
+        8: {
+            'slice_name': "Cluster25",
+            'unit': "Immune - T | CD3, CD8",
+            'group': "pvMYOF"
+        }
+    },
+    "CMMYOF_cluster":{
+        0: {
+            'slice_name': "Cluster26",
+            'unit': "Interstitial cells | IGFBP7",
+            'group': "CMMYOF"
+            },
+        1: {
+            'slice_name': "Cluster18",
+            'unit': "Endothelium | CD31",
+            'group': "CMMYOF"
+            },
+        2: {
+            'slice_name': "Cluster19",
+            'unit': "Endothelium | CD31, Podo",
+            'group': "CMMYOF"
+            },
+        3: {
+            'slice_name': "Cluster20",
+            'unit': "Pericytes | CD90, CD31(-)",
+            'group': "CMMYOF"
+            },
+        4: {
+            'slice_name': "Cluster21",
+            'unit': "VSMCs | aSMA",
+            'group': "CMMYOF"
+            },
+        5: {
+            'slice_name': "Cluster22",
+            'unit': "Immune | CD20",
+            'group': "CMMYOF"
+            },
+        6: {
+            'slice_name': "Cluster23",
+            'unit': "Immune - MP | CD45, CD206",
+            'group': "CMMYOF"
+        },
+        7: {
+            'slice_name': "Cluster24",
+            'unit': "Immune - T | CD3, CD4",
+            'group': "CMMYOF"
+        },
+        8: {
+            'slice_name': "Cluster25",
+            'unit': "Immune - T | CD3, CD8",
+            'group': "CMMYOF"
+        }
+    },
+    "IMpvMYOF_cluster":{
+        0: {
+            'slice_name': "Cluster26",
+            'unit': "Interstitial cells | IGFBP7",
+            'group': "IMpvMYOF"
+            },
+        1: {
+            'slice_name': "Cluster18",
+            'unit': "Endothelium | CD31",
+            'group': "IMpvMYOF"
+            },
+        2: {
+            'slice_name': "Cluster19",
+            'unit': "Endothelium | CD31, Podo",
+            'group': "IMpvMYOF"
+            },
+        3: {
+            'slice_name': "Cluster20",
+            'unit': "Pericytes | CD90, CD31(-)",
+            'group': "IMpvMYOF"
+            },
+        4: {
+            'slice_name': "Cluster21",
+            'unit': "VSMCs | aSMA",
+            'group': "IMpvMYOF"
+            },
+        5: {
+            'slice_name': "Cluster22",
+            'unit': "Immune | CD20",
+            'group': "IMpvMYOF"
+            },
+        6: {
+            'slice_name': "Cluster23",
+            'unit': "Immune - MP | CD45, CD206",
+            'group': "IMpvMYOF"
+        },
+        7: {
+            'slice_name': "Cluster24",
+            'unit': "Immune - T | CD3, CD4",
+            'group': "IMpvMYOF"
+        },
+        8: {
+            'slice_name': "Cluster25",
+            'unit': "Immune - T | CD3, CD8",
+            'group': "IMpvMYOF"
+        }
+    }
 }
+
+# UNIT_DICT = {
+#     "Cluster1": "Glomeruli | Podo, CD31",
+#     "Cluster2": "PT | LRP2",
+#     "Cluster3": "PT | LRP2, AQP1, CD90",
+#     "Cluster4": "PT | THY1",
+#     "Cluster5": "PT | PROM1/VCAM1",
+#     "Cluster6": "TDL | AQP1, Cyto8 (N1)",
+#     "Cluster7": "TDL | AQP1, Cyto8 (N2)",
+#     "Cluster8": "TAL | NaK/UMOD",
+#     "Cluster9": "TAL | UMOD",
+#     "Cluster10": "TAL | UMOD",
+#     "Cluster11": "DCT | SLC12a3",
+#     "Cluster12": "DN | Cyto8",
+#     "Cluster13": "DN | Cyto8",
+#     "Cluster14": "DN | Cyto8",
+#     "Cluster15": "DN | Cyto8, Bcat",
+#     "Cluster16": "DN | Cyto8, Bcat, Ecad",
+#     "Cluster17": "DN | Cyto8, Ecad",
+#     "Cluster18": "Endothelium | CD31",
+#     "Cluster19": "Endothelium | CD31, Podo",
+#     "Cluster20": "Pericytes | CD90, CD31(-)",
+#     "Cluster21": "VSMCs | aSMA",
+#     "Cluster22": "Immune | CD20",
+#     "Cluster23": "Immune - MP | CD45, CD206",
+#     "Cluster24": "Immune - T | CD3, CD4",
+#     "Cluster25": "Immune - T | CD3, CD8",
+#     "Cluster26": "Interstitial cells | IGFBP7"
+# }
 
 VAL_DICTS = {
   'Negative_Ion': {
@@ -141,6 +756,8 @@ class MaskExtractor:
         # self.centroid_to_id = {}
         # self.next_id = 1
         self.results = []
+        self._metadata_cache = {}
+        self._current_mask_ref = None
 
         # Assign masking function (mean for ratio / intensity images and percentage for prediction images)
         self.func = function
@@ -221,8 +838,9 @@ class MaskExtractor:
 
     def _process_instance_values(self, instance_metadata, val_2d, mask_name, val_name, metadata):
         """Quantify a single value image using precomputed instance metadata."""
+        val_2d_loaded = np.array(val_2d, dtype=float)
         for inst in instance_metadata:
-            val_crop = val_2d[inst['padded_slice']]
+            val_crop = val_2d_loaded[inst['padded_slice']]
             val_mask = val_crop[inst['instance_mask']]
             # total_pixel_count = int(val_mask.size)
             positive_mask = val_mask[(val_mask > 0) & np.isfinite(val_mask)]
@@ -251,11 +869,10 @@ class MaskExtractor:
         mask_metadata = mask_dictionary or {}
         value_metadata = value_dictionary or {}
 
-        if mask_image.ndim == 2:
-            num_mask_slices = 1
-        else:
-            num_mask_slices = mask_image.shape[0]
-        
+        if self._current_mask_ref is not mask_image:
+            self._metadata_cache = {}
+            self._current_mask_ref = mask_image
+
         if value_image.ndim == 2:
             num_value_slices = 1
             value_shape = value_image.shape
@@ -264,25 +881,28 @@ class MaskExtractor:
             value_shape = value_image.shape[1:]
 
         num_mask_slices = 1 if mask_image.ndim == 2 else mask_image.shape[0]
-        num_value_slices = 1 if value_image.ndim == 2 else value_image.shape[0]
 
         for mask_idx in range(num_mask_slices):
             mask_2d = mask_image if mask_image.ndim == 2 else mask_image[mask_idx]
-
-            if mask_2d.shape != value_shape:
-                zoom_factors = (value_shape[0] / mask_2d.shape[0], value_shape[1] / mask_2d.shape[1])
-                mask_2d = ndi.zoom(mask_2d, zoom_factors, order=0)
-
             slice_mask_meta = mask_metadata.get(mask_idx, {})
 
             # Lookup name and fall back to index if nonexistent in dictionary
             m_name = slice_mask_meta.get('slice_name', f"Mask_{mask_idx}")
-            
-            instance_metadata = self._build_instance_metadata(
-                mask_2d=mask_2d,
-                dilations=dilations,
-                min_instance_size=min_instance_size
-            )
+
+            cache_key = (metadata.get("tissue_id", "Tissue ID"), mask_dictionary[mask_idx].get('slice_name', f"Mask_{mask_idx}"), mask_dictionary[mask_idx].get('group',f'group_{mask_idx}'), value_shape, dilations, min_instance_size)
+            if cache_key in self._metadata_cache:
+                instance_metadata = self._metadata_cache[cache_key]
+            else:
+                if mask_2d.shape != value_shape:
+                    mask_2d = cv2.resize(mask_2d.astype(np.uint8), (value_shape[1], value_shape[0]), interpolation=cv2.INTER_NEAREST)
+
+                instance_metadata = self._build_instance_metadata(
+                    mask_2d=mask_2d,
+                    dilations=dilations,
+                    min_instance_size=min_instance_size
+                )
+                self._metadata_cache[cache_key] = instance_metadata
+
             if not instance_metadata:
                 continue
             
@@ -364,94 +984,92 @@ def _parse_mask_basename(basename, subgroups):
 
 
 if __name__ == "__main__":
-    try: 
-        extractor = MaskExtractor()
-        data_root = Path(CONFIG['base_dir'])  
 
-        for i, sample_dir in enumerate(data_root.iterdir()):
-            if not sample_dir.is_dir():
-                continue
+    extractor = MaskExtractor()
+    data_root = Path(CONFIG['base_dir'])  
 
-            tissue_id = sample_dir.name
-            experiment = METADATA[tissue_id]['condition']
+    for i, sample_dir in enumerate(data_root.iterdir()):
+        if not sample_dir.is_dir():
+            continue
 
-            masks_dir = sample_dir / CONFIG['mask_dir']
-            values_dir = sample_dir / CONFIG['values_dir']
+        tissue_id = sample_dir.name
+        experiment = METADATA[tissue_id]['condition']
 
-            mask_files = [m_file for m_file in masks_dir.glob('*.*tif*')
+        masks_dir = sample_dir / CONFIG['mask_dir']
+        values_dir = sample_dir / CONFIG['values_dir']
+
+        mask_files = [m_file for m_file in masks_dir.glob('*.*tif*')
             if m_file.name.lower().endswith(CONFIG['img_extensions'])]
 
-            val_files = [v_file for v_file in values_dir.glob('*.*tif*')
+        val_files = [v_file for v_file in values_dir.glob('*.*tif*')
             if v_file.name.lower().endswith(CONFIG['img_extensions'])]
 
-            value_images = []
-            for value_file in val_files:
-                value_lazy = _lazy_load_image(value_file, res_level=0)
-                val_basename = value_file.name.split('.')[0]
-                val_name = val_basename.split('-')[-2]
+        value_images = []
+        for value_file in val_files:
+            value_lazy = _lazy_load_image(value_file, res_level=0)
+            val_basename = value_file.name.split('.')[0]
+            val_name = val_basename.split('-')[-2]
 
-                if val_name not in VAL_DICTS and value_lazy.ndim == 2:
-                    VAL_DICTS[val_name] = {
-                        0: {
-                            'slice_name': val_name
-                        }
+            if val_name not in VAL_DICTS and value_lazy.ndim == 2:
+                VAL_DICTS[val_name] = {
+                    0: {
+                        'slice_name': val_name
                     }
+                }
 
-                if "Collagen" in val_basename:
-                    dilations = CONFIG['col_dilations']
-                else:
-                    dilations = CONFIG['int_dilations']
+            if "Collagen" in val_basename:
+                dilations = CONFIG['col_dilations']
+            else:
+                dilations = CONFIG['int_dilations']
 
-                value_images.append({
-                    'value_lazy': value_lazy,
-                    'val_basename': val_basename,
-                    'val_name': val_name,
-                    'dilations': dilations
-                })
+            value_images.append({
+                'value_lazy': value_lazy,
+                'val_basename': val_basename,
+                'val_name': val_name,
+                'dilations': dilations
+            })
 
-            for mask_file in tqdm.tqdm(mask_files[:], desc="Processing masks..."):
-                mask_image = tifffile.imread(mask_file) > 0
-                mask_basename = mask_file.name.split('.')[0]
-                mask_name = mask_basename.split('-')[-2]
+        for mask_file in tqdm.tqdm(mask_files[:], desc="Processing masks..."):
+            mask_image = tifffile.imread(mask_file) > 0
+            mask_basename = mask_file.name.split('.')[0]
+            mask_name = mask_basename.split('-')[-2]
 
-                if mask_name not in MASK_DICTS and mask_image.ndim == 2: 
-                    cluster_name, subgroup = _parse_mask_basename(mask_basename, CONFIG['subgroups'])
-                    MASK_DICTS[mask_name] = {
-                        0 : {
-                            'slice_name': cluster_name,
-                            'unit': UNIT_DICT[cluster_name],
-                            "group" : subgroup
-                        }
+            if mask_name not in MASK_DICTS and mask_image.ndim == 2: 
+                cluster_name, subgroup = _parse_mask_basename(mask_basename, CONFIG['subgroups'])
+                MASK_DICTS[mask_name] = {
+                    0 : {
+                        'slice_name': cluster_name,
+                        'unit': UNIT_DICT[cluster_name],
+                        "group" : subgroup
                     }
+                }
 
-                for cached_value in value_images:
-                    value_lazy = cached_value['value_lazy']
-                    val_basename = cached_value['val_basename']
-                    val_name = cached_value['val_name']
-                    dilations = cached_value['dilations']
+            for cached_value in value_images[:]:
+                value_lazy = cached_value['value_lazy']
+                val_basename = cached_value['val_basename']
+                val_name = cached_value['val_name']
+                dilations = cached_value['dilations']
 
-                    extractor.process_image(
-                        mask_image=mask_image,
-                        value_image=value_lazy,
-                        mask_dictionary=MASK_DICTS[mask_name],
-                        value_dictionary=VAL_DICTS[val_name],
-                        dilations=dilations,
-                        min_instance_size=CONFIG['min_instance_size'],
-                        tissue_id=tissue_id,
-                        condition=experiment
-                    )
+                extractor.process_image(
+                    mask_image=mask_image,
+                    value_image=value_lazy,
+                    mask_dictionary=MASK_DICTS[mask_name],
+                    value_dictionary=VAL_DICTS[val_name],
+                    dilations=dilations,
+                    min_instance_size=CONFIG['min_instance_size'],
+                    tissue_id=tissue_id,
+                    mask_name=mask_name,
+                    condition=experiment
+                )
 
-        df = extractor.return_dataframe()
-        df.to_csv(r"C:\Users\jvill\Downloads\output_long.csv", index=False)
-        feature_matrix = df.pivot(
-            index=['tissue_id', 'group', 'unit', 'condition', 'mask_name', 'centroid_y', 'centroid_x'], 
-            columns='val_name', 
-            values='value'
-        ).reset_index()
+    df = extractor.return_dataframe()
+    df.to_csv(r"/Users/jorgevillazon/Library/CloudStorage/OneDrive-UCSanDiego/integrated_pipeline/WSI_data/WSI_data/fib-output_long.csv", index=False)
+    feature_matrix = df.pivot(
+        index=['tissue_id', 'group', 'unit', 'condition', 'mask_name', 'centroid_y', 'centroid_x'], 
+        columns='val_name', 
+        values='value'
+    ).reset_index()
 
-        feature_matrix.to_csv(r"C:\Users\jvill\Downloads\output.csv", index=False)
+    feature_matrix.to_csv(r"/Users/jorgevillazon/Library/CloudStorage/OneDrive-UCSanDiego/integrated_pipeline/WSI_data/WSI_data/fib-output.csv", index=False)
 
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
+

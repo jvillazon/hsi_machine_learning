@@ -231,7 +231,7 @@ def run(df, group_cols, items_list, col_order, combine, filter_values, palette, 
 
 
 def main():
-    path = r"/Users/jorgevillazon/Library/CloudStorage/OneDrive-UCSanDiego/integrated_pipeline/WSI_data/WSI_data/CODEX_clusters-regions_masks_output_csv-test/output.csv"
+    path = r"/Users/jorgevillazon/Library/CloudStorage/OneDrive-UCSanDiego/integrated_pipeline/WSI_data/WSI_data/CODEX_clusters-regions_masks_output_csv-test/fib_output.csv"
     df = pd.read_csv(path)
     col_groups = {
         "ORR": ["Redox"],
@@ -316,41 +316,53 @@ def main():
     if 'Unnamed: 0' in df.columns:
         df = df.drop(columns=['Unnamed: 0'])
 
-    # df = df[df['Source_ID']=='S21']
-
-    # df = df[df['tissue_id']=='S21-K21_198_3']
-
     for new_col, source_cols in col_groups.items():
         df[new_col] = df[source_cols].mean(axis=1)
 
-    unit_order = [
-        "Cluster1",
-        "Cluster2",
-        #   "Cluster3",
-        "Cluster4",
-        "Cluster5",
-        "Cluster6",
-        "Cluster7",
-        "Cluster8",
-        "Cluster9",
-        #   "Cluster10",
-        "Cluster11",
-        "Cluster12",
-        #   "Cluster13",
-        #   "Cluster14",
-        "Cluster15",
-        "Cluster16",
-        "Cluster17",
-        "Cluster18",
-        "Cluster19",
-        "Cluster20",
-        "Cluster21",
-        "Cluster22",
-        "Cluster23",
-        "Cluster24",
-        "Cluster25",
-        "Cluster26"
-        ]
+    filter_cluster =[
+        "CFIB",
+        "CMFIB",
+        "IMFIB",
+        "OMFIB",
+        "pvFIB",
+        "IMpvFIB",
+        "dFIB",
+        "dIMFIB",
+        "dOMFIB",
+        "CMYOF",
+        "CMMYOF",
+        "pvMYOF",
+        "IMpvMYOF",
+    ]
+
+    # filter_cluster = [
+    #     # "Cluster1",
+    #     # "Cluster2",
+    #     # #   "Cluster3",
+    #     # "Cluster4",
+    #     # "Cluster5",
+    #     # "Cluster6",
+    #     # "Cluster7",
+    #     # "Cluster8",
+    #     # "Cluster9",
+    #     # #   "Cluster10",
+    #     # "Cluster11",
+    #     "Cluster12",
+    #     # #   "Cluster13",
+    #     # #   "Cluster14",
+    #     "Cluster15",
+    #     "Cluster16",
+    #     "Cluster17",
+    #     # "Cluster18",
+    #     # "Cluster19",
+    #     # "Cluster20",
+    #     # "Cluster21",
+    #     # "Cluster22",
+    #     # "Cluster23",
+    #     # "Cluster24",
+    #     # "Cluster25",
+    #     # "Cluster26"
+    #     ]
     # group_order = ['OC', 'IC', 'CM', 'OS', "IS"]
 
     group_order = ['Outer Cortex', 'Inner Cortex', 'Outer Stripe', 'Inner Stripe', 'Inner Medulla']
@@ -365,8 +377,10 @@ def main():
     # }
 
 
-    df['mask_name'] = pd.Categorical(df['mask_name'], categories=unit_order, ordered=True)
-    df['group'] = pd.Categorical(df['group'], categories=group_order, ordered=True)
+    df['mask_name'] = pd.Categorical(df['mask_name'], categories=filter_cluster, ordered=True)
+    if not df['group'].isna().all():
+        df['group'] = pd.Categorical(df['group'], categories=group_order, ordered=True)
+
     for i, val_col in enumerate(df.columns[7:]):
         df[val_col] = df[val_col].fillna(df.groupby(['group', 'mask_name', 'tissue_id'])[val_col].transform('median'))
 
@@ -396,8 +410,9 @@ def main():
         mol_path=os.path.join(workspace_dir, 'molecule_dataset', 'lipid_subtype_wn_61_test.npz'),
         wavenumber_start=wn_1, wavenumber_end=wn_2, num_samples=num_samp
     )
+    if not df['group'].isna().all():
+        df = df[(df.groupby(['mask_name', 'group'])['mask_name'].transform('size') / df.groupby('group')['group'].transform('size')) * 100 >= 7]
 
-    df = df[(df.groupby(['mask_name', 'group'])['mask_name'].transform('size') / df.groupby('mask_name')['mask_name'].transform('size')) * 100 >= 7]
     # df.rename(columns={'mask_name':'Unit', 'group': 'Group_ID'}, inplace=True)
 
     items_list = list(df.columns[7:])
@@ -430,10 +445,6 @@ def main():
         "Cluster25": "#fba173",
         "Cluster26": "#9913eb"
     }
-    display_units_boxplots = [
-        "Cluster8",
-        "Cluster9",
-    ]
 
     unit_display_names = {
         "Cluster1": "Glomeruli | Podo, CD31",
@@ -464,12 +475,44 @@ def main():
         "Cluster26": "Interstitial cells | IGFBP7"
     }
 
-    plot_df = df[(df[items_list] != 0).all(axis=1)].copy()
+    df = df[(df[items_list] != 0).all(axis=1)].copy()
 
     # scaler = StandardScaler()
     # plot_df[items_list]= scaler.fit_transform(plot_df[items_list])
 
-    plot_df[items_list] = plot_df[items_list].apply(lambda x: (x - x.mean()) / (x.std() + 1e-8))
+    df[items_list] = df[items_list].apply(lambda x: (x - x.mean()) / (x.std() + 1e-8))
+
+
+    ftu_map = {
+        "Cluster1": "GL",
+        "Cluster2": "PT",
+        "Cluster3": "PT",
+        "Cluster4": "PT",
+        "Cluster5": "PT",
+        "Cluster6": "TDL",
+        "Cluster7": "TDL",
+        "Cluster8": "TAL",
+        "Cluster9": "TAL",
+        "Cluster10": "TAL",
+        "Cluster11": "DCT",
+        "Cluster12": "DN",
+        "Cluster13": "DN",
+        "Cluster14": "DN",
+        "Cluster15": "DN",
+        "Cluster16": "DN",
+        "Cluster17": "DN",
+        "Cluster18": "Endo",
+        "Cluster19": "Endo",
+        "Cluster20": "Pericytes",
+        "Cluster21": "VSMCs",
+        "Cluster22": "Immune",
+        "Cluster23": "Immune",
+        "Cluster24": "Immune",
+        "Cluster25": "Immune",
+        "Cluster26": "Interstitial"
+    }
+    
+    # df['FTU'] = df['mask_name'].map(ftu_map)
 
     # visualizer.create_individual_barplots(
     #     df=plot_df, 
@@ -494,45 +537,17 @@ def main():
     # )
 
     # items_list = ['ORR']
-    output_dir = os.path.join('/Users/jorgevillazon/Library/CloudStorage/OneDrive-UCSanDiego/integrated_pipeline/new_plots_WSI', 'nongrouped_plots', 'all')
+    output_dir = os.path.join('/Users/jorgevillazon/Library/CloudStorage/OneDrive-UCSanDiego/integrated_pipeline/new_plots_WSI', 'nongroup_plots', 'fib')
     os.makedirs(output_dir,exist_ok=True)
     group_cols = ['mask_name']
-    filter_cluster = [
-        # "Cluster1",
-        "Cluster2",
-        #   "Cluster3",
-        "Cluster4",
-        "Cluster5",
-        # "Cluster6",
-        # "Cluster7",
-        # "Cluster8",
-        # "Cluster9",
-        # #   "Cluster10",
-        # "Cluster11",
-        # "Cluster12",
-        #   "Cluster13",
-        #   "Cluster14",
-        # "Cluster15",
-        # "Cluster16",
-        # "Cluster17",
-        # "Cluster18",
-        # "Cluster19",
-        # "Cluster20",
-        # "Cluster21",
-        # "Cluster22",
-        # "Cluster23",
-        # "Cluster24",
-        # "Cluster25",
-        # "Cluster26"
-        ]
     filter_units = [unit_display_names.get(c, c) for c in filter_cluster]
 
     order = {
         'group': group_order,
-        'mask_name': filter_cluster
+        'mask_name': filter_cluster,
+        # 'FTU': list(dict.fromkeys(df['FTU'].dropna().tolist(), None).keys())  # preserve original order
     }
 
-    df = plot_df
     run(df, group_cols=group_cols, items_list=items_list, col_order=order, combine=False, filter_values={'mask_name':filter_cluster},palette=PALETTE, output_dir=output_dir)
 
 if __name__ == "__main__":
