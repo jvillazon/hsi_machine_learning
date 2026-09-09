@@ -838,9 +838,9 @@ class MaskExtractor:
 
     def _process_instance_values(self, instance_metadata, val_2d, mask_name, val_name, metadata):
         """Quantify a single value image using precomputed instance metadata."""
-        val_2d_loaded = np.array(val_2d, dtype=float)
+        val_2d_array = np.array(val_2d, dtype=float)
         for inst in instance_metadata:
-            val_crop = val_2d_loaded[inst['padded_slice']]
+            val_crop = val_2d_array[inst['padded_slice']]
             val_mask = val_crop[inst['instance_mask']]
             # total_pixel_count = int(val_mask.size)
             positive_mask = val_mask[(val_mask > 0) & np.isfinite(val_mask)]

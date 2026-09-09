@@ -3,11 +3,11 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import matplotlib.patheffects as PathEffects
 import seaborn as sns
 import pingouin as pg
 from sklearn.preprocessing import StandardScaler
-import matplotlib.pyplot as plt
-import seaborn as sns
 import sys 
 
 
@@ -15,15 +15,12 @@ from pathlib import Path
 
 import re
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from core.hsi_visualizer import HSI_Visualizer
 
 # ------------------------- CONFIG ---------------------------------------
     # <- change me (or set df directly in main())
-GROUP_COLS  = ["mask_name"]            # 1 or 2 column names, e.g. ["treatment", "timepoint"]
-ITEMS_LIST  = ["gene_A", "gene_B"]     # value columns to test/plot, one per figure
-OUTPUT_DIR  = "violin_plots"
+GROUP_COLS  = ["unit"]            # 1 or 2 column names, e.g. ["treatment", "timepoint"]
 ALPHA       = 0.05
-COMBINE_TWO_GROUPS = True   # True: merge 2 group cols into one combined x-axis category
+COMBINE_TWO_GROUPS = False   # True: merge 2 group cols into one combined x-axis category
                             # False: facet by 2nd group col, separate stats per facet
 PALETTE     = "Set2"
 MAX_BRACKETS = None         # cap on significance brackets drawn per plot (None = show all).
@@ -34,6 +31,7 @@ FILTER_VALUES = {
     # "treatment": ["Ctrl", "DrugA"],   # keep only these values of a GROUP_COLS column
 }
 
+FONT_SCALE=2.5
 
 def stars(p):
     if p < 0.001:
@@ -43,6 +41,30 @@ def stars(p):
     if p < 0.05:
         return "*"
     return "ns"
+
+
+def format_p_value(p):
+    if pd.isna(p):
+        return ""
+    if p == 0 or p < 1e-15:
+        return "< 1e-15"
+    if p < 0.001:
+        return f"{p:.4e}"
+    return f"{p:.4f}"
+
+
+def get_legend_handles(order, palette):
+    """Generates patch handles for a custom legend matching the palette colors."""
+    handles = []
+    for i, cat in enumerate(order):
+        if isinstance(palette, dict):
+            color = palette.get(cat, "#333333")
+        elif isinstance(palette, (list, tuple)):
+            color = palette[i % len(palette)]
+        else:
+            color = sns.color_palette(palette, len(order))[i]
+        handles.append(mpatches.Patch(facecolor=color, edgecolor='black', linewidth=0.8, label=str(cat)))
+    return handles
 
 
 # ----------------------------- STATS -------------------------------------
@@ -71,12 +93,14 @@ def run_welch_games_howell(data, value_col, group_col, alpha=ALPHA):
 
 # ----------------------------- PLOTTING -----------------------------------
 
-def add_significance_brackets(ax, sig_pairs, order):
-    """sig_pairs: list of (group_a, group_b, p_value), already filtered to p < ALPHA."""
+def add_significance_brackets(ax, sig_pairs, order, initial_ymin=None, initial_ymax=None):
+    """sig_pairs: list of (group_a, group_b, p_value), already filtered to p < ALPHA.
+    Returns the maximum number of levels used."""
     if not sig_pairs:
-        return
+        return 0
 
-    ymin, ymax = ax.get_ylim()
+    ymin = initial_ymin if initial_ymin is not None else ax.get_ylim()[0]
+    ymax = initial_ymax if initial_ymax is not None else ax.get_ylim()[1]
     y_range = ymax - ymin
     y_start = ymax + 0.03 * y_range
     h = 0.08 * y_range
@@ -84,33 +108,77 @@ def add_significance_brackets(ax, sig_pairs, order):
     # shorter (adjacent-group) brackets stack first, at lower heights
     sig_pairs = sorted(sig_pairs, key=lambda t: abs(order.index(t[0]) - order.index(t[1])))
     if MAX_BRACKETS is not None:
+        if MAX_BRACKETS <= 0:
+            return 0
         sig_pairs = sig_pairs[:MAX_BRACKETS]
 
-    level = 0
+    levels_occupied = []  # list of lists of (left, right) intervals at each level
+    
+    max_level_used = 0
     for g1, g2, p in sig_pairs:
         x1, x2 = order.index(g1), order.index(g2)
-        y = y_start + level * (h * 1.4)
+        left, right = min(x1, x2), max(x1, x2)
+        
+        assigned_level = 0
+        while True:
+            if assigned_level >= len(levels_occupied):
+                levels_occupied.append([])
+            
+            overlap = False
+            for existing_left, existing_right in levels_occupied[assigned_level]:
+                if existing_left <= right and left <= existing_right:
+                    overlap = True
+                    break
+            
+            if not overlap:
+                levels_occupied[assigned_level].append((left, right))
+                break
+            assigned_level += 1
+            
+        y = y_start + assigned_level * (h * 1.4)
+        star_fs = max(8, int(10 * FONT_SCALE))
         ax.plot([x1, x1, x2, x2], [y, y + h * 0.3, y + h * 0.3, y], lw=1.2, c="black")
-        ax.text((x1 + x2) / 2, y + h * 0.3, stars(p), ha="center", va="bottom", fontsize=11)
-        level += 1
+        ax.text((x1 + x2) / 2, y + h * 0.3, stars(p), ha="center", va="bottom", fontsize=star_fs)
+        max_level_used = max(max_level_used, assigned_level + 1)
 
-    ax.set_ylim(ymin, y_start + level * (h * 1.4) + h * 2)
+    if initial_ymin is None and initial_ymax is None:
+        ax.set_ylim(ymin, y_start + max_level_used * (h * 1.4) + h * 2)
+        
+    return max_level_used
 
 
 
-def plot_single_grouping(df, value_col, group_order, group_col, ax=None, title=None, alpha=ALPHA, palette=PALETTE):
+def plot_single_grouping(df, value_col, group_order, group_col, ax=None, title=None, alpha=ALPHA, palette=PALETTE, add_brackets=True):
     sub = df[[value_col, group_col]].dropna()
-    # order = sorted(sub[group_col].unique().tolist(), key=str)
-    # order = list(dict.fromkeys(sub[group_col].dropna().tolist(), None).keys())  # preserve original order
-    order = [g for g in group_order if g in sub[group_col].unique()]
+    order = group_order
+
+    title_fs = max(9, int(12 * FONT_SCALE))
+    label_fs = max(9, int(11 * FONT_SCALE))
+    tick_fs  = max(6, int(8 * FONT_SCALE))
+    text_fs  = max(7, int(9 * FONT_SCALE))
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(max(4, 1.2 * len(order)), 5))
+        _, ax = plt.subplots(figsize=(max(4, 1.4 * len(order)), 5))
 
     sns.violinplot(data=sub, x=group_col, y=value_col, order=order,
                     palette=palette, cut=0, inner="box", ax=ax, hue=group_col,
-                    legend=False)
+                    dodge=False, legend=False)
 
+    # Overlay the mean value as a white point with black border
+    for idx, category in enumerate(order):
+        cat_data = sub.loc[sub[group_col] == category, value_col]
+        if len(cat_data) > 0:
+            mean_val = cat_data.mean()
+            ax.plot(idx, mean_val, marker='o', color='white', markeredgecolor='black', 
+                    markersize=6, zorder=4, label='mean' if idx == 0 else "")
+            
+            # Use a constant offset relative to the y-axis range instead of a percentage of the mean value
+            ymin, ymax = ax.get_ylim()
+            y_offset = 0.02 * (ymax - ymin)
+            text = ax.text(idx, mean_val + y_offset, f'{mean_val:.2f}', ha='center', va='bottom', fontsize=text_fs, zorder=4)
+            text.set_path_effects([
+                PathEffects.withStroke(linewidth=5, foreground='white')
+            ])
     ax.grid(True, which='major', axis='y', linestyle='--', alpha=0.7, zorder=0)
     ax.set_axisbelow(True)
     # sns.stripplot(data=sub, x=group_col, y=value_col, order=order,
@@ -119,25 +187,27 @@ def plot_single_grouping(df, value_col, group_order, group_col, ax=None, title=N
     anova, posthoc = run_welch_games_howell(sub, value_col, group_col, alpha)
 
     if anova is not None:
-        ax.set_title(f"{title or value_col}\nWelch's ANOVA p = {anova['p_unc']:.4g}",
-                     fontsize=11)
+        # ax.set_title(f"{title or value_col}\nWelch's ANOVA p = {anova['p_unc']:.4g}",
+        #              fontsize=title_fs)
         if posthoc is not None:
             sig_pairs = [(row["A"], row["B"], row["pval"])
                          for _, row in posthoc.iterrows() if row["pval"] < alpha]
-            add_significance_brackets(ax, sig_pairs, order)
+            if add_brackets:
+                add_significance_brackets(ax, sig_pairs, order)
     else:
-        ax.set_title(f"{title or value_col}\n(not enough groups/data for test)", fontsize=11)
+        ax.set_title(f"{title or value_col}\n(not enough groups/data for test)", fontsize=title_fs)
 
-    ax.set_xlabel(group_col)
-    ax.set_ylabel(value_col)
-    if len(order) > 4:
-        ax.tick_params(axis="x", rotation=30)
+    ax.set_xlabel("")
+    # ax.set_ylabel(value_col, fontsize=label_fs)
+    ax.set_ylabel("")
+    ax.tick_params(axis="y", labelsize=tick_fs)
+    ax.tick_params(axis="x", which="both", bottom=False, top=False, labelbottom=False)
     return anova, posthoc
 
 
 # ------------------------------- MAIN --------------------------------------
 
-def run(df, group_cols, items_list, col_order, combine, filter_values, palette, output_dir):
+def run(df, group_cols, value_cols, col_order, combine, filter_values, palette, add_brackets, output_dir):
     """Callable directly with an in-memory dataframe (skips DATA_PATH read)."""
     for col, keep_values in filter_values.items():
         df = df[df[col].isin(keep_values)]
@@ -145,12 +215,12 @@ def run(df, group_cols, items_list, col_order, combine, filter_values, palette, 
     anova_records = []
     posthoc_records = []
 
-    for item in items_list:
+    for item in value_cols:
         item_name = re.sub(r"[^\w\s]", "", item) 
         if len(group_cols) == 1:
             group_col = group_cols[0]
-            fig, ax = plt.subplots(figsize=(max(4, 1.2 * len(col_order[group_col])), 5))
-            anova, posthoc = plot_single_grouping(df, item, col_order[group_col], group_col, ax=ax, palette=palette)
+            fig, ax = plt.subplots(figsize=(max(4, 1. * len(col_order[group_col])), 7))
+            anova, posthoc = plot_single_grouping(df, item, col_order[group_col], group_col, ax=ax, palette=palette, add_brackets=add_brackets)
             fig.tight_layout()
             
             fig.savefig(os.path.join(output_dir, f"{item_name}.png"), dpi=200)
@@ -173,9 +243,10 @@ def run(df, group_cols, items_list, col_order, combine, filter_values, palette, 
                 d[combo_col] = d[g1].astype(str) + " | " + d[g2].astype(str)
                 
                 order = [f"{g1_val} | {g2_val}" for g1_val in col_order[g1] for g2_val in col_order[g2]]
-                fig, ax = plt.subplots(figsize=(max(4, 1.2 * len(order)), 5))
+                fig, ax = plt.subplots(figsize=(max(4, 1.4 * len(order)), 7))
                 anova, posthoc = plot_single_grouping(d, item, order, combo_col, ax=ax,
-                                                       title=f"{item} by {g1} & {g2}", palette=palette)
+                                                       title=f"{item} by {g1} & {g2}", palette=palette,
+                                                       add_brackets=add_brackets)
                 fig.tight_layout()
                 fig.savefig(os.path.join(output_dir, f"{item_name}.png"), dpi=200)
                 plt.close(fig)
@@ -189,20 +260,21 @@ def run(df, group_cols, items_list, col_order, combine, filter_values, palette, 
                     posthoc_records.append(posthoc)
 
             else:
-                # facets = sorted(df[g2].dropna().unique().tolist(), key=str)
-            
-                facets = col_order.get(g2, [])  # preserve original order
-                for fval in facets:
-                    if df[df[g2] == fval].empty:
-                        print(f"Warning: no data for {g2}={fval}, skipping facet.")
-                        facets.remove(fval)
-                fig, axes = plt.subplots(1, len(facets),
-                                          figsize=(5 * len(facets), 5), sharey=True)
+                facets = [fval for fval in col_order.get(g2, []) if not df[df[g2] == fval].empty]
+                fig, axes = plt.subplots(len(facets), 1,
+                                          figsize=(max(6, 1.4 * len(col_order.get(g1, []))), 5 * len(facets)),
+                                          sharey=True, sharex=True)
                 axes = [axes] if len(facets) == 1 else list(axes)
+                
+                # 1. Plot all subplots first without brackets to set correct shared y-limits
+                temp_results = []
                 for ax, fval in zip(axes, facets):
-                    sub= df.loc[df[g2] == fval]
+                    sub = df.loc[df[g2] == fval]
                     a, p = plot_single_grouping(sub, item, col_order.get(g1, []), g1, ax=ax,
-                                                 title=f"{item} | {g2}={fval}", palette=palette)
+                                                 title=f"{item} | {g2}={fval}", palette=palette,
+                                                 add_brackets=False)
+                    temp_results.append((ax, a, p, sub))
+                    
                     if a is not None:
                         anova_records.append({**a, "item": item, "group_by": g1,
                                                "facet": f"{g2}={fval}"})
@@ -211,8 +283,30 @@ def run(df, group_cols, items_list, col_order, combine, filter_values, palette, 
                         p["group_by"] = g1
                         p["facet"] = f"{g2}={fval}"
                         posthoc_records.append(p)
-                fig.tight_layout()
                 
+                # 2. Get initial shared y-limits
+                initial_ymin, initial_ymax = axes[0].get_ylim()
+                max_level_overall = 0
+                
+                # 3. Add brackets to each subplot based on the initial shared y-limits
+                if add_brackets:
+                    for ax, a, p, sub in temp_results:
+                        if p is not None:
+                            sig_pairs = [(row["A"], row["B"], row["pval"])
+                                         for _, row in p.iterrows() if row["pval"] < ALPHA]
+                            levels = add_significance_brackets(ax, sig_pairs, col_order.get(g1, []), 
+                                                               initial_ymin=initial_ymin, initial_ymax=initial_ymax)
+                            max_level_overall = max(max_level_overall, levels)
+                
+                # 4. Set final unified y-limits for the shared axis if brackets were drawn
+                if max_level_overall > 0:
+                    y_range = initial_ymax - initial_ymin
+                    y_start = initial_ymax + 0.03 * y_range
+                    h = 0.08 * y_range
+                    final_ymax = y_start + max_level_overall * (h * 1.4) + h * 2
+                    axes[0].set_ylim(initial_ymin, final_ymax)
+                
+                fig.tight_layout()
                 fig.savefig(os.path.join(output_dir, f"{item_name}.png"), dpi=200)
                 plt.close(fig)
 
@@ -224,6 +318,12 @@ def run(df, group_cols, items_list, col_order, combine, filter_values, palette, 
     )
     posthoc_df = pd.concat(posthoc_records, ignore_index=True) if posthoc_records else pd.DataFrame()
 
+    if not anova_df.empty and "p_unc" in anova_df.columns:
+        anova_df["p_unc_formatted"] = anova_df["p_unc"].apply(format_p_value)
+
+    if not posthoc_df.empty and "pval" in posthoc_df.columns:
+        posthoc_df["pval_formatted"] = posthoc_df["pval"].apply(format_p_value)
+
     anova_df.to_csv(os.path.join(output_dir, "welch_anova_results.csv"), index=False)
     posthoc_df.to_csv(os.path.join(output_dir, "games_howell_results.csv"), index=False)
     print(f"Done. Plots and stats saved to '{output_dir}/'")
@@ -231,193 +331,233 @@ def run(df, group_cols, items_list, col_order, combine, filter_values, palette, 
 
 
 def main():
-    path = r"/Users/jorgevillazon/Library/CloudStorage/OneDrive-UCSanDiego/integrated_pipeline/WSI_data/WSI_data/CODEX_clusters-regions_masks_output_csv-test/fib_output.csv"
+    path = r"/Users/jorgevillazon/Library/CloudStorage/OneDrive-UCSanDiego/integrated_pipeline/WSI_data/WSI_data/CODEX_clusters-regions_masks_output_csv-test/output.csv"
     df = pd.read_csv(path)
-    col_groups = {
-        "ORR": ["Redox"],
-        "CAR" :[
-            "CAR 18:2 (+H)",
-            "CAR 18:1 (+H)",
-            "CAR 18:0 (+H)"
-        ],
-        "CL" : [
-            "CL 72:8 (-H)", #1447.965 CL 72:8 (-H),
-            "CL 74:11 (-H)",# 1469.9493 CL 74:11 (-H)
-        ],
-        "LPL" : [
-            "LPC 16:0 (+H)",
-            "LPE 18:0 (-H)",
-            "LPI 18:0 (-H)",
-        ],
-        "PL (Sat)" :[
-            "PC 32:0 (+H)",
-            "PE 16:0_18:0 (-H)",
-            "PI 16:0_18:0 (-H)",
-        ],
-        "PL (MUFA)":[
-            "PC 16:0_18:1 (+H)",
-            "PC 18:0_18:1 (+H)",
-            "PA 36:1 (-H)",
-            "PS 18:0_18:1 (-H)",
-            "PI 34:1 (-H)",
-            "PI 18:0_18:1 (-H)",   
-        ] ,
-        "PL (AA)":[
-            "PE 16:0_20:4 (-H)",
-            "PE 18:1_20:4 (-H)",
-            "PE 18:1_20:3 (-H)",
-            "PS 16:0_20:4 (-H)",
-            "PS 18:0_20:4 (-H)",
-            "PI 16:0_20:4 (-H)",
-            "PI 18:1_20:3 (-H)",
-            "PC 35:4 (+H)",
-            "PC 36:5 (+H)",
-            "PC 18:0_20:4 (+H)",
-        ],
-        "PL (DHA)":[
-            "PE 16:0_22:6 (-H)",
-            "PG 18:1_22:6 (-H)",
-        ],
-        "PL (PUFA)":[
-            "PC O-38:5 (+H)",
-            "PC 38:5 (+H)",
-            "PC 46:9 (-CH3)",
-            "PE 49:9 (-H)",
-            "PC 48:9 (-CH3)",
-        ],
-
-        "SM":[
-            "SM 34:1;2O (+H)",
-            "SM 38:1;20 (+H)",
-            "SM 42:2;2O (+H)",
-            "SM 42:1;2O (+H)",
-            "SM 41:0;3O (+H)",
-            "SM 42:0;3O (+H)",
-            "SM 18:1;2O/16:0 (-CH3)"
-        ],
-        "SHexCer" : [
-            "SHexCer 40:1;3O (-H)",
-            "SHexCer 41:1;3O (-H)",
-            "SHexCer 42:2;3O (-H)",
-            "SHexCer 42:1;3O (-H)",
-            "SHexCer 42:0;3O (-H)",
-            "SHexCer 50:0;2O (-H)"
-        ],
-            "Lipid Unsat.": ["Lipid_Unsaturation"],
-            "Lipid/Protein" : ["Lipid_to_Protein"],
-
-        "Fib. Collagen": [
-            # 'Collagen',
-            "Collagen_Thickness",
-            "Collagen_Coherence"
-        ],
-
-    }
     if 'Unnamed: 0' in df.columns:
         df = df.drop(columns=['Unnamed: 0'])
 
-    for new_col, source_cols in col_groups.items():
-        df[new_col] = df[source_cols].mean(axis=1)
+    # For isolating a specific tissue
+    # df.loc[df['tissue_id']== 'S24-K21_273_3', 'Redox'] = np.nan
 
-    filter_cluster =[
-        "CFIB",
-        "CMFIB",
-        "IMFIB",
-        "OMFIB",
-        "pvFIB",
-        "IMpvFIB",
-        "dFIB",
-        "dIMFIB",
-        "dOMFIB",
-        "CMYOF",
-        "CMMYOF",
-        "pvMYOF",
-        "IMpvMYOF",
-    ]
 
-    # filter_cluster = [
-    #     # "Cluster1",
-    #     # "Cluster2",
-    #     # #   "Cluster3",
-    #     # "Cluster4",
-    #     # "Cluster5",
-    #     # "Cluster6",
-    #     # "Cluster7",
-    #     # "Cluster8",
-    #     # "Cluster9",
-    #     # #   "Cluster10",
-    #     # "Cluster11",
-    #     "Cluster12",
-    #     # #   "Cluster13",
-    #     # #   "Cluster14",
-    #     "Cluster15",
-    #     "Cluster16",
-    #     "Cluster17",
-    #     # "Cluster18",
-    #     # "Cluster19",
-    #     # "Cluster20",
-    #     # "Cluster21",
-    #     # "Cluster22",
-    #     # "Cluster23",
-    #     # "Cluster24",
-    #     # "Cluster25",
-    #     # "Cluster26"
-    #     ]
-    # group_order = ['OC', 'IC', 'CM', 'OS', "IS"]
+    # col_groups = {
+    #     "ORR": ["Redox"],
+    #     "CAR" :[
+    #         "CAR 18:2 (+H)",
+    #         "CAR 18:1 (+H)",
+    #         "CAR 18:0 (+H)"
+    #     ],
+    #     "CL" : [
+    #         "CL 72:8 (-H)", #1447.965 CL 72:8 (-H),
+    #         "CL 74:11 (-H)",# 1469.9493 CL 74:11 (-H)
+    #     ],
+    #     "LPL" : [
+    #         "LPC 16:0 (+H)",
+    #         "LPE 18:0 (-H)",
+    #         "LPI 18:0 (-H)",
+    #     ],
+    #     "PL (Sat)" :[
+    #         "PC 32:0 (+H)",
+    #         "PE 16:0_18:0 (-H)",
+    #         "PI 16:0_18:0 (-H)",
+    #     ],
+    #     "PL (MUFA)":[
+    #         "PC 16:0_18:1 (+H)",
+    #         "PC 18:0_18:1 (+H)",
+    #         "PA 36:1 (-H)",
+    #         "PS 18:0_18:1 (-H)",
+    #         "PI 34:1 (-H)",
+    #         "PI 18:0_18:1 (-H)",   
+    #     ] ,
+    #     "PL (AA)":[
+    #         "PE 16:0_20:4 (-H)",
+    #         "PE 18:1_20:4 (-H)",
+    #         "PE 18:1_20:3 (-H)",
+    #         "PS 16:0_20:4 (-H)",
+    #         "PS 18:0_20:4 (-H)",
+    #         "PI 16:0_20:4 (-H)",
+    #         "PI 18:1_20:3 (-H)",
+    #         "PC 35:4 (+H)",
+    #         "PC 36:5 (+H)",
+    #         "PC 18:0_20:4 (+H)",
+    #     ],
+    #     "PL (DHA)":[
+    #         "PE 16:0_22:6 (-H)",
+    #         "PG 18:1_22:6 (-H)",
+    #     ],
+    #     "PL (PUFA)":[
+    #         "PC O-38:5 (+H)",
+    #         "PC 38:5 (+H)",
+    #         "PC 46:9 (-CH3)",
+    #         "PE 49:9 (-H)",
+    #         "PC 48:9 (-CH3)",
+    #     ],
 
-    group_order = ['Outer Cortex', 'Inner Cortex', 'Outer Stripe', 'Inner Stripe', 'Inner Medulla']
-    df = df.replace({'Middle Cortex': 'Outer Cortex', 'Juxtamedullary Cortex': 'Inner Cortex', 'Cluster3':'Cluster4', 'Cluster13': 'Cluster12', 'Cluster14': 'Cluster12', 'Cluster10': 'Cluster9'} )
+    #     "SM":[
+    #         "SM 34:1;2O (+H)",
+    #         "SM 38:1;20 (+H)",
+    #         "SM 42:2;2O (+H)",
+    #         "SM 42:1;2O (+H)",
+    #         "SM 41:0;3O (+H)",
+    #         "SM 42:0;3O (+H)",
+    #         "SM 18:1;2O/16:0 (-CH3)"
+    #     ],
+    #     "SHexCer" : [
+    #         "SHexCer 40:1;3O (-H)",
+    #         "SHexCer 41:1;3O (-H)",
+    #         "SHexCer 42:2;3O (-H)",
+    #         "SHexCer 42:1;3O (-H)",
+    #         "SHexCer 42:0;3O (-H)",
+    #         "SHexCer 50:0;2O (-H)"
+    #     ],
+    #         "Lipid Unsat.": ["Lipid_Unsaturation"],
+    #         "Lipid/Protein" : ["Lipid_to_Protein"],
 
-    # group_map ={
-    #     'C1': 'Outer Cortex',
-    #     'C2': 'Inner Cortex',
-    #     'C3': 'CM Boundary',
-    #     'CM': 'Outer Stripe',
-    #     'M': 'Inner Stripe'
+    #     "Fib. Collagen": [
+    #         # 'Collagen',
+    #         "Collagen_Thickness",
+    #         "Collagen_Coherence"
+    #     ],
+
     # }
+    # for new_col, source_cols in col_groups.items():
+    #     df[new_col] = df[source_cols].mean(axis=1)
 
 
-    df['mask_name'] = pd.Categorical(df['mask_name'], categories=filter_cluster, ordered=True)
-    if not df['group'].isna().all():
-        df['group'] = pd.Categorical(df['group'], categories=group_order, ordered=True)
+    filter_cluster = [
+        # "Cluster1",
+        "Cluster2",
+        #   "Cluster3",
+        "Cluster4",
+        "Cluster5",
+        # "Cluster6",
+        # "Cluster7",
+        # "Cluster8",
+        # "Cluster9",
+        #   "Cluster10",
+        # "Cluster11",
+        # "Cluster12",
+        #   "Cluster13",
+        #   "Cluster14",
+        # "Cluster15",
+        # "Cluster16",
+        # "Cluster17",
+        # "Cluster18",
+        # "Cluster19",
+        # "Cluster20",
+        # "Cluster21",
+        # "Cluster22",
+        # "Cluster23",
+        # "Cluster24",
+        # "Cluster25",
+        # "Cluster26"
+        ]
 
-    for i, val_col in enumerate(df.columns[7:]):
-        df[val_col] = df[val_col].fillna(df.groupby(['group', 'mask_name', 'tissue_id'])[val_col].transform('median'))
 
-    # df[df.columns[7:]] = df[df.columns[7:]].fillna(0)
+    # group_order = [
+    #     "CFIB",
+    #     "CMFIB",
+    #     "IMFIB",
+    #     "OMFIB",
+    #     "pvFIB",
+    #     "dFIB",
+    #     "dIMFIB",
+    #     "dOMFIB",
+    #     "CMYOF",
+    #     "pvMYOF",
+    #     "IMpvMYOF",
+    # ]
+    group_order = [
+        'Outer Cortex', 
+        'Inner Cortex', 
+        'Outer Stripe', 
+        'Inner Stripe', 
+        'Inner Medulla'
+        ]
 
-    # df['Group_ID'] = df['Group_ID'].map(group_map)
-    # df.drop(columns=['Redox', 'Collagen_Coherence', 'Collagen_Thickness'],inplace=True)
+    # Replace mistaken group names
+    # df = df.replace({"CMMYOF": "CMYOF", "IMpvFIB": "IMpvMYOF"})
 
-    condition_tdl = (df['mask_name'].isin(['Cluster6', 'Cluster7']) & df['group'].isin(['Outer Cortex', 'Inner Cortex']))
-    df.loc[condition_tdl, 'group'] = 'Outer Stripe'
+    unit_clusters = {
+    "Cluster1": "Glomeruli | Podo, CD31",
+    "Cluster2": "PT | LRP2",
+    "Cluster3": "PT | LRP2, AQP1, CD90",
+    "Cluster4": "PT | THY1",
+    "Cluster5": "PT | PROM1/VCAM1",
+    "Cluster6": "TDL | AQP1, Cyto8 (N1)",
+    "Cluster7": "TDL | AQP1, Cyto8 (N2)",
+    "Cluster8": "TAL | NaK/UMOD",
+    "Cluster9": "TAL | UMOD",
+    "Cluster10": "TAL | UMOD",
+    "Cluster11": "DCT | SLC12a3",
+    "Cluster12": "DN | Cyto8",
+    "Cluster13": "DN | Cyto8",
+    "Cluster14": "DN | Cyto8",
+    "Cluster15": "DN | Cyto8, Bcat",
+    "Cluster16": "DN | Cyto8, Bcat, Ecad",
+    "Cluster17": "DN | Cyto8, Ecad",
+    "Cluster18": "Endothelium | CD31",
+    "Cluster19": "Endothelium | CD31, Podo",
+    "Cluster20": "Pericytes | CD90, CD31(-)",
+    "Cluster21": "VSMCs | aSMA",
+    "Cluster22": "Immune | CD20",
+    "Cluster23": "Immune - MP | CD45, CD206",
+    "Cluster24": "Immune - T | CD3, CD4",
+    "Cluster25": "Immune - T | CD3, CD8",
+    "Cluster26": "Interstitial cells | IGFBP7"
+}
 
-    condition_pt = (df['mask_name'].isin(['Cluster2', 'Cluster4', 'Cluster5']) & df['group'].isin(['Inner Stripe']))
-    df.loc[condition_pt, 'group'] = 'Outer Stripe'
-
-    condition_tal = (df['mask_name'].isin(['Cluster8', 'Cluster9']) & df['group'].isin(['Inner Medulla']))
-    df.loc[condition_tal, 'group'] = 'Inner Stripe'
-
-    condition_glom = (df['mask_name'].isin(['Cluster1']) & df['group'].isin(['Outer Stripe']))
-    df.loc[condition_glom, 'group'] = 'Inner Cortex'
-
-    workspace_dir = str(Path.cwd())
-    wn_1 =2700
-    wn_2 = 3100
-    num_samp = 61
-
-    visualizer = HSI_Visualizer(
-        mol_path=os.path.join(workspace_dir, 'molecule_dataset', 'lipid_subtype_wn_61_test.npz'),
-        wavenumber_start=wn_1, wavenumber_end=wn_2, num_samples=num_samp
+    df = df.replace({
+        'Middle Cortex': 'Outer Cortex', 
+        'Juxtamedullary Cortex': 'Inner Cortex', 
+        'Cluster3':'Cluster4',
+        unit_clusters.get('Cluster3') : unit_clusters.get('Cluster4'),
+        'Cluster13': 'Cluster12', 
+        unit_clusters.get('Cluster13') : unit_clusters.get('Cluster12'),
+        'Cluster14': 'Cluster12', 
+        unit_clusters.get('Cluster14') : unit_clusters.get('Cluster12'),
+        'Cluster10': 'Cluster9', 
+        unit_clusters.get('Cluster10') : unit_clusters.get('Cluster9'),
+        'Cluster7':'Cluster6',
+        unit_clusters.get('Cluster7') : 'TDL | AQP1, Cyto8',
+        unit_clusters.get('Cluster6') : 'TDL | AQP1, Cyto8',
+        } 
     )
-    if not df['group'].isna().all():
-        df = df[(df.groupby(['mask_name', 'group'])['mask_name'].transform('size') / df.groupby('group')['group'].transform('size')) * 100 >= 7]
+    if 'group' in df.columns and not df['group'].isna().all():
+        df['group'] = pd.Categorical(df['group'], categories=group_order, ordered=True)
+        if "Inner Cortex" in df['group'].unique():
+            unit_size = df.groupby('mask_name')['mask_name'].transform('count')
+            unit_group_size = df.groupby(['group', 'mask_name'])['mask_name'].transform('count')
+            df['Percentage'] = (unit_group_size / unit_size) * 100
 
-    # df.rename(columns={'mask_name':'Unit', 'group': 'Group_ID'}, inplace=True)
+            df = df[df['Percentage'] >= 7].copy()
+            df = df.drop(columns=['Percentage'])
 
-    items_list = list(df.columns[7:])
+    value_cols = df.select_dtypes(include='number').columns.tolist()
+    value_cols = [val_col for val_col in value_cols if 'centroid' not in val_col]
 
-    unit_colors= {
+    df = df[(df[value_cols] != 0).all(axis=1)].copy()
+    df[value_cols] = df.groupby(['tissue_id'])[value_cols].transform(lambda x: (x - x.mean()) / (x.std() + 1e-8))
+
+            
+    # for i, val_col in enumerate(value_cols):
+    #     df[val_col] = df[val_col].fillna(df.groupby(['group', 'mask_name', 'tissue_id'])[val_col].transform('median'))
+    if 'group' in df.columns:
+        if set(['Outer Cortex', 'Inner Cortex', 'Outer Stripe', 'Inner Stripe', 'Inner Medulla']) & set(list(df['group'].unique())):    
+            condition_tdl = (df['mask_name'].isin(['Cluster6', 'Cluster7']) & df['group'].isin(['Outer Cortex', 'Inner Cortex']))
+            df.loc[condition_tdl, 'group'] = 'Outer Stripe'
+
+            condition_pt = (df['mask_name'].isin(['Cluster2', 'Cluster4', 'Cluster5']) & df['group'].isin(['Inner Stripe']))
+            df.loc[condition_pt, 'group'] = 'Outer Stripe'
+
+            condition_tal = (df['mask_name'].isin(['Cluster8', 'Cluster9']) & df['group'].isin(['Inner Medulla']))
+            df.loc[condition_tal, 'group'] = 'Inner Stripe'
+
+            condition_glom = (df['mask_name'].isin(['Cluster1']) & df['group'].isin(['Outer Stripe']))
+            df.loc[condition_glom, 'group'] = 'Inner Cortex'
+
+
+    cluster_colors= {
         "Cluster1": "#eb2d13",
         "Cluster2": "#0a8416",
         "Cluster3": "#10c922",
@@ -446,21 +586,22 @@ def main():
         "Cluster26": "#9913eb"
     }
 
-    unit_display_names = {
+
+    unit_clusters = {
         "Cluster1": "Glomeruli | Podo, CD31",
         "Cluster2": "PT | LRP2",
         "Cluster3": "PT | LRP2, AQP1, CD90",
         "Cluster4": "PT | THY1",
         "Cluster5": "PT | PROM1/VCAM1",
-        "Cluster6": "TDL | AQP1, Cyto8 (N1)",
-        "Cluster7": "TDL | AQP1, Cyto8 (N2)",
+        "Cluster6": "TDL | AQP1, Cyto8",
+        "Cluster7": "TDL | AQP1, Cyto8",
         "Cluster8": "TAL | NaK/UMOD",
         "Cluster9": "TAL | UMOD",
         "Cluster10": "TAL | UMOD",
         "Cluster11": "DCT | SLC12a3",
-        "Cluster12": "DN | Cyto8 (N1)",
+        "Cluster12": "DN | Cyto8",
         "Cluster13": "DN | Cyto8",
-        "Cluster14": "DN | Cyto8 (N3)",
+        "Cluster14": "DN | Cyto8",
         "Cluster15": "DN | Cyto8, Bcat",
         "Cluster16": "DN | Cyto8, Bcat, Ecad",
         "Cluster17": "DN | Cyto8, Ecad",
@@ -474,14 +615,6 @@ def main():
         "Cluster25": "Immune - T | CD3, CD8",
         "Cluster26": "Interstitial cells | IGFBP7"
     }
-
-    df = df[(df[items_list] != 0).all(axis=1)].copy()
-
-    # scaler = StandardScaler()
-    # plot_df[items_list]= scaler.fit_transform(plot_df[items_list])
-
-    df[items_list] = df[items_list].apply(lambda x: (x - x.mean()) / (x.std() + 1e-8))
-
 
     ftu_map = {
         "Cluster1": "GL",
@@ -506,49 +639,65 @@ def main():
         "Cluster20": "Pericytes",
         "Cluster21": "VSMCs",
         "Cluster22": "Immune",
-        "Cluster23": "Immune",
-        "Cluster24": "Immune",
-        "Cluster25": "Immune",
+        "Cluster23": "MP",
+        "Cluster24": "T",
+        "Cluster25": "T",
         "Cluster26": "Interstitial"
     }
     
-    # df['FTU'] = df['mask_name'].map(ftu_map)
+    df['FTU'] = df['mask_name'].map(ftu_map)
 
-    # visualizer.create_individual_barplots(
-    #     df=plot_df, 
-    #     value_col=None,        # Not needed for wide format
-    #     grouping_col=None,     # Signal that we are using Wide format
-    #     items_list=items_list, # The column names
-    #     output_dir=output_dir,
-    #     data_type='Ratio',
-    #     units_to_display=display_units_boxplots,
-    #     consolidate_Group_IDs=False,
-    #     plot_type='violin',
-    #     sig_style='stars_only' if len(display_units_boxplots) > 6 else 'brackets',
-    #     show_plots=False,
-    #     display_name_map=unit_display_names,
-    #     unit_color_map=unit_colors,
-    #     unit_display_map=unit_display_names,
-    #     subgroup_list = group_order,
-    #     remove_outliers=True,
-    #     show_scatter=True,
-    #     show_empty_subgroups=True,
-    #     orientation='vertical'
-    # )
+    # fib_map = {
+    #     "CFIB": 'FIB',
+    #     "CMFIB": 'FIB',
+    #     "IMFIB": 'FIB',
+    #     "OMFIB": 'FIB',
+    #     "pvFIB": 'FIB',
+    #     "dFIB": 'dFIB',
+    #     "dIMFIB": 'dFIB',
+    #     "dOMFIB": 'dFIB',
+    #     "CMYOF": 'MYOF',
+    #     "pvMYOF": 'MYOF',
+    #     "IMpvMYOF": 'MYOF'
+    
+    # }
+    # df['fib'] = df['group'].map(fib_map)
 
-    # items_list = ['ORR']
-    output_dir = os.path.join('/Users/jorgevillazon/Library/CloudStorage/OneDrive-UCSanDiego/integrated_pipeline/new_plots_WSI', 'nongroup_plots', 'fib')
-    os.makedirs(output_dir,exist_ok=True)
-    group_cols = ['mask_name']
-    filter_units = [unit_display_names.get(c, c) for c in filter_cluster]
 
+
+    filter_units = [unit_clusters.get(c, c) for c in filter_cluster]
+    cluster_colors = [cluster_colors.get(c, c) for c in filter_cluster]
+    unit_colors = dict(zip(filter_units, cluster_colors))
+
+    group_cols = ["unit", 'group']
+
+    
     order = {
         'group': group_order,
         'mask_name': filter_cluster,
-        # 'FTU': list(dict.fromkeys(df['FTU'].dropna().tolist(), None).keys())  # preserve original order
+        'unit': filter_units,
+        'FTU': ['GL', 'PT', 'TDL', 'TAL', 'DCT', 'DN', 'Endo', 'Pericytes', 'VSMCs', 'Immune', 'MP', 'T', 'Interstitial'],  # preserve original order
+        # 'fib': ['FIB', 'dFIB', 'MYOF']
     }
+    filter_values={
+        'unit':filter_units, 
+        # 'group': ['CFIB', 'CMFIB', 'IMFIB', 'OMFIB', 'pvFIB', 'dFIB', 'dIMFIB', 'dOMFIB']
+        }
 
-    run(df, group_cols=group_cols, items_list=items_list, col_order=order, combine=False, filter_values={'mask_name':filter_cluster},palette=PALETTE, output_dir=output_dir)
+    output_dir = os.path.join('/Users/jorgevillazon/Library/CloudStorage/OneDrive-UCSanDiego/integrated_pipeline/final_plots', 'WSI', f"{group_cols[0]}_{group_cols[1]}" if len(group_cols)==2 else group_cols[0], 'pt_nobrackets')
+    os.makedirs(output_dir,exist_ok=True)
+
+
+    add_brackets = True
+    run(df, 
+    group_cols=group_cols,
+    value_cols=value_cols, 
+    col_order=order, 
+    combine=COMBINE_TWO_GROUPS, 
+    filter_values=filter_values,
+    palette=unit_colors if group_cols[0] == 'unit' else PALETTE, 
+    add_brackets=add_brackets,
+    output_dir=output_dir)
 
 if __name__ == "__main__":
     main()

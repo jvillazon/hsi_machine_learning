@@ -8,19 +8,24 @@ import glob
 import tifffile
 
 base_directories =[
-    r"E:\Data\Jorge\01_HumanKidney_HuBMAP\dataset\processed data"
+    # r"/Users/jorgevillazon/Downloads/A2/HSI/hSRS",
+    # r"/Users/jorgevillazon/Downloads/A1/HSI/hSRS",
+    # r"/Users/jorgevillazon/Downloads/A3/HSI/hSRS",
+    # r"/Users/jorgevillazon/Downloads/B/HSI/hSRS",
+    # r"/Users/jorgevillazon/Downloads/C/HSI/hSRS",
+    r"/Users/jorgevillazon/Downloads/D/hSRS"
 ]
 
 CONFIG = {
-    'num_samples' : 61, # num channels in HSI
+    'num_samples' : 80, # num channels in HSI
     'wn_1' : 2700, # first cm-1
     'wn_2' : 3100, # last cm-1
-    'background_csv': r'C:\Users\jvill\Documents\GitHub\hsi_machine_learning\unprocessed_data\water_HSI_71.csv', # dirctory to background .csv
+    'background_csv': r'/Users/jorgevillazon/Documents/GitHub/hsi_machine_learning/unprocessed_data/water_HSI_76.csv', # dirctory to background .csv
     'quant' : True, # create macromolecule images
     'flip' : True, # reverse order to match cm-1
     'bg_subtract' : True, # subtract background 
     'show_plots' : True, # show plots of background subtraction and peak assignment (debuging)
-    'shift': 20, # determined by plotted overlap of peaks with known annotations
+    'shift': 12, # determined by plotted overlap of peaks with known annotations
 }
 
 
@@ -169,11 +174,11 @@ def main():
                         plt.legend(['Original/Standardized Spectrum'])
                     plt.show()
 
-                if CONFIG['quant'] and CONFIG['bg_subtract']:
-                    spectral_std = spectra_standard.std(axis=1)
-                    threshold = np.mean(spectra_standard[:, :ch_start].std(axis=1)) + 2 * np.std(spectra_standard[:, :ch_start].std(axis=1))
-                    valid_mask = spectral_std > threshold
-                    spectra_standard[~valid_mask] = 0  # Zero out low-variance spectra
+                # if CONFIG['quant'] and CONFIG['bg_subtract']:
+                #     spectral_std = spectra_standard.std(axis=1)
+                #     threshold = np.mean(spectra_standard[:, :ch_start].std(axis=1)) + 2 * np.std(spectra_standard[:, :ch_start].std(axis=1))
+                #     valid_mask = spectral_std > threshold
+                #     spectra_standard[~valid_mask] = 0  # Zero out low-variance spectra
 
                 spectra = spectra_standard - np.median(spectra_standard[:, :ch_start], axis=1)[:, np.newaxis]
                 
