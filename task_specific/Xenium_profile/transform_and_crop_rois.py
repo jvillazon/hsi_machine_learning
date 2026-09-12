@@ -19,7 +19,7 @@ import json
 import time
 import argparse
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple, Union
+from typing import Optional, Dict, List, Tuple, Union, Any
 import numpy as np
 import pandas as pd
 import tifffile
@@ -262,7 +262,16 @@ def transform_and_crop_rois(
     image_path: str = "",
     generate_mask: bool = True,
     export_format: str = "both",  # 'parquet', 'csv', 'both'
-) -> Tuple[pd.DataFrame, Dict[str, str]]:
+    split_mosaic: bool = False,
+    split_tile_dir: Optional[str] = None,
+    split_grid_rows: Optional[int] = None,
+    split_grid_cols: Optional[int] = None,
+    split_tile_height: Optional[int] = None,
+    split_tile_width: Optional[int] = None,
+    split_overlap_percent: float = 5.0,
+    split_order: str = "snake",
+    split_coord_mode: str = "both",
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Apply transform JSON to cell coordinates, crop to ROI bounds, and export
     GUI-compatible Parquet/CSV and optional mask TIFF. Supports inverse transforms.
@@ -508,6 +517,34 @@ def transform_and_crop_rois(
             }, f, indent=2)
         saved_files["legend"] = legend_path
 
+    # 7. Optional: Split into mosaic subsections
+    if split_mosaic:
+        print("\nSplitting transformed ROI into mosaic subsections...")
+        from task_specific.Xenium_profile.split_roi_mosaic_subsections import split_roi_table_into_mosaic_tiles
+
+        split_out_dir = Path(output_prefix).parent / f"{Path(output_prefix).stem}_subsections"
+        source_pq = saved_files.get("parquet") or (f"{base}_transformed_rois.parquet")
+
+        split_manifest = split_roi_table_into_mosaic_tiles(
+            input_path=source_pq,
+            output_dir=split_out_dir,
+            output_prefix=Path(output_prefix).stem,
+            tile_dir=split_tile_dir,
+            grid_rows=split_grid_rows,
+            grid_cols=split_grid_cols,
+            tile_height=split_tile_height,
+            tile_width=split_tile_width,
+            overlap_percent=split_overlap_percent,
+            order=split_order,
+            coord_mode=split_coord_mode,
+            crop_mode=crop_mode,
+            sample_id=sample_id,
+            export_format=export_format,
+            generate_masks=generate_mask,
+            pixel_size_um=pixel_size,
+        )
+        saved_files["split_manifest"] = split_manifest
+
     print(f"Step 3 completed in {time.time() - t0:.2f}s.")
     return df_gui_rois, saved_files
 
@@ -536,7 +573,20 @@ def main():
     parser.add_argument("--generate-mask", action="store_true", default=True, help="Also generate transformed ROI mask TIFF")
     parser.add_argument("--format", choices=["parquet", "csv", "both"], default="both", help="Export format")
 
+    # Optional mosaic tile splitting arguments
+    parser.add_argument("--split-mosaic", action="store_true", default=False, help="Automatically split output into mosaic subsections")
+    parser.add_argument("--split-tile-dir", default=None, help="Directory containing unstitched TIFF tiles for automatic discovery")
+    parser.add_argument("--split-grid-rows", type=int, default=None, help="Mosaic grid rows")
+    parser.add_argument("--split-grid-cols", type=int, default=None, help="Mosaic grid columns")
+    parser.add_argument("--split-tile-height", type=int, default=None, help="Tile height in pixels")
+    parser.add_argument("--split-tile-width", type=int, default=None, help="Tile width in pixels")
+    parser.add_argument("--split-overlap-percent", type=float, default=5.0, help="Overlap percentage between tiles")
+    parser.add_argument("--split-order", choices=["snake", "raster"], default="snake", help="Tile acquisition order")
+    parser.add_argument("--split-coord-mode", choices=["local", "global", "both"], default="both", help="Coordinate mode for split tables")
+
     args = parser.parse_args()
+
+    split_mosaic = args.split_mosaic or bool(args.split_tile_dir) or bool(args.split_grid_rows and args.split_grid_cols)
 
     transform_and_crop_rois(
         input_path=args.input,
@@ -557,6 +607,15 @@ def main():
         image_path=args.image_path,
         generate_mask=args.generate_mask,
         export_format=args.format,
+        split_mosaic=split_mosaic,
+        split_tile_dir=args.split_tile_dir,
+        split_grid_rows=args.split_grid_rows,
+        split_grid_cols=args.split_grid_cols,
+        split_tile_height=args.split_tile_height,
+        split_tile_width=args.split_tile_width,
+        split_overlap_percent=args.split_overlap_percent,
+        split_order=args.split_order,
+        split_coord_mode=args.split_coord_mode,
     )
 
 

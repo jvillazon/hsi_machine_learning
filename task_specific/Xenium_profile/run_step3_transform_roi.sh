@@ -38,11 +38,16 @@ FLIP_Y="${FLIP_Y:-false}"
 # Use inverse transformation matrix (e.g. matrix_xy_px_inv or np.linalg.inv)
 USE_INVERSE="${USE_INVERSE:-true}"
 
-# Output format: 'parquet', 'csv', or 'both'
-FORMAT="${FORMAT:-both}"
-
 # Generate transformed ROI labeled mask TIFF directly on target canvas
 GENERATE_MASK="${GENERATE_MASK:-true}"
+
+# Optional: Split transformed ROI into mosaic subsections matching an N x M tile grid
+SPLIT_MOSAIC="${SPLIT_MOSAIC:-false}"
+SPLIT_TILE_DIR="${SPLIT_TILE_DIR:-}"
+SPLIT_GRID_ROWS="${SPLIT_GRID_ROWS:-}"
+SPLIT_GRID_COLS="${SPLIT_GRID_COLS:-}"
+SPLIT_OVERLAP_PERCENT="${SPLIT_OVERLAP_PERCENT:-5.0}"
+SPLIT_COORD_MODE="${SPLIT_COORD_MODE:-both}"
 # ------------------------------------------------------------------------------
 
 # Detect Python interpreter
@@ -108,6 +113,15 @@ fi
 
 if [ "$GENERATE_MASK" = "true" ]; then
     ARGS+=(--generate-mask)
+fi
+
+if [ "$SPLIT_MOSAIC" = "true" ] || [ -n "$SPLIT_TILE_DIR" ] || [ -n "$SPLIT_GRID_ROWS" ]; then
+    ARGS+=(--split-mosaic)
+    if [ -n "$SPLIT_TILE_DIR" ]; then ARGS+=(--split-tile-dir "$SPLIT_TILE_DIR"); fi
+    if [ -n "$SPLIT_GRID_ROWS" ]; then ARGS+=(--split-grid-rows "$SPLIT_GRID_ROWS"); fi
+    if [ -n "$SPLIT_GRID_COLS" ]; then ARGS+=(--split-grid-cols "$SPLIT_GRID_COLS"); fi
+    ARGS+=(--split-overlap-percent "$SPLIT_OVERLAP_PERCENT")
+    ARGS+=(--split-coord-mode "$SPLIT_COORD_MODE")
 fi
 
 "$PYTHON_EXEC" "$PYTHON_SCRIPT" "${ARGS[@]}" "$@"
