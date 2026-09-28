@@ -16,11 +16,11 @@
 set -e
 
 # --- CONFIGURABLE VARIABLES (Edit these as needed) ----------------------------
-INPUT_FILE="${INPUT_FILE:-/Volumes/ADATA SE880/ADATA Backup/HuBMAP/HuBMAP Xenium/Xenium_data/Xen24_3782_aki-selected/aki_cell_segmentation-roi1_cells.parquet}"
-OUTPUT_PATH="${OUTPUT_PATH:-/Volumes/ADATA SE880/ADATA Backup/HuBMAP/HuBMAP Xenium/Xenium_data/Xen24_3782_aki-selected/aki_cell_segmentation-roi1_cell_rois.parquet}"
+INPUT_FILE="${INPUT_FILE:-/Volumes/ADATA SE880/ADATA Backup/HuBMAP/HuBMAP Xenium/Xenium_data/Xen24_3782_aki-selected/aki_cell_segmentation-wsi-wsi_cells.parquet}"
+OUTPUT_PATH="${OUTPUT_PATH:-/Volumes/ADATA SE880/ADATA Backup/HuBMAP/HuBMAP Xenium/Xenium_data/Xen24_3782_aki-selected/aki_cell_segmentation-wsi-wsi_cell_gui_rois.parquet}"
 
 SAMPLE_ID="${SAMPLE_ID:-3782}"
-ROI_NAME="${ROI_NAME:-aki-roi1-HSI.tif}"
+ROI_NAME="${ROI_NAME:-aki-wsi-wsi.tif}"
 IMAGE_PATH="${IMAGE_PATH:-}"
 
 # Optional label filtering (leave empty to keep all)
