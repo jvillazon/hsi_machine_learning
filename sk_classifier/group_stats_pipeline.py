@@ -52,9 +52,9 @@ MAX_BRACKETS = 6               # Cap on brackets per subplot to prevent clutter 
 MIN_EFFECT_SIZE_BRACKET = 0.0  # Only draw brackets if |Cohen's d| or |Hedges' g| >= this threshold (0.0 = all sig)
 ERROR_BAR_TYPE = "sem"         # For bar plots: "sem", "sd", or "ci" (95% confidence interval)
 
-PALETTE = "colorblind"         # Seaborn or custom palette name / list / dict
+PALETTE = ["#e85b1e", "#f19d78", "#37498b", "#a7b4e3"]        # Seaborn or custom palette name / list / dict
 STRIP_HUE_COL = "Sample ID"    # Color individual strip dots by Sample ID / Animal / Replicate (or None)
-STRIP_PALETTE = "tab20"        # Palette for strip plot dots
+STRIP_PALETTE = "husl"        # Palette for strip plot dots
 SAVE_STRIP_LEGEND = True       # Save separate clean PNG legend for strip dots
 FONT_SCALE = 1.5               # Global font scaling factor for publication figures
 DPI = 300                      # Output resolution for saved figures
@@ -134,9 +134,19 @@ def compute_cohens_d(group_a: np.ndarray, group_b: np.ndarray) -> Tuple[float, f
     return float(d), float(g)
 
 
-def compute_descriptive_stats(df: pd.DataFrame, value_col: str, group_col: str) -> pd.DataFrame:
+def compute_descriptive_stats(
+    df: pd.DataFrame, 
+    value_col: str, 
+    group_col: str,
+    ignore_zeros: bool = False
+) -> pd.DataFrame:
     """Computes comprehensive summary statistics per group."""
-    grouped = df.groupby(group_col, observed=True)[value_col]
+    sub = df[[group_col, value_col]].dropna()
+    sub = sub[np.isfinite(sub[value_col])]
+    if ignore_zeros:
+        sub = sub[sub[value_col] != 0]
+
+    grouped = sub.groupby(group_col, observed=True)[value_col]
     stats = grouped.agg(
         N='count',
         Mean='mean',
@@ -157,7 +167,8 @@ def run_welch_games_howell(
     data: pd.DataFrame, 
     value_col: str, 
     group_col: str, 
-    alpha: float = ALPHA
+    alpha: float = ALPHA,
+    ignore_zeros: bool = False
 ) -> Tuple[Optional[Dict[str, Any]], Optional[pd.DataFrame]]:
     """
     Performs Welch's ANOVA and Games-Howell post-hoc testing with Cohen's d & Hedges' g.
@@ -167,6 +178,9 @@ def run_welch_games_howell(
         posthoc_df: DataFrame containing pairwise Games-Howell results with effect sizes or None
     """
     sub = data[[value_col, group_col]].dropna()
+    sub = sub[np.isfinite(sub[value_col])]
+    if ignore_zeros:
+        sub = sub[sub[value_col] != 0]
     counts = sub[group_col].value_counts()
     valid_groups = counts[counts >= 2].index
     sub = sub[sub[group_col].isin(valid_groups)]
@@ -282,10 +296,15 @@ def save_strip_legend(
     
     clean_title = re.sub(r"[^\w\s]", "", str(title)).strip().replace(" ", "_")
     legend_filename = f"legend_{clean_title}.png"
-    legend_path = os.path.join(output_dir, legend_filename)
-    fig.savefig(legend_path, dpi=DPI, bbox_inches='tight', transparent=TRANSPARENT_BG)
-    plt.close(fig)
-    print(f"Saved strip hue legend to: {legend_path}")
+    os.makedirs(output_dir, exist_ok=True)
+    legend_path = os.path.normpath(os.path.join(output_dir, legend_filename))
+    try:
+        fig.savefig(legend_path, dpi=DPI, bbox_inches='tight', transparent=TRANSPARENT_BG)
+        print(f"Saved strip hue legend to: {legend_path}")
+    except Exception as e:
+        print(f"  [Warning] Could not save legend image to '{legend_path}': {e}")
+    finally:
+        plt.close(fig)
     return legend_path
 
 
@@ -378,7 +397,8 @@ def plot_single_group_axes(
     strip_order: Optional[List[Any]] = None,
     strip_palette_dict: Optional[Dict[Any, Any]] = None,
     error_bar_type: str = ERROR_BAR_TYPE,
-    font_scale: float = FONT_SCALE
+    font_scale: float = FONT_SCALE,
+    ignore_zeros: bool = False
 ) -> Tuple[Optional[Dict[str, Any]], Optional[pd.DataFrame]]:
     """
     Renders either a Violin plot or a Bar plot with mean points, strip dots,
@@ -389,6 +409,10 @@ def plot_single_group_axes(
         cols_to_keep.append(strip_hue_col)
         
     sub = df[cols_to_keep].dropna(subset=[value_col, group_col])
+    sub = sub[np.isfinite(sub[value_col])]
+    if ignore_zeros:
+        sub = sub[sub[value_col] != 0]
+
     order = [cat for cat in group_order if cat in sub[group_col].unique()]
     if not order:
         order = list(sub[group_col].dropna().unique())
@@ -493,7 +517,7 @@ def plot_single_group_axes(
     ax.tick_params(axis="x", labelsize=tick_fs, rotation=25 if len(order) > 4 else 0)
 
     # 5. Statistical Testing & Significance Brackets
-    anova, posthoc = run_welch_games_howell(sub, value_col, group_col, alpha)
+    anova, posthoc = run_welch_games_howell(sub, value_col, group_col, alpha, ignore_zeros=ignore_zeros)
     if anova is not None:
         p_val_str = format_p_value(anova['p_unc'])
         subtitle = f"{title or value_col}\nWelch's ANOVA p = {p_val_str}"
@@ -516,6 +540,24 @@ def plot_single_group_axes(
 # MAIN PIPELINE EXECUTION
 # -----------------------------------------------------------------------------
 
+def _safe_savefig(fig, fpath, dpi=DPI, transparent=TRANSPARENT_BG, bbox_inches='tight'):
+    """Save figure with robust retry handling for locked or synced files (e.g. OneDrive)."""
+    import time
+    for attempt in range(4):
+        try:
+            fig.savefig(fpath, dpi=dpi, transparent=transparent, bbox_inches=bbox_inches)
+            return
+        except OSError:
+            if attempt < 3:
+                time.sleep(0.3)
+            else:
+                base, ext = os.path.splitext(fpath)
+                fallback = f"{base}_new{ext}"
+                try:
+                    fig.savefig(fallback, dpi=dpi, transparent=transparent, bbox_inches=bbox_inches)
+                except Exception as e:
+                    print(f"[Warning] Failed to save {fpath}: {e}")
+
 def run_group_stats_pipeline(
     df: pd.DataFrame,
     group_cols: List[str],
@@ -530,7 +572,8 @@ def run_group_stats_pipeline(
     strip_hue_col: Optional[str] = STRIP_HUE_COL,
     strip_palette: str = STRIP_PALETTE,
     save_legend: bool = SAVE_STRIP_LEGEND,
-    font_scale: float = FONT_SCALE
+    font_scale: float = FONT_SCALE,
+    ignore_zeros: bool = False
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Executes the end-to-end visualization and statistical testing pipeline.
@@ -538,7 +581,9 @@ def run_group_stats_pipeline(
     Returns:
         (anova_results_df, posthoc_results_df, descriptive_stats_df)
     """
-    os.makedirs(output_dir, exist_ok=True)
+    group_subfolder = "_".join([re.sub(r"[^\w\s]", "", g).strip().replace(" ", "_") for g in group_cols])
+    effective_output_dir = os.path.normpath(os.path.join(output_dir, group_subfolder)) if group_subfolder else output_dir
+    os.makedirs(effective_output_dir, exist_ok=True)
     df_proc = df.copy()
 
     # 1. Apply Filtering
@@ -561,7 +606,7 @@ def run_group_stats_pipeline(
             strip_order = list(df_proc[strip_hue_col].dropna().unique())
         strip_palette_dict = build_palette_dict(strip_order, strip_palette)
         if save_legend:
-            save_strip_legend(strip_order, strip_palette_dict, title=strip_hue_col, output_dir=output_dir)
+            save_strip_legend(strip_order, strip_palette_dict, title=strip_hue_col, output_dir=effective_output_dir)
 
     # 3. Standardize Col Order mapping
     if col_order is None:
@@ -585,13 +630,24 @@ def run_group_stats_pipeline(
 
     # 5. Iterate through Value Metrics and Plot Types
     for ptype in active_plot_types:
-        ptype_dir = os.path.join(output_dir, f"{ptype}_plots")
+        ptype_dir = os.path.join(effective_output_dir, f"{ptype}_plots")
         os.makedirs(ptype_dir, exist_ok=True)
 
         for item in value_cols:
             if item not in df_proc.columns:
                 print(f"[Skip] Metric '{item}' not found in dataframe columns.")
                 continue
+
+            if not pd.api.types.is_numeric_dtype(df_proc[item]):
+                try:
+                    converted = pd.to_numeric(df_proc[item], errors='coerce')
+                    if converted.dropna().empty:
+                        print(f"[Skip] Metric '{item}' contains non-numeric/categorical data and cannot be plotted quantitatively.")
+                        continue
+                    df_proc[item] = converted
+                except Exception:
+                    print(f"[Skip] Metric '{item}' is non-numeric and cannot be processed.")
+                    continue
 
             clean_name = re.sub(r"[^\w\s]", "", item).strip().replace(" ", "_")
             if not clean_name:
@@ -612,11 +668,12 @@ def run_group_stats_pipeline(
                     plot_type=ptype, ax=ax, title=f"{item} by {g_col}",
                     alpha=ALPHA, palette=palette, add_brackets=add_brackets,
                     strip_hue_col=strip_hue_col, strip_order=strip_order,
-                    strip_palette_dict=strip_palette_dict, font_scale=font_scale
+                    strip_palette_dict=strip_palette_dict, font_scale=font_scale,
+                    ignore_zeros=ignore_zeros
                 )
                 fig.tight_layout()
                 fig_path = os.path.join(ptype_dir, f"{clean_name}.png")
-                fig.savefig(fig_path, dpi=DPI, transparent=TRANSPARENT_BG, bbox_inches='tight')
+                _safe_savefig(fig, fig_path, dpi=DPI, transparent=TRANSPARENT_BG, bbox_inches='tight')
                 plt.close(fig)
 
                 if ptype == active_plot_types[0]:
@@ -627,7 +684,7 @@ def run_group_stats_pipeline(
                         ph["Group_By"] = g_col
                         ph["Facet"] = "None"
                         posthoc_records.append(ph)
-                    desc = compute_descriptive_stats(df_proc, item, g_col)
+                    desc = compute_descriptive_stats(df_proc, item, g_col, ignore_zeros=ignore_zeros)
                     desc["Facet"] = "None"
                     descriptive_records.append(desc)
 
@@ -660,11 +717,12 @@ def run_group_stats_pipeline(
                         plot_type=ptype, ax=ax, title=f"{item} ({g1} & {g2})",
                         alpha=ALPHA, palette=palette, add_brackets=add_brackets,
                         strip_hue_col=strip_hue_col, strip_order=strip_order,
-                        strip_palette_dict=strip_palette_dict, font_scale=font_scale
+                        strip_palette_dict=strip_palette_dict, font_scale=font_scale,
+                        ignore_zeros=ignore_zeros
                     )
                     fig.tight_layout()
                     fig_path = os.path.join(ptype_dir, f"{clean_name}.png")
-                    fig.savefig(fig_path, dpi=DPI, transparent=TRANSPARENT_BG, bbox_inches='tight')
+                    _safe_savefig(fig, fig_path, dpi=DPI, transparent=TRANSPARENT_BG, bbox_inches='tight')
                     plt.close(fig)
 
                     if ptype == active_plot_types[0]:
@@ -675,7 +733,7 @@ def run_group_stats_pipeline(
                             ph["Group_By"] = f"{g1}+{g2} (Combined)"
                             ph["Facet"] = "None"
                             posthoc_records.append(ph)
-                        desc = compute_descriptive_stats(d_combo, item, combo_col)
+                        desc = compute_descriptive_stats(d_combo, item, combo_col, ignore_zeros=ignore_zeros)
                         desc["Facet"] = "None"
                         descriptive_records.append(desc)
 
@@ -704,7 +762,8 @@ def run_group_stats_pipeline(
                             plot_type=ptype, ax=ax, title=f"{item} | {g2} = {fval}",
                             alpha=ALPHA, palette=palette, add_brackets=False,
                             strip_hue_col=strip_hue_col, strip_order=strip_order,
-                            strip_palette_dict=strip_palette_dict, font_scale=font_scale
+                            strip_palette_dict=strip_palette_dict, font_scale=font_scale,
+                            ignore_zeros=ignore_zeros
                         )
                         temp_results.append((ax, aov, ph, sub_facet, fval))
                         
@@ -716,7 +775,7 @@ def run_group_stats_pipeline(
                                 ph["Group_By"] = g1
                                 ph["Facet"] = f"{g2}={fval}"
                                 posthoc_records.append(ph)
-                            desc = compute_descriptive_stats(sub_facet, item, g1)
+                            desc = compute_descriptive_stats(sub_facet, item, g1, ignore_zeros=ignore_zeros)
                             desc["Facet"] = f"{g2}={fval}"
                             descriptive_records.append(desc)
 
@@ -748,7 +807,7 @@ def run_group_stats_pipeline(
 
                     fig.tight_layout()
                     fig_path = os.path.join(ptype_dir, f"{clean_name}.png")
-                    fig.savefig(fig_path, dpi=DPI, transparent=TRANSPARENT_BG, bbox_inches='tight')
+                    _safe_savefig(fig, fig_path, dpi=DPI, transparent=TRANSPARENT_BG, bbox_inches='tight')
                     plt.close(fig)
 
             else:
@@ -763,7 +822,7 @@ def run_group_stats_pipeline(
         if "p_unc" in anova_df.columns:
             anova_df["p_unc_formatted"] = anova_df["p_unc"].apply(format_p_value)
             anova_df["significance"] = anova_df["p_unc"].apply(p_to_stars)
-        anova_path = os.path.join(output_dir, "welch_anova_results.csv")
+        anova_path = os.path.join(effective_output_dir, "welch_anova_results.csv")
         anova_df.to_csv(anova_path, index=False)
         print(f"Exported Welch's ANOVA results to: {anova_path}")
 
@@ -774,18 +833,18 @@ def run_group_stats_pipeline(
         lead_cols = [c for c in ["Metric", "Group_By", "Facet", "A", "B", "N(A)", "N(B)", "mean(A)", "mean(B)", "diff", "pct_diff", "se", "T", "df", "pval", "pval_formatted", "significance", "cohen_d", "hedges_g", "effect_size_magnitude"] if c in posthoc_df.columns]
         other_cols = [c for c in posthoc_df.columns if c not in lead_cols]
         posthoc_df = posthoc_df[lead_cols + other_cols]
-        posthoc_path = os.path.join(output_dir, "games_howell_pairwise_results.csv")
+        posthoc_path = os.path.join(effective_output_dir, "games_howell_pairwise_results.csv")
         posthoc_df.to_csv(posthoc_path, index=False)
         print(f"Exported Games-Howell pairwise results with Cohen's d & Hedges' g to: {posthoc_path}")
 
     if not desc_df.empty:
-        desc_path = os.path.join(output_dir, "descriptive_statistics_summary.csv")
+        desc_path = os.path.join(effective_output_dir, "descriptive_statistics_summary.csv")
         desc_df.to_csv(desc_path, index=False)
         print(f"Exported descriptive statistics summary to: {desc_path}")
 
     print(f"\n=======================================================")
     print(f" Pipeline Complete! Visualizations & Stats saved to:")
-    print(f" {output_dir}")
+    print(f" {effective_output_dir}")
     print(f"=======================================================\n")
     return anova_df, posthoc_df, desc_df
 
