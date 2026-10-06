@@ -23,10 +23,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.patheffects as PathEffects
+from matplotlib.lines import Line2D
 import seaborn as sns
 import pingouin as pg
-from scipy.stats import spearmanr, pearsonr
+from scipy.stats import spearmanr, pearsonr, gaussian_kde
 from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import DBSCAN
 
 # Add parent directory to path if needed
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -126,7 +128,7 @@ def display_dataset_log():
 UNIT_CLUSTERS = {
     "Cluster1": "Glomeruli | Podo, CD31",
     "Cluster2": "PT | LRP2",
-    "Cluster3": "PT | LRP2, AQP1, CD90",
+    "Cluster3": "PT | THY1",
     "Cluster4": "PT | THY1",
     "Cluster5": "PT | PROM1/VCAM1",
     "Cluster6": "TDL | AQP1, Cyto8",
@@ -195,6 +197,19 @@ FIB_MAP = {
     "dFIB": "dFIB", "dIMFIB": "dFIB", "dOMFIB": "dFIB",
     "CMYOF": "MYOF", "pvMYOF": "MYOF", "IMpvMYOF": "MYOF"
 }
+
+UNIT_COLORS = {UNIT_CLUSTERS.get(c, c): color for c, color in CLUSTER_COLORS.items()}
+for c, color in CLUSTER_COLORS.items():
+    UNIT_COLORS[c] = color
+
+REGION_COLORS = {
+    'Outer Cortex': '#4e79a7',
+    'Inner Cortex': '#f28e2b',
+    'Outer Stripe': '#59a14f',
+    'Inner Stripe': '#edc948',
+    'Inner Medulla': '#b07aa1'
+}
+GROUP_COLORS = REGION_COLORS
 
 GROUP_ORDER = ['Outer Cortex', 'Inner Cortex', 'Outer Stripe', 'Inner Stripe', 'Inner Medulla']
 UNIT_ORDER = ['PT-S1/S2', 'PT-S3', 'cTAL', 'mTAL']
@@ -809,36 +824,428 @@ def plot_category_distribution(df, cat_col, group_col=None, normalize=False,
 
 
 # ==============================================================================
-# 8. PLOTTING TOOL E: UMAP & DIMENSIONALITY REDUCTION
+# 7b. SPATIAL GLOMERULI CLUSTERING & IDENTIFICATION (CLUSTER 1 / PODOCYTES)
 # ==============================================================================
 
-def plot_umap_embedding(df, umap_1_col='umap_1', umap_2_col='umap_2', hue_col=None,
-                        palette=None, is_continuous=False, cmap='viridis',
-                        title="UMAP Projection", s=18, alpha=0.85, figsize=(8, 7),
-                        save_path=None):
+def identify_glomeruli_clusters(df, cluster_name='Cluster1', cluster_col='mask_name',
+                                eps=80, min_samples=20, x_col='centroid_x', y_col='centroid_y',
+                                tissue_col='tissue_id', glom_col='glom'):
     """
-    Publication-quality UMAP visualization with categorical palettes or continuous feature heatmaps.
+    Identifies individual glomeruli instances by spatial density clustering (DBSCAN)
+    on centroid coordinates per tissue section for a specified cluster (e.g. Cluster1).
+    
+    Assigns unique integer glomerulus IDs (glom >= 0) per tissue section.
+    Returns the dataframe with the new glom_col attached.
     """
-    fig, ax = plt.subplots(figsize=figsize, dpi=300)
-    if is_continuous and hue_col:
-        sc = ax.scatter(df[umap_1_col], df[umap_2_col], c=df[hue_col], cmap=cmap,
-                        s=s, alpha=alpha, edgecolor='none')
-        cbar = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
-        cbar.set_label(hue_col, fontsize=11, fontweight='bold')
-    else:
-        sns.scatterplot(data=df, x=umap_1_col, y=umap_2_col, hue=hue_col, palette=palette,
-                        s=s, alpha=alpha, edgecolor='none', ax=ax)
-        if hue_col:
-            ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', frameon=True, fontsize=9)
+    if cluster_col not in df.columns or x_col not in df.columns or y_col not in df.columns:
+        print(f"Warning: Required columns missing for glomeruli clustering: {cluster_col}, {x_col}, {y_col}")
+        return df
 
-    ax.set_xlabel("UMAP 1", fontsize=12, fontweight='bold')
-    ax.set_ylabel("UMAP 2", fontsize=12, fontweight='bold')
+    df_out = df.copy()
+    tissue_ids = df_out[tissue_col].unique() if tissue_col in df_out.columns else [None]
+    
+    glom_series = pd.Series(np.nan, index=df_out.index)
+    total_gloms = 0
+
+    for tid in tissue_ids:
+        if tid is not None:
+            mask = (df_out[tissue_col] == tid) & (df_out[cluster_col] == cluster_name)
+        else:
+            mask = (df_out[cluster_col] == cluster_name)
+        
+        sub = df_out[mask].dropna(subset=[x_col, y_col])
+        if len(sub) < min_samples:
+            continue
+        
+        coords = sub[[x_col, y_col]].values
+        dbscan = DBSCAN(eps=eps, min_samples=min_samples, metric='euclidean')
+        labels = dbscan.fit_predict(coords)
+        
+        # Shift non-negative cluster labels so each tissue has globally unique glom IDs
+        valid_mask = labels >= 0
+        assigned_labels = labels.astype(float)
+        assigned_labels[valid_mask] += total_gloms
+        assigned_labels[~valid_mask] = np.nan
+        
+        glom_series.loc[sub.index] = assigned_labels
+        if np.any(valid_mask):
+            total_gloms += int(np.max(labels[valid_mask])) + 1
+
+    df_out[glom_col] = glom_series
+    print(f" Identified {total_gloms} individual glomeruli across {len(tissue_ids)} tissue sections (Cluster '{cluster_name}').")
+    return df_out
+
+
+def plot_glomeruli_spatial_clusters(df, tissue_id=None, x_col='centroid_x', y_col='centroid_y',
+                                    glom_col='glom', tissue_col='tissue_id', palette='turbo',
+                                    s=80, alpha=0.9, figsize=(10, 8), save_path=None):
+    """
+    Plots spatial centroid scatter map of clustered glomeruli with numbered centroid text callouts.
+    """
+    sub = df[df[glom_col].notna() & (df[glom_col] >= 0)].copy()
+    if tissue_id is not None and tissue_col in sub.columns:
+        sub = sub[sub[tissue_col] == tissue_id]
+
+    if sub.empty:
+        print("No valid clustered glomeruli found to plot.")
+        return None, None
+
+    fig, ax = plt.subplots(figsize=figsize, dpi=300)
+    sns.scatterplot(
+        data=sub, x=x_col, y=y_col, hue=glom_col, palette=palette,
+        s=s, alpha=alpha, edgecolor='black', linewidth=0.5, legend=False, ax=ax
+    )
+
+    # Compute geometric cluster centers to place bold numbered text labels
+    centers = sub.groupby(glom_col)[[x_col, y_col]].mean().reset_index()
+    for _, row in centers.iterrows():
+        t = ax.text(row[x_col], row[y_col], str(int(row[glom_col])),
+                    fontsize=11, fontweight='bold', color='black',
+                    ha='center', va='center', zorder=10)
+        t.set_path_effects([PathEffects.withStroke(linewidth=3, foreground='white')])
+
+    title = f"Individual Glomeruli Spatial Map ({tissue_id})" if tissue_id else "Individual Glomeruli Spatial Map"
     ax.set_title(title, fontsize=14, fontweight='bold', pad=12)
-    sns.despine(ax=ax)
+    ax.set_xlabel("Centroid X (px / um)", fontsize=11, fontweight='bold')
+    ax.set_ylabel("Centroid Y (px / um)", fontsize=11, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.4)
     plt.tight_layout()
 
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path, transparent=True, dpi=300)
+        print(f"Saved glomeruli spatial plot to: {save_path}")
+    return fig, ax
+
+
+# ==============================================================================
+# 8. PLOTTING TOOL E: UMAP & DIMENSIONALITY REDUCTION
+
+# ==============================================================================
+
+def save_standalone_legend(labels, palette, title=None, save_path=None, ncol=1,
+                           fontsize=11, title_fontsize=12, markersize=10, marker='o'):
+    """
+    Renders and saves a clean, standalone, highly legible legend image.
+    
+    Args:
+        labels: List of label strings in the desired order.
+        palette: Dictionary mapping label -> hex/rgb color, or seaborn palette name / list.
+        title: Optional title header for the legend box.
+        save_path: Destination file path (.png, .svg).
+        ncol: Number of columns in the legend layout.
+        fontsize: Font size for label text.
+        title_fontsize: Font size for title text.
+        markersize: Size of legend marker points.
+    """
+    if isinstance(palette, dict):
+        palette_dict = palette
+    elif isinstance(palette, (list, tuple)):
+        palette_dict = {cat: palette[i % len(palette)] for i, cat in enumerate(labels)}
+    elif isinstance(palette, str):
+        colors = sns.color_palette(palette, len(labels))
+        palette_dict = {cat: c for cat, c in zip(labels, colors)}
+    else:
+        palette_dict = {cat: '#808080' for cat in labels}
+
+    handles = [
+        Line2D([0], [0], marker=marker, color='w', label=str(lbl),
+               markerfacecolor=palette_dict.get(lbl, '#808080'),
+               markeredgecolor='black', markeredgewidth=0.8,
+               markersize=markersize)
+        for lbl in labels
+    ]
+
+    nrows = int(np.ceil(len(labels) / ncol))
+    fig_w = max(3.2, ncol * 2.8)
+    fig_h = max(1.2, nrows * 0.42 + (0.6 if title else 0.2))
+
+    fig = plt.figure(figsize=(fig_w, fig_h), dpi=300)
+    ax = fig.add_subplot(111)
+    ax.axis('off')
+    
+    leg = ax.legend(
+        handles=handles,
+        title=title,
+        loc='center',
+        frameon=True,
+        facecolor='white',
+        edgecolor='#bbbbbb',
+        fontsize=fontsize,
+        title_fontsize=title_fontsize,
+        ncol=ncol,
+        columnspacing=1.4,
+        handletextpad=0.6,
+        borderpad=0.8
+    )
+    if title:
+        leg.get_title().set_fontweight('bold')
+    for text in leg.get_texts():
+        text.set_fontweight('bold')
+    
+    fig.patch.set_alpha(0.0)
+    plt.tight_layout(pad=0.2)
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+        fig.savefig(save_path, dpi=300, transparent=True, bbox_inches='tight')
+        base, _ = os.path.splitext(save_path)
+        fig.savefig(f"{base}.svg", transparent=True, bbox_inches='tight')
+        print(f"Saved standalone legend to: {save_path}")
+    return fig
+
+
+def plot_umap_embedding(df, umap_1_col='umap_1', umap_2_col='umap_2', hue_col=None,
+                        palette=None, is_continuous=False, cmap='viridis',
+                        title="UMAP Projection", s=1.5, alpha=0.8, figsize=(8, 8),
+                        hue_order=None, label_map=None, show_legend=False,
+                        save_separate_legend=True, legend_ncol=1,
+                        legend_save_path=None, save_path=None):
+    """
+    Publication-quality UMAP visualization with consistent square dimensions,
+    optimized point size for high-density instances, and standalone legible legends.
+    """
+    plot_df = df.copy()
+    if hue_col and label_map and hue_col in plot_df.columns:
+        plot_df[hue_col] = plot_df[hue_col].map(label_map).fillna(plot_df[hue_col])
+        
+    fig, ax = plt.subplots(figsize=figsize, dpi=300)
+    
+    if is_continuous and hue_col:
+        sc = ax.scatter(plot_df[umap_1_col], plot_df[umap_2_col], c=plot_df[hue_col], cmap=cmap,
+                        s=s, alpha=alpha, edgecolor='none', rasterized=True)
+        cbar = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label(hue_col, fontsize=12, fontweight='bold')
+        cbar.ax.tick_params(labelsize=10)
+    else:
+        if hue_order is None and hue_col and hue_col in plot_df.columns:
+            hue_order = list(plot_df[hue_col].dropna().unique())
+
+        if isinstance(palette, dict):
+            pal_dict = palette
+        elif isinstance(palette, str) and hue_order:
+            pal_dict = {cat: color for cat, color in zip(hue_order, sns.color_palette(palette, len(hue_order)))}
+        elif isinstance(palette, (list, tuple)) and hue_order:
+            pal_dict = {cat: palette[i % len(palette)] for i, cat in enumerate(hue_order)}
+        else:
+            pal_dict = palette
+
+        sns.scatterplot(
+            data=plot_df, x=umap_1_col, y=umap_2_col, hue=hue_col,
+            hue_order=hue_order, palette=pal_dict,
+            s=s, alpha=alpha, edgecolor='none', legend=show_legend,
+            rasterized=True, ax=ax
+        )
+        if show_legend and hue_col:
+            ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', frameon=True, fontsize=10)
+
+    ax.set_xlabel("UMAP 1", fontsize=13, fontweight='bold', labelpad=8)
+    ax.set_ylabel("UMAP 2", fontsize=13, fontweight='bold', labelpad=8)
+    ax.tick_params(axis='both', which='major', labelsize=11, width=1.2, length=4)
+    for tick in ax.get_xticklabels() + ax.get_yticklabels():
+        tick.set_fontweight('bold')
+        
+    ax.set_title(title, fontsize=15, fontweight='bold', pad=14)
+    sns.despine(ax=ax)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+        plt.savefig(save_path, transparent=True, dpi=300, bbox_inches='tight')
+        base, _ = os.path.splitext(save_path)
+        plt.savefig(f"{base}.svg", transparent=True, bbox_inches='tight')
         print(f"Saved UMAP plot to: {save_path}")
+
+    # Generate standalone separate legend if requested
+    if not is_continuous and hue_col and save_separate_legend and hue_order:
+        if legend_save_path is None and save_path:
+            base, ext = os.path.splitext(save_path)
+            legend_save_path = f"{base}_legend{ext}"
+        if legend_save_path:
+            save_standalone_legend(
+                labels=hue_order,
+                palette=pal_dict if pal_dict else (palette or 'tab20'),
+                title=hue_col,
+                save_path=legend_save_path,
+                ncol=legend_ncol,
+                fontsize=11,
+                title_fontsize=12,
+                markersize=10
+            )
+            
+    return fig, ax
+
+
+def plot_umap_with_region_density_overlay(
+    df,
+    umap_1_col='umap_1',
+    umap_2_col='umap_2',
+    cluster_col='cluster_display',
+    cluster_palette=None,
+    cluster_order=None,
+    region_col='group',
+    region_palette=None,
+    region_order=None,
+    density_levels=[0.35, 0.75],
+    contour_alpha=0.9,
+    contour_lw=1.8,
+    contour_fill=True,
+    fill_alpha=0.07,
+    annotate_region_labels=False,
+    show_region_legend=True,
+    region_legend_title="Regions",
+    region_legend_loc="upper right",
+    label_fontsize=11,
+    s=1.5,
+    alpha=0.65,
+    figsize=(8, 8),
+    title="UMAP: Functional Units & Regional Density Boundaries",
+    save_path=None
+):
+    """
+    Renders high-density cluster instance scatter points overlaid with 2D Gaussian KDE
+    density boundary contours and a clean on-plot legend for anatomical regions.
+    """
+    plot_df = df.dropna(subset=[umap_1_col, umap_2_col]).copy()
+    if cluster_col in plot_df.columns:
+        plot_df = plot_df.dropna(subset=[cluster_col])
+        
+    fig, ax = plt.subplots(figsize=figsize, dpi=300)
+    
+    # 1. Base Scatter Plot of Clusters
+    if cluster_order is None and cluster_col and cluster_col in plot_df.columns:
+        cluster_order = list(plot_df[cluster_col].dropna().unique())
+        
+    if isinstance(cluster_palette, dict):
+        c_pal_dict = cluster_palette
+    elif isinstance(cluster_palette, str) and cluster_order:
+        c_pal_dict = {cat: color for cat, color in zip(cluster_order, sns.color_palette(cluster_palette, len(cluster_order)))}
+    else:
+        c_pal_dict = cluster_palette
+
+    sns.scatterplot(
+        data=plot_df, x=umap_1_col, y=umap_2_col, hue=cluster_col,
+        hue_order=cluster_order, palette=c_pal_dict,
+        s=s, alpha=alpha, edgecolor='none', legend=False,
+        rasterized=True, ax=ax, zorder=2
+    )
+
+    # 2. 2D Gaussian KDE Density Contours per Region
+    if region_col in plot_df.columns:
+        if region_order is None:
+            region_order = list(plot_df[region_col].dropna().unique())
+            
+        if isinstance(region_palette, dict):
+            r_pal_dict = region_palette
+        elif isinstance(region_palette, str) and region_order:
+            r_pal_dict = {g: c for g, c in zip(region_order, sns.color_palette(region_palette, len(region_order)))}
+        else:
+            r_pal_dict = {g: '#000000' for g in region_order}
+
+        # Shared coordinate grid for density estimation
+        x_min, x_max = plot_df[umap_1_col].min(), plot_df[umap_1_col].max()
+        y_min, y_max = plot_df[umap_2_col].min(), plot_df[umap_2_col].max()
+        x_pad = (x_max - x_min) * 0.05
+        y_pad = (y_max - y_min) * 0.05
+        
+        gx = np.linspace(x_min - x_pad, x_max + x_pad, 150)
+        gy = np.linspace(y_min - y_pad, y_max + y_pad, 150)
+        grid_x, grid_y = np.meshgrid(gx, gy)
+        grid_coords = np.vstack([grid_x.ravel(), grid_y.ravel()])
+
+        for reg in region_order:
+            reg_sub = plot_df[plot_df[region_col] == reg]
+            if len(reg_sub) < 30:
+                continue
+
+            rx = reg_sub[umap_1_col].values
+            ry = reg_sub[umap_2_col].values
+            
+            try:
+                kde = gaussian_kde(np.vstack([rx, ry]), bw_method='scott')
+                z = kde(grid_coords).reshape(grid_x.shape)
+                z_norm = (z - z.min()) / (z.max() - z.min() + 1e-12)
+                
+                reg_color = r_pal_dict.get(reg, '#333333')
+
+                # Translucent fill for greatest density zone
+                if contour_fill:
+                    ax.contourf(
+                        grid_x, grid_y, z_norm,
+                        levels=[density_levels[0], 1.0],
+                        colors=[reg_color],
+                        alpha=fill_alpha,
+                        zorder=3
+                    )
+
+                # Boundary contour lines
+                ax.contour(
+                    grid_x, grid_y, z_norm,
+                    levels=density_levels,
+                    colors=[reg_color],
+                    linewidths=contour_lw,
+                    alpha=contour_alpha,
+                    linestyles=['dashed', 'solid'] if len(density_levels) == 2 else ['solid'],
+                    zorder=4
+                )
+
+                # Optional Text Annotation at Density Peak (disabled by default)
+                if annotate_region_labels:
+                    peak_idx = np.unravel_index(np.argmax(z), z.shape)
+                    peak_x, peak_y = grid_x[peak_idx], grid_y[peak_idx]
+
+                    txt = ax.text(
+                        peak_x, peak_y, str(reg),
+                        fontsize=label_fontsize, fontweight='bold',
+                        color=reg_color, ha='center', va='center',
+                        zorder=6,
+                        bbox=dict(boxstyle='round,pad=0.25', facecolor='white', alpha=0.85, edgecolor=reg_color, lw=1.2)
+                    )
+                    txt.set_path_effects([PathEffects.withStroke(linewidth=3, foreground='white')])
+            except Exception as e:
+                print(f"Warning: Could not compute KDE for region '{reg}': {e}")
+
+        # 3. Add Region Legend on UMAP
+        if show_region_legend and region_order:
+            leg_handles = [
+                Line2D([0], [0], color=r_pal_dict.get(reg, '#333333'), lw=2.2,
+                       marker='o', markerfacecolor=r_pal_dict.get(reg, '#333333'),
+                       markeredgecolor='black', markeredgewidth=0.8,
+                       markersize=7.5, label=str(reg))
+                for reg in region_order
+            ]
+            reg_leg = ax.legend(
+                handles=leg_handles,
+                title=region_legend_title,
+                loc=region_legend_loc,
+                frameon=True,
+                facecolor='white',
+                edgecolor='#cccccc',
+                fontsize=10,
+                title_fontsize=11,
+                borderpad=0.6,
+                handletextpad=0.5
+            )
+            if region_legend_title:
+                reg_leg.get_title().set_fontweight('bold')
+            for text in reg_leg.get_texts():
+                text.set_fontweight('bold')
+
+    ax.set_xlabel("UMAP 1", fontsize=13, fontweight='bold', labelpad=8)
+    ax.set_ylabel("UMAP 2", fontsize=13, fontweight='bold', labelpad=8)
+    ax.tick_params(axis='both', which='major', labelsize=11, width=1.2, length=4)
+    for tick in ax.get_xticklabels() + ax.get_yticklabels():
+        tick.set_fontweight('bold')
+        
+    ax.set_title(title, fontsize=15, fontweight='bold', pad=14)
+    sns.despine(ax=ax)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+        plt.savefig(save_path, transparent=True, dpi=300, bbox_inches='tight')
+        base, _ = os.path.splitext(save_path)
+        plt.savefig(f"{base}.svg", transparent=True, bbox_inches='tight')
+        print(f"Saved region density overlay UMAP plot to: {save_path}")
+
     return fig, ax

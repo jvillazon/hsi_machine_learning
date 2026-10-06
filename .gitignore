@@ -49,3 +49,4 @@ sk_classifier/configs/kidney_cell_identity.json
 sk_classifier/configs/kidney_clusters.json
 sk_classifier/configs/kidney_ftu.json
 sk_classifier/configs/kidney_maldi.json
+*/plots/*
