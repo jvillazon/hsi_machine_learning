@@ -1,3 +1,18 @@
+"""
+Image Masking for Segmented Metrics
+
+Image masking and metadata assignment for gigapixel high-volume data. Segmentation maps can be generated for any image type and will be saved as single-channel, 16-bit TIFF files
+with appropriate metadata (slice name, subgroup, etc.).
+
+
+Key Class and Functions:
+1. MaskExtractor(function): Class for extracting instance segmentation data to produce unit level analysis
+    _build_instance_metadata(self, mask_2d, dilations, min_instance_size): Helper function that builds instance level metadata, including dilations
+
+
+"""
+
+
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -752,22 +767,14 @@ METADATA = {
 
 class MaskExtractor:
     def __init__(self, function=np.nanmean):
-        # Contain directory of cell/unit id's based on centroid location
-        # self.centroid_to_id = {}
-        # self.next_id = 1
+
         self.results = []
         self._metadata_cache = {}
         self._current_mask_ref = None
 
         # Assign masking function (mean for ratio / intensity images and percentage for prediction images)
         self.func = function
-    
-    # def _get_instance_id(self, centroid):
-    #     """Function for identifying cell/unit id based on centroids"""
-    #     if centroid not in self.centroid_to_id:
-    #         self.centroid_to_id[centroid] = self.next_id
-    #         self.next_id += 1
-    #     return self.centroid_to_id[centroid]
+
 
     def _pad_obj_slice(self, obj_slice, dilations, image_shape):
         """Function for padding object slice""" 
@@ -825,8 +832,6 @@ class MaskExtractor:
                 dilated_mask = padded_mask
 
             instance_metadata.append({
-                # 'instance_id': label_idx,
-                # 'instance_label': f"{label_idx}",
                 'label_idx': label_idx,
                 'padded_slice': padded_slc,
                 'instance_mask': dilated_mask,
@@ -849,15 +854,10 @@ class MaskExtractor:
             val_value = self.func(positive_mask) if int(positive_mask.size) > 0 else np.nan
 
             row_data = {
-                # 'instance_id': inst['instance_id'],
-                # 'instance_label': inst['instance_label'],
                 'mask_name': mask_name,
                 'val_name': val_name,
                 'centroid_y': inst['centroid_y'],
                 'centroid_x': inst['centroid_x'],
-                # 'total_pixel_count': total_pixel_count,
-                # 'positive_pixel_count': positive_pixel_count,
-                # 'positive_pixel_fraction': (positive_pixel_count / total_pixel_count) if total_pixel_count else np.nan,
                 'value': val_value
             }
             row_data.update(metadata)

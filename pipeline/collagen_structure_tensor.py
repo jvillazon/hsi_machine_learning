@@ -1,8 +1,8 @@
 """
 Structure Tensor-based Collagen Fiber Analysis
 
-This script uses the structure tensor method (similar to OrientationJ in Fiji) to analyze collagen fibers.
-Much faster and more robust than Gabor filters while preserving directional continuity.
+Collagen fiber analysis (SHG) using structure tensor method (similar to OrientationJ in Fiji) to analyze collagen fibers.
+
 
 Key Functions:
 1. compute_structure_tensor(image): Computes orientation and coherence using structure tensor
@@ -30,7 +30,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog
 
-image_path = r"C:\Users\jvill\OneDrive - UC San Diego\integrated_pipeline\WSI_data\SRS\collagen\S24-K21_273_3-collagen.ome.tiff"
+image_path = r"C:\Users\jvill\OneDrive - UC San Diego\integrated_pipeline\WSI_data\SRS\collagen\S24-K21_273_3-collagen.ome.tiff" # Default image path
 image_name = os.path.basename(image_path).split('.')[0]
 output_dir = os.path.join(os.path.dirname(image_path), f"{image_name}_collagen_output")
 
@@ -46,6 +46,8 @@ output_dir = os.path.join(os.path.dirname(image_path), f"{image_name}_collagen_o
 # image = load_image(image_path, threshold_method='li')
 # image = load_image(image_path, threshold_method='percentile', threshold_value=75)
 
+
+# Configuration of multimodal pipeline
 CONFIG = {
     'image_path': image_path,
     'output_dir': output_dir,
@@ -330,35 +332,28 @@ def compute_structure_tensor(
     height, width = image.shape
     print(f"Image range: [{image.min():.3f}, {image.max():.3f}]")
     
-    # Step 1: Compute gradients
     print(f"Computing gradients (sigma={sigma_gradient})...")
-    
-    # Smooth image first for more stable gradients
     if sigma_gradient > 0:
         smoothed = gaussian_filter(image, sigma=sigma_gradient)
         print(f"  Applied Gaussian smoothing with sigma={sigma_gradient}")
     else:
         smoothed = image
         print(f"  No smoothing applied (sigma=0)")
-    
     # Compute gradients using Sobel filters
     Gx = sobel(smoothed, axis=1)  # x-direction
     Gy = sobel(smoothed, axis=0)  # y-direction
-    
     print(f"  Gx range: [{Gx.min():.4f}, {Gx.max():.4f}]")
     print(f"  Gy range: [{Gy.min():.4f}, {Gy.max():.4f}]")
-    
-    # Step 2: Construct structure tensor elements
+
+
     print(f"\nComputing structure tensor components...")
-    
     # Tensor components (outer product of gradient)
     Gxx = Gx * Gx
     Gyy = Gy * Gy
     Gxy = Gx * Gy
-    
-    # Step 3: Smooth tensor components (critical for robustness)
+
+
     print(f"\nSmoothing structure tensor components (sigma={sigma_tensor})...")
-    
     if sigma_tensor > 0:
         Txx = gaussian_filter(Gxx, sigma=sigma_tensor)
         Tyy = gaussian_filter(Gyy, sigma=sigma_tensor)
@@ -370,40 +365,23 @@ def compute_structure_tensor(
         Txy = Gxy
         print(f"  No smoothing applied (sigma=0) - using raw tensor components")
     
-    # Step 4: Eigenvalue decomposition at each pixel
     print("\nComputing eigenvalue decomposition at each pixel...")
-    
-    # Vectorized eigenvalue computation for speed
-    # For 2x2 matrix [[a, b], [b, c]], eigenvalues are:
-    # lambda = (a + c ± sqrt((a-c)^2 + 4*b^2)) / 2
-    
     trace = Txx + Tyy  # trace = sum of eigenvalues
     det = Txx * Tyy - Txy * Txy  # determinant
     discriminant = np.sqrt(np.maximum((Txx - Tyy)**2 + 4*Txy**2, 0))
-    
     lambda_max = (trace + discriminant) / 2.0  # larger eigenvalue
     lambda_min = (trace - discriminant) / 2.0  # smaller eigenvalue
-
     lambda_min = np.nan_to_num(lambda_min, nan=0.0)
     lambda_max = np.nan_to_num(lambda_max, nan=0.0)
 
     
     # Coherence/Anisotropy = (lambda_max - lambda_min) / (lambda_max + lambda_min)
-    # This ranges from 0 (isotropic) to 1 (perfectly aligned)
     denominator = lambda_max + lambda_min
     coherence = np.zeros_like(denominator, dtype=np.float32)
     valid = denominator > 1e-10
     coherence[valid] = np.square((lambda_max[valid] - lambda_min[valid]) / denominator[valid]).astype(np.float32)
     
     # Orientation from eigenvector of largest eigenvalue
-    # For 2x2 symmetric matrix, if lambda is eigenvalue, eigenvector is proportional to
-    # [Txy, lambda - Txx] or [lambda - Tyy, Txy]
-    # Orientation angle = atan2(Gy_dominant, Gx_dominant) / 2 (divided by 2 because orientation is pi-periodic)
-    
-    # NOTE: arctan2(2*Txy, Txx - Tyy) gives the direction of MAXIMUM gradient change
-    # For fiber analysis, we want the PERPENDICULAR direction (along which fibers align)
-    # So we rotate by 90 degrees = π/2
-    # We use -2*Txy to flip to a Right-Handed Cartesian system (y-up relative to horizontal)
     orientation = (0.5 * np.arctan2(-2*Txy, Txx - Tyy) + np.pi/2).astype(np.float32)
     # Normalize to [0, pi]
     orientation = orientation % np.pi
@@ -478,7 +456,7 @@ def visualize_orientation_heatmap(image, orientation, coherence=None, coherence_
         fig: Matplotlib figure object
     """
     
-    # Downsample for visualization if image is very large.
+    # Downsample for visualization if image necessary.
     if coherence is not None:
         (image_ds, orientation_ds, coherence_ds), ds = _auto_downsample_2d(image, orientation, coherence, max_pixels=120000000)
     else:
@@ -488,18 +466,17 @@ def visualize_orientation_heatmap(image, orientation, coherence=None, coherence_
     if ds > 1:
         print(f"Orientation heatmap downsampled by {ds}x for memory safety")
 
-    # Define overall mask: intensity signal AND well-defined orientation (coherence)
+
     mask = image_ds > 0
-    if coherence_ds is not None:
-        mask = mask & (coherence_ds >= coherence_threshold)
+    # if coherence_ds is not None:
+    #     mask = mask & (coherence_ds >= coherence_threshold)
     
-    # Mask background and low-anisotropy regions without creating duplicate where-arrays.
+    # Mask background and low-anisotropy regions 
     orientation_masked = orientation_ds.astype(np.float32, copy=True)
     orientation_masked[~mask] = np.nan
     
     # Smooth before visualization
     if sigma_smooth > 0:
-        # Note: smoothed nan is tricky, handle carefully
         mask = np.isnan(orientation_masked)
         orient_filled = np.nan_to_num(orientation_masked)
         smooth_orient = gaussian_filter(orient_filled, sigma=sigma_smooth)
@@ -510,10 +487,9 @@ def visualize_orientation_heatmap(image, orientation, coherence=None, coherence_
     
     fig, ax = plt.subplots(figsize=figsize)
     
-    # Display with HSV colormap (circular)
+    # Display orientation with HSV colormap (circular)
     # Map [0, pi] to [0, 1] for colormap
     im = ax.imshow(smooth_orient, cmap='hsv', vmin=0, vmax=np.pi, aspect='auto')
-    
     # ax.set_title('Fiber Orientation Heatmap', fontsize=PLOT_STYLE['title_size'], fontweight='bold')
     ax.axis('off') 
     
@@ -551,7 +527,6 @@ def visualize_coherence_heatmap(coherence, filename_png="coherence_heatmap_viz.p
     else:
         (coherence_ds,), ds = _auto_downsample_2d(coherence, max_pixels=120000000)
         image_ds = None
-
     if ds > 1:
         print(f"Coherence visualization downsampled by {ds}x for memory safety")
 
@@ -647,16 +622,12 @@ def visualize_preferential_orientation_vector_map(orientation, coherence, image=
                 valid_coher = bin_coher[valid_mask]
                 
                 # Compute circular mean of orientation using resultant vector method
-                # This is more robust for circular data than standard mean
-                # Convert angle to unit vector: x = cos(2*θ), y = sin(2*θ)
-                # (multiply by 2 because orientation is π-periodic, not 2π)
                 cos_vals = np.cos(2 * valid_orient)
                 sin_vals = np.sin(2 * valid_orient)
-                
                 mean_cos = cos_vals.mean()
                 mean_sin = sin_vals.mean()
                 
-                # Compute mean orientation (and divide by 2 to undo the doubling)
+                # Compute mean orientation
                 mean_orient = 0.5 * np.arctan2(mean_sin, mean_cos)
                 mean_orient = mean_orient % np.pi  # Normalize to [0, pi]
                 
@@ -678,7 +649,7 @@ def visualize_preferential_orientation_vector_map(orientation, coherence, image=
     print(f"  Created {len(bin_orientations)} valid bins")
     
     # Create figure with exact pixel aspect ratio matching the input image
-    dpi = 600
+    dpi = 600 # For high-res publication.
     fig = plt.figure(figsize=(w / dpi, h / dpi), dpi=dpi)
     ax = fig.add_axes([0, 0, 1, 1])  # Span the entire figure (no margins)
     
@@ -843,7 +814,6 @@ def plot_polar_orientation_histogram(image, orientation, coherence=None, coheren
     ax = fig.add_subplot(111, projection='polar')
     
     # Use HSV colormap mirrored across the 180-degree axis
-    # (so that 90° and 270° share the same color, etc.)
     cmap = plt.cm.hsv
     colors = cmap((full_bin_centers % np.pi) / np.pi)
     
