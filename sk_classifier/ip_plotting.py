@@ -26,7 +26,7 @@ import matplotlib.patheffects as PathEffects
 from matplotlib.lines import Line2D
 import seaborn as sns
 import pingouin as pg
-from scipy.stats import spearmanr, pearsonr, gaussian_kde
+from scipy.stats import spearmanr, pearsonr, gaussian_kde, ttest_ind
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import DBSCAN
 
@@ -265,9 +265,45 @@ def format_p_value(p):
         return f"{p:.4e}"
     return f"{p:.4f}"
 
-def run_welch_games_howell(data, value_col, group_col, alpha=ALPHA):
+def compute_cohens_d(group_a, group_b, weighted=True):
+    """Computes Cohen's d and Hedges' g effect sizes."""
+    a = np.asarray(group_a, dtype=float)
+    b = np.asarray(group_b, dtype=float)
+    a = a[np.isfinite(a)]
+    b = b[np.isfinite(b)]
+    n1, n2 = len(a), len(b)
+    if n1 < 2 or n2 < 2:
+        return np.nan, np.nan
+    var1, var2 = np.var(a, ddof=1), np.var(b, ddof=1)
+    if weighted:
+        s_pooled = np.sqrt(((n1 - 1) * var1 + (n2 - 1) * var2) / max(1, (n1 + n2 - 2)))
+    else:
+        s_pooled = np.sqrt((var1 + var2) / 2.0)
+    if s_pooled == 0 or np.isnan(s_pooled):
+        return 0.0, 0.0
+    d = (np.mean(a) - np.mean(b)) / s_pooled
+    g = d * (1.0 - (3.0 / max(1.0, (4.0 * (n1 + n2) - 9.0))))
+    return float(d), float(g)
+
+def interpret_effect_size(d):
+    """Cohen's qualitative effect size categories."""
+    if pd.isna(d) or d is None:
+        return "N/A"
+    abs_d = abs(d)
+    if abs_d < 0.2:
+        return "Negligible"
+    elif abs_d < 0.5:
+        return "Small"
+    elif abs_d < 0.8:
+        return "Medium"
+    elif abs_d < 1.2:
+        return "Large"
+    else:
+        return "Very Large"
+
+def run_welch_games_howell(data, value_col, group_col, alpha=ALPHA, weighted_pooled_sd=True):
     """
-    Runs Welch's ANOVA then Games-Howell post-hoc test (via pingouin) if significant.
+    Runs Welch's ANOVA then Games-Howell post-hoc test with Cohen's d effect sizes.
     Returns (anova_dict_or_None, posthoc_df_or_None).
     """
     sub = data[[value_col, group_col]].dropna()
@@ -280,13 +316,45 @@ def run_welch_games_howell(data, value_col, group_col, alpha=ALPHA):
     aov = pg.welch_anova(dv=value_col, between=group_col, data=sub)
     row = aov.iloc[0]
     anova = {
-        "F": row["F"], "df1": row["ddof1"], "df2": row["ddof2"],
-        "p_unc": row["p_unc"], "k": sub[group_col].nunique()
+        "F": float(row["F"]), "df1": float(row["ddof1"]), "df2": float(row["ddof2"]),
+        "p_unc": float(row["p_unc"]), "k": sub[group_col].nunique()
     }
 
     posthoc = None
     if anova["p_unc"] < alpha:
         posthoc = pg.pairwise_gameshowell(dv=value_col, between=group_col, data=sub)
+        if posthoc is not None and not posthoc.empty:
+            cohens_d_list = []
+            hedges_g_list = []
+            mean_a_list = []
+            mean_b_list = []
+            pct_diff_list = []
+            effect_interp_list = []
+            n_a_list = []
+            n_b_list = []
+            for _, r in posthoc.iterrows():
+                val_a = sub.loc[sub[group_col] == r['A'], value_col].values
+                val_b = sub.loc[sub[group_col] == r['B'], value_col].values
+                d, g = compute_cohens_d(val_a, val_b, weighted=weighted_pooled_sd)
+                mean_a = float(r.get('mean(A)', np.mean(val_a))) if 'mean(A)' in r else float(np.mean(val_a))
+                mean_b = float(r.get('mean(B)', np.mean(val_b))) if 'mean(B)' in r else float(np.mean(val_b))
+                pct_diff = ((mean_a - mean_b) / mean_b * 100.0) if mean_b != 0 else np.nan
+                mean_a_list.append(mean_a)
+                mean_b_list.append(mean_b)
+                cohens_d_list.append(d)
+                hedges_g_list.append(g)
+                pct_diff_list.append(pct_diff)
+                effect_interp_list.append(interpret_effect_size(d))
+                n_a_list.append(len(val_a))
+                n_b_list.append(len(val_b))
+            posthoc['mean(A)'] = mean_a_list
+            posthoc['mean(B)'] = mean_b_list
+            posthoc['N(A)'] = n_a_list
+            posthoc['N(B)'] = n_b_list
+            posthoc['cohen_d'] = cohens_d_list
+            posthoc['hedges_g'] = hedges_g_list
+            posthoc['pct_diff'] = pct_diff_list
+            posthoc['effect_size_magnitude'] = effect_interp_list
     return anova, posthoc
 
 def add_significance_brackets(ax, sig_pairs, order, initial_ymin=None, initial_ymax=None, max_brackets=MAX_BRACKETS):
@@ -652,6 +720,290 @@ def plot_feature_bars(df, features, group_col, groups, pvals=None, feature_displ
         plt.savefig(save_path, transparent=True, dpi=300)
         print(f"Saved feature bars plot to: {save_path}")
     return fig, ax
+
+def plot_feature_dumbbells(df, features, group_col, groups, pvals=None,
+                           feature_display_names=None, colors=None,
+                           orient='h', show_pvals=True, pval_format='star',
+                           dot_size=110, line_width=2.5, line_color='#7f7f7f',
+                           show_error=False, yerr='sem', show_values=False,
+                           figsize=None, title=None, xlabel=None, ylabel=None,
+                           save_path=None):
+    """
+    Plots a publication-grade dumbbell (connected dot) chart comparing two groups 
+    across multiple features/metrics, displaying group means and statistical significance.
+
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Input dataset containing features and group_col.
+    features : list of str
+        List of numeric feature column names to compare.
+    group_col : str
+        Column name specifying group assignments (e.g., 'group').
+    groups : list of str
+        The two group labels to compare (e.g. ['Inner Cortex', 'Outer Cortex']).
+    pvals : dict, optional
+        Dictionary mapping feature names to precalculated p-values. If None, p-values are 
+        automatically calculated using Welch's t-test (scipy.stats.ttest_ind with equal_var=False).
+    feature_display_names : dict, optional
+        Dictionary mapping feature column names to clean publication display names.
+    colors : list or dict, optional
+        Colors for the two groups. E.g., ['#c75b5b', '#911c1c'] or {'Inner Cortex': '#c75b5b', ...}.
+    orient : {'h', 'v'}, default 'h'
+        Orientation: 'h' (horizontal, features on Y-axis) or 'v' (vertical, features on X-axis).
+    show_pvals : bool, default True
+        Whether to display significance annotations (stars or formatted numbers).
+    pval_format : {'star', 'numeric', 'both'}, default 'star'
+        Format for significance labels: 'star' (***, **, *, ns), 'numeric' (p = 0.0012), or 'both'.
+    dot_size : int, default 110
+        Size (area) of the dumbbell endpoint markers.
+    line_width : float, default 2.5
+        Width of the connecting line segment between the two group means.
+    line_color : str, default '#7f7f7f'
+        Color of the connecting line segment.
+    show_error : bool, default False
+        Whether to draw error bars (SEM or STD) around group means.
+    yerr : {'sem', 'std'}, default 'sem'
+        Type of error bars to plot if show_error=True.
+    show_values : bool, default False
+        Whether to print numerical mean values directly next to each dot.
+    figsize : tuple, optional
+        Matplotlib figure size.
+    title : str, optional
+        Main plot title.
+    xlabel / ylabel : str, optional
+        Custom axis labels.
+    save_path : str, optional
+        File path to save the high-res figure (png/pdf).
+
+    Returns:
+    --------
+    fig, ax, stats_df : tuple
+        Matplotlib Figure, Axes, and a summary DataFrame containing means, delta, and p-values.
+    """
+    valid_feats = [f for f in features if f in df.columns]
+    if not valid_feats:
+        raise ValueError("None of the specified features exist in the dataframe.")
+    if len(groups) != 2:
+        raise ValueError(f"Dumbbell plot requires exactly 2 groups to compare, got {len(groups)}: {groups}")
+
+    g1, g2 = groups[0], groups[1]
+    sub = df[df[group_col].isin(groups)].copy()
+
+    # Determine group colors
+    if colors is None:
+        c1, c2 = '#c75b5b', '#911c1c'
+    elif isinstance(colors, dict):
+        c1 = colors.get(g1, '#c75b5b')
+        c2 = colors.get(g2, '#911c1c')
+    elif isinstance(colors, (list, tuple)) and len(colors) >= 2:
+        c1, c2 = colors[0], colors[1]
+    else:
+        c1, c2 = '#c75b5b', '#911c1c'
+
+    g1_sub = sub[sub[group_col] == g1]
+    g2_sub = sub[sub[group_col] == g2]
+
+    # Calculate statistics
+    stats_records = []
+    for feat in valid_feats:
+        s1_data = g1_sub[feat].dropna()
+        s2_data = g2_sub[feat].dropna()
+        m1 = s1_data.mean() if len(s1_data) > 0 else np.nan
+        m2 = s2_data.mean() if len(s2_data) > 0 else np.nan
+
+        if yerr == 'sem':
+            e1 = s1_data.sem() if len(s1_data) > 1 else 0
+            e2 = s2_data.sem() if len(s2_data) > 1 else 0
+        else:
+            e1 = s1_data.std() if len(s1_data) > 1 else 0
+            e2 = s2_data.std() if len(s2_data) > 1 else 0
+
+        # P-value calculation or retrieval
+        if pvals is not None and feat in pvals:
+            pval = pvals[feat]
+        elif len(s1_data) >= 2 and len(s2_data) >= 2:
+            try:
+                _, pval = ttest_ind(s1_data, s2_data, equal_var=False)
+            except Exception:
+                pval = np.nan
+        else:
+            pval = np.nan
+
+        star_str = stars(pval)
+        if pval_format == 'numeric':
+            sig_label = f"p={format_p_value(pval)}" if pd.notna(pval) else ""
+        elif pval_format == 'both':
+            sig_label = f"{star_str} (p={format_p_value(pval)})" if pd.notna(pval) else ""
+        else:
+            sig_label = star_str
+
+        disp_name = feature_display_names.get(feat, feat) if feature_display_names else feat
+        stats_records.append({
+            'Feature': feat,
+            'Display_Name': disp_name,
+            f'{g1}_Mean': m1,
+            f'{g2}_Mean': m2,
+            f'{g1}_Error': e1,
+            f'{g2}_Error': e2,
+            'Delta (G1-G2)': m1 - m2 if pd.notna(m1) and pd.notna(m2) else np.nan,
+            'pval': pval,
+            'pval_formatted': format_p_value(pval),
+            'Significance': star_str,
+            'sig_label': sig_label
+        })
+
+    stats_df = pd.DataFrame(stats_records)
+    n_feats = len(valid_feats)
+
+    if orient == 'h':
+        if figsize is None:
+            figsize = (9, max(4.5, 0.55 * n_feats + 1.2))
+        fig, ax = plt.subplots(figsize=figsize, dpi=300)
+        y_pos = np.arange(n_feats)
+
+        all_vals = []
+        for idx, row in stats_df.iterrows():
+            y = y_pos[idx]
+            m1, m2 = row[f'{g1}_Mean'], row[f'{g2}_Mean']
+            e1, e2 = row[f'{g1}_Error'], row[f'{g2}_Error']
+            all_vals.extend([m1, m2])
+
+            # Draw connecting dumbbell bar
+            if pd.notna(m1) and pd.notna(m2):
+                ax.plot([m1, m2], [y, y], color=line_color, lw=line_width, zorder=2, solid_capstyle='round')
+
+            # Draw optional error bars
+            if show_error:
+                if pd.notna(m1):
+                    ax.errorbar(m1, y, xerr=e1, fmt='none', ecolor=c1, elinewidth=1.2, capsize=3, zorder=3)
+                if pd.notna(m2):
+                    ax.errorbar(m2, y, xerr=e2, fmt='none', ecolor=c2, elinewidth=1.2, capsize=3, zorder=3)
+
+            # Draw endpoint markers
+            if pd.notna(m1):
+                ax.scatter(m1, y, color=c1, s=dot_size, edgecolor='black', linewidth=1.2, zorder=4,
+                           label=g1 if idx == 0 else "")
+            if pd.notna(m2):
+                ax.scatter(m2, y, color=c2, s=dot_size, edgecolor='black', linewidth=1.2, zorder=4,
+                           label=g2 if idx == 0 else "")
+
+            # Show numeric values near dots
+            if show_values:
+                if pd.notna(m1):
+                    ax.text(m1, y + 0.18, f"{m1:.2f}", ha='center', va='bottom', fontsize=8.5, color=c1, fontweight='bold')
+                if pd.notna(m2):
+                    ax.text(m2, y + 0.18, f"{m2:.2f}", ha='center', va='bottom', fontsize=8.5, color=c2, fontweight='bold')
+
+        # Formatting & Labels
+        display_labels = stats_df['Display_Name'].tolist()
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(display_labels, fontsize=11, fontweight='bold')
+        ax.invert_yaxis()  # Top-down feature ordering
+
+        # Set X-axis range and add significance labels on the right
+        valid_vals = [v for v in all_vals if pd.notna(v)]
+        if valid_vals:
+            min_val, max_val = min(valid_vals), max(valid_vals)
+            val_span = max_val - min_val if max_val != min_val else 1.0
+            ax.set_xlim(min_val - 0.08 * val_span, max_val + (0.22 if show_pvals else 0.08) * val_span)
+        else:
+            val_span = 1.0
+
+        if show_pvals:
+            for idx, row in stats_df.iterrows():
+                y = y_pos[idx]
+                m1, m2 = row[f'{g1}_Mean'], row[f'{g2}_Mean']
+                sig_text = row['sig_label']
+                if sig_text:
+                    rightmost = max(m for m in [m1, m2] if pd.notna(m)) if pd.notna(m1) or pd.notna(m2) else 0
+                    ax.text(rightmost + 0.04 * val_span, y, sig_text,
+                            va='center', ha='left', fontsize=11, fontweight='bold',
+                            color='#222222', zorder=5)
+
+        ax.grid(True, which='major', axis='x', linestyle='--', alpha=0.5, zorder=0)
+        ax.axvline(0, color='black', linewidth=0.8, linestyle='-', alpha=0.6, zorder=1)
+        ax.set_xlabel(xlabel or "Mean Quantification / Relative Intensity", fontsize=11, fontweight='bold', labelpad=8)
+        ax.tick_params(axis='both', which='major', labelsize=10.5)
+
+    else:  # Vertical orientation ('v')
+        if figsize is None:
+            figsize = (max(8, 0.85 * n_feats + 1.2), 5.5)
+        fig, ax = plt.subplots(figsize=figsize, dpi=300)
+        x_pos = np.arange(n_feats)
+
+        all_vals = []
+        for idx, row in stats_df.iterrows():
+            x = x_pos[idx]
+            m1, m2 = row[f'{g1}_Mean'], row[f'{g2}_Mean']
+            e1, e2 = row[f'{g1}_Error'], row[f'{g2}_Error']
+            all_vals.extend([m1, m2])
+
+            if pd.notna(m1) and pd.notna(m2):
+                ax.plot([x, x], [m1, m2], color=line_color, lw=line_width, zorder=2, solid_capstyle='round')
+
+            if show_error:
+                if pd.notna(m1):
+                    ax.errorbar(x, m1, yerr=e1, fmt='none', ecolor=c1, elinewidth=1.2, capsize=3, zorder=3)
+                if pd.notna(m2):
+                    ax.errorbar(x, m2, yerr=e2, fmt='none', ecolor=c2, elinewidth=1.2, capsize=3, zorder=3)
+
+            if pd.notna(m1):
+                ax.scatter(x, m1, color=c1, s=dot_size, edgecolor='black', linewidth=1.2, zorder=4,
+                           label=g1 if idx == 0 else "")
+            if pd.notna(m2):
+                ax.scatter(x, m2, color=c2, s=dot_size, edgecolor='black', linewidth=1.2, zorder=4,
+                           label=g2 if idx == 0 else "")
+
+            if show_values:
+                if pd.notna(m1):
+                    ax.text(x - 0.15, m1, f"{m1:.2f}", ha='right', va='center', fontsize=8.5, color=c1, fontweight='bold')
+                if pd.notna(m2):
+                    ax.text(x + 0.15, m2, f"{m2:.2f}", ha='left', va='center', fontsize=8.5, color=c2, fontweight='bold')
+
+        display_labels = stats_df['Display_Name'].tolist()
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(display_labels, rotation=0 if n_feats <= 8 else 30, ha='center', fontsize=11, fontweight='bold')
+
+        valid_vals = [v for v in all_vals if pd.notna(v)]
+        if valid_vals:
+            min_val, max_val = min(valid_vals), max(valid_vals)
+            val_span = max_val - min_val if max_val != min_val else 1.0
+            ax.set_ylim(min_val - 0.08 * val_span, max_val + (0.20 if show_pvals else 0.08) * val_span)
+        else:
+            val_span = 1.0
+
+        if show_pvals:
+            for idx, row in stats_df.iterrows():
+                x = x_pos[idx]
+                m1, m2 = row[f'{g1}_Mean'], row[f'{g2}_Mean']
+                sig_text = row['sig_label']
+                if sig_text:
+                    top_val = max(m for m in [m1, m2] if pd.notna(m)) if pd.notna(m1) or pd.notna(m2) else 0
+                    ax.text(x, top_val + 0.04 * val_span, sig_text,
+                            ha='center', va='bottom', fontsize=11, fontweight='bold',
+                            color='#222222', zorder=5)
+
+        ax.grid(True, which='major', axis='y', linestyle='--', alpha=0.5, zorder=0)
+        ax.axhline(0, color='black', linewidth=0.8, linestyle='-', alpha=0.6, zorder=1)
+        ax.set_ylabel(ylabel or "Mean Quantification / Relative Intensity", fontsize=11, fontweight='bold', labelpad=8)
+        ax.tick_params(axis='both', which='major', labelsize=10.5)
+
+    if title:
+        ax.set_title(title, fontsize=13, fontweight='bold', pad=12)
+
+    ax.legend(frameon=True, facecolor='white', edgecolor='#cccccc', fontsize=10.5, loc='upper right')
+    sns.despine(ax=ax)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+        plt.savefig(save_path, transparent=True, dpi=300, bbox_inches='tight')
+        base, _ = os.path.splitext(save_path)
+        plt.savefig(f"{base}.svg", transparent=True, bbox_inches='tight')
+        print(f"Saved dumbbell plot to: {save_path}")
+
+    return fig, ax, stats_df
 
 def plot_compact_inset(df, features, group_name, group_col='group', colors=None,
                        ylim=(-2, 5), yticks=[-2, 0, 2, 4], save_filename=None):
