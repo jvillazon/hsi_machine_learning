@@ -42,7 +42,7 @@ DEFAULT_DATA_PATH = r"C:\Users\jvill\OneDrive - UC San Diego\integrated_pipeline
 DEFAULT_OUTPUT_DIR = r"./plots/group_statistics_output"
 
 # Grouping settings
-GROUP_COLS = ["group"]                 # 1 or 2 columns, e.g. ["group"] or ["group", "mask_name"]
+GROUP_COLS = ["group", "mask_name"]                 # 1 or 2 columns, e.g. ["group"] or ["group", "mask_name"]
 COMBINE_TWO_GROUPS = False             # False = faceted per 2nd column; True = combined "group | mask_name"
 ALPHA = 0.05                           # Significance threshold
 IGNORE_ZEROS = False                   # True = filter 0 values; False = keep 0s

@@ -8,10 +8,10 @@ from pybaselines import whittaker
 
 import matplotlib.pyplot as plt
 
-base_directory = r"E:\Data\Jorge\Vallon Kidney\3_31_26 15-1 kidney"
+base_directory = r"E:\11-07-25 Embryo 10 Day 4"
 
 
-def baseline_correct(spectrum, wavenumbers, lam=1e3, p=0.0001, niter=100, mode='als', eta=0.0005, show_plot=False):
+def baseline_correct(spectrum, wavenumbers, lam=1e3, p=0.001, niter=100, mode='als', eta=0.0005, show_plot=False):
     """
     Perform baseline correction using pybaselines (Asymmetric Least Squares or drPLS).
     
@@ -509,7 +509,8 @@ def main():
         2850: 'CH2 sym',
         2880: 'CH3 sym', 
         2930: 'CH3 asym',
-        2960: 'CH2 asym'
+        2960: 'CH2 asym',
+        3010: '=C-H'
     }
     
     fingerprint_peaks = {
