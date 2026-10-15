@@ -8,7 +8,7 @@ import re
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from sk_classifier.group_stats_pipeline import run_group_stats_pipeline
 
-df = pd.read_parquet(r"C:\Users\jvill\OneDrive - UC San Diego\Vallon Kidney\10-04-26_arithmetic_outputs\all_images_roi_metrics-final.parquet")
+df = pd.read_parquet(r"C:\Users\jvill\OneDrive - UC San Diego\Vallon Kidney\10-14-26 BR_Images_HSI data\Round2-arithmetic\all_images_roi_metrics-final.parquet")
 
 # df= df[df['Sample ID']<16]
 
@@ -28,7 +28,11 @@ anova_df, posthoc_df, desc_df = run_group_stats_pipeline(
         "% Sphingolipids", 
         "% SFA", 
         "% PUFA", 
-        "% Sterol Esters", 
+        "% Sterol Esters",
+        "% Centroid_1 (Cholesterol (ovine))",
+        "% Centroid_2 (Kidney Background)",
+        "% Centroid_3 (TAG Mix)",
+        "% Centroid_4 (Kidney Background)",
         "LD Count", 
         "LD Total Area (um2)", 
         "LD Mean Area (um2)", 
@@ -44,7 +48,11 @@ anova_df, posthoc_df, desc_df = run_group_stats_pipeline(
         "LD % SFA", 
         "LD % PUFA", 
         "LD % Background", 
-        "LD % Sterol Esters", 
+        "LD % Sterol Esters",
+        "LD % Centroid_1 (Cholesterol (ovine))",
+        "LD % Centroid_2 (Kidney Background)",
+        "LD % Centroid_3 (TAG Mix)",
+        "LD % Centroid_4 (Kidney Background)",
         "Protein_Turnover Mean",
         "Lipid_Turnover Mean", 
         "Lipid_to_Protein Mean", 
@@ -56,6 +64,6 @@ anova_df, posthoc_df, desc_df = run_group_stats_pipeline(
         ],
     plot_types="both",              # "violin", "bar", or "both"
     combine_two_groups=False,       # False = Faceted subplots; True = "Condition | Label" combined x-axis
-    output_dir=r"C:\Users\jvill\OneDrive - UC San Diego\Vallon Kidney\10-04-26_arithmetic_outputs\plots\group_stats",
+    output_dir=r"C:\Users\jvill\OneDrive - UC San Diego\Vallon Kidney\10-14-26 BR_Images_HSI data\Round2-plots\group_stats",
     ignore_zeros=True               # Automatically ignores 0, NaN, Inf values
 )
