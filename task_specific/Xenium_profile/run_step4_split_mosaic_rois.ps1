@@ -18,7 +18,7 @@ $OUTPUT_DIR = if ($env:OUTPUT_DIR) { $env:OUTPUT_DIR } else { "C:\Users\jvill\On
 $OUTPUT_PREFIX = if ($env:OUTPUT_PREFIX) { $env:OUTPUT_PREFIX } else { "" }
 
 # Option A: Automatic discovery from tile directory
-$TILE_DIR = if ($env:TILE_DIR) { $env:TILE_DIR } else { "C:\Users\jvill\OneDrive - UC San Diego\Xenium-SRS\total_hSRS\KPMP_038-roi2" }
+$TILE_DIR = if ($env:TILE_DIR) { $env:TILE_DIR } else { "C:\Users\jvill\OneDrive - UC San Diego\Xenium-SRS\hSRS_data\KPMP_038-roi2" }
 
 # Option B: Manual grid parameters (used if TILE_DIR is not provided or to override)
 $GRID_ROWS = if ($env:GRID_ROWS) { $env:GRID_ROWS } else { "" }
