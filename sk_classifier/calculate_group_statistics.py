@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 """
 ========================================================================================
-Group Statistics & Effect Size Determination Suite (Welch's ANOVA, Games-Howell, Cohen's d)
+Group Statistics & Effect Size Determination Suite
 ========================================================================================
+Overhauled Non-Parametric Engine (Kruskal-Wallis, Dunn's + BH FDR, Cliff's Delta, Van Elteren)
+Specifically architected for non-Gaussian distributions, large observation counts, and low biological replicates.
+
 Features:
 - Automated / Dynamic Feature Column Detection (with exclusions for centroids/IDs)
 - Multi-Level Grouping (1 or 2 grouping columns, combined or faceted modes)
 - Robust Statistical Testing:
-    * Welch's ANOVA (robust to unequal variances and group sample sizes)
-    * Games-Howell Post-Hoc Test (pairwise Welch t-tests with adjusted p-values)
-    * Effect Size Calculations:
-        - Cohen's d (sample-size weighted or unweighted pooled SD)
-        - Hedges' g (sample-size corrected unbiased Cohen's d)
-        - Percentage Difference between group means
-        - Qualitative Magnitude Interpretation (Negligible, Small, Medium, Large, Very Large)
-- Summary Tables:
-    * descriptive_statistics.csv
-    * welch_anova_results.csv
-    * games_howell_results.csv
+    * Kruskal-Wallis H-Test (omnibus variation in group medians & η²_H effect size)
+    * Dunn's Post-Hoc Test (pairwise rank-sum tests with exact tie adjustments)
+    * Benjamini-Hochberg (BH) False Discovery Rate (FDR) multiplicity correction
+    * Cliff's Delta (δ) Non-Parametric Effect Size with Romano et al. (2006) 95% CIs
+    * Van Elteren Stratified Wilcoxon across biological replicates (Sample ID / tissue_id)
+    * Biological Concordance Validation (Micro-observation vs. Macro-replicate agreement)
+- Comprehensive Non-Parametric Summary Tables:
+    * descriptive_statistics.csv (Median, IQR, Q25, Q75, MAD, Replicate Counts)
+    * kruskal_wallis_results.csv (H-stat, df, p-val, η²_H)
+    * dunns_posthoc_fdr_cliffs_delta.csv (Pairwise medians, q_BH, Cliff's δ, CI, Magnitude)
+    * stratified_replicate_wilcoxon.csv (Van Elteren Z & p, Replicate Concordance)
+- Legacy Parametric Option:
+    * Supports mode="parametric" for Welch's ANOVA, Games-Howell, and Cohen's d / Hedges' g
 ========================================================================================
 """
 
@@ -30,10 +35,27 @@ from typing import List, Dict, Tuple, Optional, Union, Any
 
 import numpy as np
 import pandas as pd
-import pingouin as pg
 
 # Add parent directory to sys.path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from core.nonparametric_stats import (
+    compute_cliffs_delta,
+    run_kruskal_wallis,
+    run_dunns_posthoc_fdr,
+    run_stratified_sample_wilcoxon,
+    compute_nonparametric_descriptives,
+    p_to_stars,
+    format_p_value,
+    interpret_cliffs_delta
+)
+
+# Optional pingouin import for legacy parametric fallback
+try:
+    import pingouin as pg
+except ImportError:
+    pg = None
+
 
 # ==============================================================================
 # 1. CONFIGURATION (Edit here for default runs)
@@ -45,11 +67,14 @@ DEFAULT_OUTPUT_DIR = r"./plots/group_statistics_output"
 GROUP_COLS = ["group", "mask_name"]                 # 1 or 2 columns, e.g. ["group"] or ["group", "mask_name"]
 COMBINE_TWO_GROUPS = False             # False = faceted per 2nd column; True = combined "group | mask_name"
 ALPHA = 0.05                           # Significance threshold
+MIN_CLIFFS_DELTA = 0.147               # Biological significance cutoff: Negligible (<0.147), Small (0.147), Medium (0.33), Large (0.474)
 IGNORE_ZEROS = False                   # True = filter 0 values; False = keep 0s
-WEIGHTED_POOLED_SD = True              # True = (n-1) weighted pooled SD; False = sqrt((var1+var2)/2)
+STATS_MODE = "nonparametric"           # "nonparametric" (default) or "parametric"
+
+# Sample / Biological Replicate Column (e.g. "Sample ID", "tissue_id", "sample_id", "Animal")
+SAMPLE_ID_CANDIDATES = ["Sample ID", "tissue_id", "sample_id"]
 
 # Dynamic vs. Custom Metric Selection:
-# Set VALUE_COLS = None to automatically select all numeric columns in the dataframe
 VALUE_COLS: Optional[List[str]] = None
 
 # Columns to exclude from automated numeric column detection
@@ -61,70 +86,11 @@ EXCLUDE_COLS = [
 
 
 # ==============================================================================
-# 2. STATISTICAL ENGINE & EFFECT SIZES
+# 2. LEGACY PARAMETRIC SUPPORT (Welch's ANOVA / Games-Howell / Cohen's d)
 # ==============================================================================
 
-def p_to_stars(p: float) -> str:
-    """Converts a p-value float into standard asterisk notation."""
-    if pd.isna(p) or p is None:
-        return ""
-    if p < 0.0001:
-        return "****"
-    if p < 0.001:
-        return "***"
-    if p < 0.01:
-        return "**"
-    if p < 0.05:
-        return "*"
-    return "ns"
-
-
-def format_p_value(p: float) -> str:
-    """Formats numeric p-value into publication-ready string."""
-    if pd.isna(p) or p is None:
-        return "N/A"
-    if p == 0 or p < 1e-15:
-        return "< 1e-15"
-    if p < 0.001:
-        return f"{p:.4e}"
-    return f"{p:.4f}"
-
-
-def interpret_effect_size(d: float) -> str:
-    """Provides Cohen's standard qualitative interpretation of effect size magnitude."""
-    if pd.isna(d) or d is None:
-        return "N/A"
-    abs_d = abs(d)
-    if abs_d < 0.2:
-        return "Negligible"
-    elif abs_d < 0.5:
-        return "Small"
-    elif abs_d < 0.8:
-        return "Medium"
-    elif abs_d < 1.2:
-        return "Large"
-    else:
-        return "Very Large"
-
-
 def compute_cohens_d(group_a: np.ndarray, group_b: np.ndarray, weighted: bool = True) -> Tuple[float, float]:
-    """
-    Computes Cohen's d and Hedges' g (sample-size corrected Cohen's d).
-    
-    Parameters:
-    -----------
-    group_a, group_b : array-like
-        Numeric arrays of values for group A and group B.
-    weighted : bool, default True
-        If True, uses the standard sample-size weighted pooled standard deviation:
-            s_pooled = sqrt( ((n1 - 1)*var1 + (n2 - 1)*var2) / (n1 + n2 - 2) )
-        If False, uses the unweighted average of group variances:
-            s_pooled = sqrt( (var1 + var2) / 2 )
-    
-    Returns:
-    --------
-    (cohen_d, hedges_g) : Tuple[float, float]
-    """
+    """Computes Cohen's d and Hedges' g for parametric mode."""
     a = np.asarray(group_a, dtype=float)
     b = np.asarray(group_b, dtype=float)
     a = a[np.isfinite(a)]
@@ -146,40 +112,9 @@ def compute_cohens_d(group_a: np.ndarray, group_b: np.ndarray, weighted: bool = 
         return 0.0, 0.0
     
     d = (np.mean(a) - np.mean(b)) / s_pooled
-    
-    # Hedges' g correction factor for small-sample bias
     j = 1.0 - (3.0 / max(1.0, (4.0 * (n1 + n2) - 9.0)))
     g = d * j
     return float(d), float(g)
-
-
-def compute_descriptive_stats(
-    df: pd.DataFrame, 
-    value_col: str, 
-    group_col: str,
-    ignore_zeros: bool = False
-) -> pd.DataFrame:
-    """Computes comprehensive descriptive summary statistics per group."""
-    sub = df[[group_col, value_col]].dropna()
-    sub = sub[np.isfinite(sub[value_col])]
-    if ignore_zeros:
-        sub = sub[sub[value_col] != 0]
-
-    grouped = sub.groupby(group_col, observed=True)[value_col]
-    stats = grouped.agg(
-        N='count',
-        Mean='mean',
-        Std='std',
-        Median='median',
-        Min='min',
-        Max='max',
-        Q25=lambda x: np.percentile(x.dropna(), 25) if len(x.dropna()) > 0 else np.nan,
-        Q75=lambda x: np.percentile(x.dropna(), 75) if len(x.dropna()) > 0 else np.nan,
-    ).reset_index()
-    stats['SEM'] = stats['Std'] / np.sqrt(stats['N'].clip(lower=1))
-    stats['IQR'] = stats['Q75'] - stats['Q25']
-    stats['Metric'] = value_col
-    return stats
 
 
 def run_welch_games_howell(
@@ -190,16 +125,10 @@ def run_welch_games_howell(
     ignore_zeros: bool = False,
     weighted_pooled_sd: bool = True
 ) -> Tuple[Optional[Dict[str, Any]], Optional[pd.DataFrame]]:
-    """
-    Performs Welch's ANOVA and pairwise Games-Howell post-hoc testing with Cohen's d & Hedges' g.
-    
-    Returns:
-    --------
-    anova_dict : dict or None
-        Dictionary containing omnibus ANOVA results (F, df1, df2, p_unc, np2).
-    posthoc_df : pd.DataFrame or None
-        DataFrame containing pairwise post-hoc tests with effect size metrics.
-    """
+    """Legacy parametric Welch's ANOVA and Games-Howell post-hoc test."""
+    if pg is None:
+        raise ImportError("pingouin is required for parametric Welch/Games-Howell mode.")
+        
     sub = data[[value_col, group_col]].dropna()
     sub = sub[np.isfinite(sub[value_col])]
     if ignore_zeros:
@@ -253,12 +182,15 @@ def run_welch_games_howell(
                 mean_b = float(r.get('mean(B)', np.mean(val_b))) if 'mean(B)' in r else float(np.mean(val_b))
                 pct_diff = ((mean_a - mean_b) / mean_b * 100.0) if mean_b != 0 else np.nan
                 
+                abs_d = abs(d) if not np.isnan(d) else 0
+                interp = "Negligible" if abs_d < 0.2 else ("Small" if abs_d < 0.5 else ("Medium" if abs_d < 0.8 else ("Large" if abs_d < 1.2 else "Very Large")))
+                
                 mean_a_list.append(mean_a)
                 mean_b_list.append(mean_b)
                 cohens_d_list.append(d)
                 hedges_g_list.append(g)
                 pct_diff_list.append(pct_diff)
-                effect_interp_list.append(interpret_effect_size(d))
+                effect_interp_list.append(interp)
                 n_a_list.append(len(val_a))
                 n_b_list.append(len(val_b))
                 
@@ -295,30 +227,45 @@ def get_quantitative_columns(df: pd.DataFrame, value_cols: Optional[List[str]] =
     return valid_cols
 
 
+def detect_sample_column(df: pd.DataFrame) -> Optional[str]:
+    """Detects biological replicate column (e.g. 'Sample ID', 'tissue_id', 'Animal') in dataframe."""
+    for col in SAMPLE_ID_CANDIDATES:
+        if col in df.columns:
+            return col
+    return None
+
+
 def run_group_statistics_pipeline(
     df: pd.DataFrame,
     group_cols: List[str] = GROUP_COLS,
     value_cols: Optional[List[str]] = VALUE_COLS,
     combine_two_groups: bool = COMBINE_TWO_GROUPS,
     alpha: float = ALPHA,
+    min_cliffs_delta: float = MIN_CLIFFS_DELTA,
+    mode: str = STATS_MODE,
+    sample_col: Optional[str] = None,
     output_dir: Optional[str] = DEFAULT_OUTPUT_DIR,
     ignore_zeros: bool = IGNORE_ZEROS,
-    weighted_pooled_sd: bool = WEIGHTED_POOLED_SD,
     exclude_cols: Optional[List[str]] = None
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Optional[pd.DataFrame]]:
     """
-    Main statistical pipeline driver. Iterates through all metrics across 1 or 2 groups,
-    calculates Welch's ANOVA, Games-Howell post-hoc, Cohen's d & Hedges' g effect sizes,
-    and exports summary CSVs.
+    Main statistical pipeline driver. Iterates through all metrics across 1 or 2 groups.
+    
+    In Non-Parametric Mode (default):
+    - Kruskal-Wallis H-test & η²_H
+    - Dunn's Post-Hoc Test with Benjamini-Hochberg (BH) FDR correction
+    - Cliff's Delta (δ) effect size & Romano 95% CIs
+    - Van Elteren Stratified Wilcoxon test across biological replicates
+    - Non-parametric descriptive statistics (Median, IQR, Q25, Q75, MAD, Replicate Counts)
     
     Returns:
     --------
-    (anova_df, posthoc_df, descriptive_df) : Tuple of DataFrames
+    (omnibus_df, posthoc_df, descriptive_df, stratified_df) : Tuple of DataFrames
     """
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
     
-    # 1. Resolve Value Columns
+    # Resolve value columns
     valid_metrics = get_quantitative_columns(df, value_cols=value_cols, exclude_cols=exclude_cols)
     if not valid_metrics:
         raise ValueError("No valid numeric quantitative metric columns found to analyze.")
@@ -326,43 +273,74 @@ def run_group_statistics_pipeline(
     for g in group_cols:
         if g not in df.columns:
             raise KeyError(f"Grouping column '{g}' not found in dataframe.")
+            
+    # Resolve biological sample column
+    resolved_sample_col = sample_col if sample_col and sample_col in df.columns else detect_sample_column(df)
     
     print("=" * 80)
     print("Starting Group Statistical Analysis Pipeline")
-    print(f"Data instances: {df.shape[0]:,} rows x {df.shape[1]} columns")
-    print(f"Metrics ({len(valid_metrics)}): {valid_metrics[:5]}{'...' if len(valid_metrics) > 5 else ''}")
-    print(f"Grouping: {group_cols} | Combine: {combine_two_groups} | Alpha: {alpha}")
-    print(f"Cohen's d Pooled SD Mode: {'Sample-size Weighted' if weighted_pooled_sd else 'Unweighted Average'}")
+    print(f"Mode:               {mode.upper()}")
+    print(f"Data instances:     {df.shape[0]:,} rows x {df.shape[1]} columns")
+    print(f"Metrics ({len(valid_metrics)}):       {valid_metrics[:5]}{'...' if len(valid_metrics) > 5 else ''}")
+    print(f"Grouping:           {group_cols} | Combine: {combine_two_groups} | Alpha: {alpha}")
+    if mode == "nonparametric":
+        print(f"FDR Correction:     Benjamini-Hochberg (BH)")
+        print(f"Effect Size:        Cliff's Delta (delta) [Threshold: |delta| >= {min_cliffs_delta}]")
+        print(f"Sample Stratification: {resolved_sample_col if resolved_sample_col else 'None detected'}")
     print("=" * 80)
 
     d = df.copy()
-    anova_records = []
+    omnibus_records = []
     posthoc_records = []
     desc_records = []
+    stratified_records = []
 
-    # 2. Iterate Metrics
     for i, item in enumerate(valid_metrics, 1):
         if len(group_cols) == 1:
             g_col = group_cols[0]
             
-            # Descriptive stats
-            desc = compute_descriptive_stats(d, item, g_col, ignore_zeros=ignore_zeros)
-            desc['group_by'] = g_col
-            desc['facet'] = None
-            desc_records.append(desc)
-            
-            # Hypothesis testing
-            anova, posthoc = run_welch_games_howell(
-                d, item, g_col, alpha=alpha, 
-                ignore_zeros=ignore_zeros, weighted_pooled_sd=weighted_pooled_sd
-            )
-            if anova is not None:
-                anova_records.append({**anova, "item": item, "group_by": g_col, "facet": None})
-            if posthoc is not None:
-                posthoc["item"] = item
-                posthoc["group_by"] = g_col
-                posthoc["facet"] = None
-                posthoc_records.append(posthoc)
+            if mode == "nonparametric":
+                # 1. Non-parametric descriptives
+                desc = compute_nonparametric_descriptives(d, item, g_col, sample_col=resolved_sample_col, ignore_zeros=ignore_zeros)
+                desc['group_by'] = g_col
+                desc['facet'] = None
+                desc_records.append(desc)
+                
+                # 2. Kruskal-Wallis omnibus
+                kw = run_kruskal_wallis(d, item, g_col, ignore_zeros=ignore_zeros)
+                if kw is not None:
+                    omnibus_records.append({**kw, "item": item, "group_by": g_col, "facet": None})
+                    
+                # 3. Dunn's post-hoc with BH-FDR & Cliff's Delta
+                ph = run_dunns_posthoc_fdr(d, item, g_col, alpha=alpha, min_cliffs_delta=min_cliffs_delta, ignore_zeros=ignore_zeros)
+                if ph is not None and not ph.empty:
+                    ph["item"] = item
+                    ph["group_by"] = g_col
+                    ph["facet"] = None
+                    posthoc_records.append(ph)
+                    
+                # 4. Stratified Wilcoxon across Sample ID
+                if resolved_sample_col:
+                    strat = run_stratified_sample_wilcoxon(d, item, g_col, resolved_sample_col, alpha=alpha, ignore_zeros=ignore_zeros)
+                    if strat is not None and not strat.empty:
+                        strat["item"] = item
+                        strat["facet"] = None
+                        stratified_records.append(strat)
+            else:
+                # Legacy parametric mode
+                desc = compute_nonparametric_descriptives(d, item, g_col, sample_col=resolved_sample_col, ignore_zeros=ignore_zeros)
+                desc['group_by'] = g_col
+                desc['facet'] = None
+                desc_records.append(desc)
+                
+                aov, ph = run_welch_games_howell(d, item, g_col, alpha=alpha, ignore_zeros=ignore_zeros)
+                if aov is not None:
+                    omnibus_records.append({**aov, "item": item, "group_by": g_col, "facet": None})
+                if ph is not None and not ph.empty:
+                    ph["item"] = item
+                    ph["group_by"] = g_col
+                    ph["facet"] = None
+                    posthoc_records.append(ph)
 
         elif len(group_cols) == 2:
             g1, g2 = group_cols
@@ -370,22 +348,43 @@ def run_group_statistics_pipeline(
                 combo_col = f"{g1}__{g2}"
                 d[combo_col] = d[g1].astype(str) + " | " + d[g2].astype(str)
                 
-                desc = compute_descriptive_stats(d, item, combo_col, ignore_zeros=ignore_zeros)
-                desc['group_by'] = f"{g1}+{g2} (combined)"
-                desc['facet'] = None
-                desc_records.append(desc)
-                
-                anova, posthoc = run_welch_games_howell(
-                    d, item, combo_col, alpha=alpha, 
-                    ignore_zeros=ignore_zeros, weighted_pooled_sd=weighted_pooled_sd
-                )
-                if anova is not None:
-                    anova_records.append({**anova, "item": item, "group_by": f"{g1}+{g2} (combined)", "facet": None})
-                if posthoc is not None:
-                    posthoc["item"] = item
-                    posthoc["group_by"] = f"{g1}+{g2} (combined)"
-                    posthoc["facet"] = None
-                    posthoc_records.append(posthoc)
+                if mode == "nonparametric":
+                    desc = compute_nonparametric_descriptives(d, item, combo_col, sample_col=resolved_sample_col, ignore_zeros=ignore_zeros)
+                    desc['group_by'] = f"{g1}+{g2} (combined)"
+                    desc['facet'] = None
+                    desc_records.append(desc)
+                    
+                    kw = run_kruskal_wallis(d, item, combo_col, ignore_zeros=ignore_zeros)
+                    if kw is not None:
+                        omnibus_records.append({**kw, "item": item, "group_by": f"{g1}+{g2} (combined)", "facet": None})
+                        
+                    ph = run_dunns_posthoc_fdr(d, item, combo_col, alpha=alpha, min_cliffs_delta=min_cliffs_delta, ignore_zeros=ignore_zeros)
+                    if ph is not None and not ph.empty:
+                        ph["item"] = item
+                        ph["group_by"] = f"{g1}+{g2} (combined)"
+                        ph["facet"] = None
+                        posthoc_records.append(ph)
+                        
+                    if resolved_sample_col:
+                        strat = run_stratified_sample_wilcoxon(d, item, combo_col, resolved_sample_col, alpha=alpha, ignore_zeros=ignore_zeros)
+                        if strat is not None and not strat.empty:
+                            strat["item"] = item
+                            strat["facet"] = None
+                            stratified_records.append(strat)
+                else:
+                    desc = compute_nonparametric_descriptives(d, item, combo_col, sample_col=resolved_sample_col, ignore_zeros=ignore_zeros)
+                    desc['group_by'] = f"{g1}+{g2} (combined)"
+                    desc['facet'] = None
+                    desc_records.append(desc)
+                    
+                    aov, ph = run_welch_games_howell(d, item, combo_col, alpha=alpha, ignore_zeros=ignore_zeros)
+                    if aov is not None:
+                        omnibus_records.append({**aov, "item": item, "group_by": f"{g1}+{g2} (combined)", "facet": None})
+                    if ph is not None and not ph.empty:
+                        ph["item"] = item
+                        ph["group_by"] = f"{g1}+{g2} (combined)"
+                        ph["facet"] = None
+                        posthoc_records.append(ph)
             else:
                 facets = [fval for fval in d[g2].dropna().unique()]
                 for fval in facets:
@@ -393,65 +392,105 @@ def run_group_statistics_pipeline(
                     if sub[g1].nunique() < 2:
                         continue
                     
-                    desc = compute_descriptive_stats(sub, item, g1, ignore_zeros=ignore_zeros)
-                    desc['group_by'] = g1
-                    desc['facet'] = f"{g2}={fval}"
-                    desc_records.append(desc)
-                    
-                    anova, posthoc = run_welch_games_howell(
-                        sub, item, g1, alpha=alpha, 
-                        ignore_zeros=ignore_zeros, weighted_pooled_sd=weighted_pooled_sd
-                    )
-                    if anova is not None:
-                        anova_records.append({**anova, "item": item, "group_by": g1, "facet": f"{g2}={fval}"})
-                    if posthoc is not None:
-                        posthoc["item"] = item
-                        posthoc["group_by"] = g1
-                        posthoc["facet"] = f"{g2}={fval}"
-                        posthoc_records.append(posthoc)
+                    if mode == "nonparametric":
+                        desc = compute_nonparametric_descriptives(sub, item, g1, sample_col=resolved_sample_col, ignore_zeros=ignore_zeros)
+                        desc['group_by'] = g1
+                        desc['facet'] = f"{g2}={fval}"
+                        desc_records.append(desc)
+                        
+                        kw = run_kruskal_wallis(sub, item, g1, ignore_zeros=ignore_zeros)
+                        if kw is not None:
+                            omnibus_records.append({**kw, "item": item, "group_by": g1, "facet": f"{g2}={fval}"})
+                            
+                        ph = run_dunns_posthoc_fdr(sub, item, g1, alpha=alpha, min_cliffs_delta=min_cliffs_delta, ignore_zeros=ignore_zeros)
+                        if ph is not None and not ph.empty:
+                            ph["item"] = item
+                            ph["group_by"] = g1
+                            ph["facet"] = f"{g2}={fval}"
+                            posthoc_records.append(ph)
+                            
+                        if resolved_sample_col:
+                            strat = run_stratified_sample_wilcoxon(sub, item, g1, resolved_sample_col, alpha=alpha, ignore_zeros=ignore_zeros)
+                            if strat is not None and not strat.empty:
+                                strat["item"] = item
+                                strat["facet"] = f"{g2}={fval}"
+                                stratified_records.append(strat)
+                    else:
+                        desc = compute_nonparametric_descriptives(sub, item, g1, sample_col=resolved_sample_col, ignore_zeros=ignore_zeros)
+                        desc['group_by'] = g1
+                        desc['facet'] = f"{g2}={fval}"
+                        desc_records.append(desc)
+                        
+                        aov, ph = run_welch_games_howell(sub, item, g1, alpha=alpha, ignore_zeros=ignore_zeros)
+                        if aov is not None:
+                            omnibus_records.append({**aov, "item": item, "group_by": g1, "facet": f"{g2}={fval}"})
+                        if ph is not None and not ph.empty:
+                            ph["item"] = item
+                            ph["group_by"] = g1
+                            ph["facet"] = f"{g2}={fval}"
+                            posthoc_records.append(ph)
 
         if i % 10 == 0 or i == len(valid_metrics):
             print(f"  Processed {i}/{len(valid_metrics)} features...")
 
-    # 3. Consolidate & Format Result DataFrames
-    anova_df = pd.DataFrame([{k: v for k, v in rec.items() if k != "labels"} for rec in anova_records])
+    # Consolidate & Format Result DataFrames
+    omnibus_df = pd.DataFrame(omnibus_records) if omnibus_records else pd.DataFrame()
     posthoc_df = pd.concat(posthoc_records, ignore_index=True) if posthoc_records else pd.DataFrame()
     desc_df = pd.concat(desc_records, ignore_index=True) if desc_records else pd.DataFrame()
+    stratified_df = pd.concat(stratified_records, ignore_index=True) if stratified_records else pd.DataFrame()
 
-    if not anova_df.empty and "p_unc" in anova_df.columns:
-        anova_df["p_unc_formatted"] = anova_df["p_unc"].apply(format_p_value)
-        # Reorder columns
-        cols = ["item", "group_by", "facet", "F", "df1", "df2", "p_unc", "p_unc_formatted", "np2", "k_groups", "N_total"]
-        anova_df = anova_df[[c for c in cols if c in anova_df.columns]]
+    if not omnibus_df.empty and "p_unc" in omnibus_df.columns:
+        omnibus_df["p_unc_formatted"] = omnibus_df["p_unc"].apply(format_p_value)
+        omnibus_df["significance"] = omnibus_df["p_unc"].apply(p_to_stars)
+        if "H_stat" in omnibus_df.columns:
+            lead_cols = ["item", "group_by", "facet", "H_stat", "df", "p_unc", "p_unc_formatted", "significance", "eta_sq_h", "k_groups", "N_total"]
+        else:
+            lead_cols = ["item", "group_by", "facet", "F", "df1", "df2", "p_unc", "p_unc_formatted", "significance", "np2", "k_groups", "N_total"]
+        omnibus_df = omnibus_df[[c for c in lead_cols if c in omnibus_df.columns]]
 
-    if not posthoc_df.empty and "pval" in posthoc_df.columns:
-        posthoc_df["pval_formatted"] = posthoc_df["pval"].apply(format_p_value)
-        cols = [
+    if not posthoc_df.empty:
+        if "pval" in posthoc_df.columns:
+            posthoc_df["pval_formatted"] = posthoc_df["pval"].apply(format_p_value)
+        if "q_fdr_bh" in posthoc_df.columns:
+            posthoc_df["q_fdr_bh_formatted"] = posthoc_df["q_fdr_bh"].apply(format_p_value)
+            
+        lead_cols = [
             "item", "group_by", "facet", "A", "B", "N(A)", "N(B)", 
-            "mean(A)", "mean(B)", "diff", "pct_diff", "T", "df", 
-            "pval", "pval_formatted", "significance", "is_significant", 
-            "cohen_d", "hedges_g", "effect_size_magnitude"
+            "median(A)", "median(B)", "iqr(A)", "iqr(B)", "diff", "pct_diff",
+            "Z", "pval_raw", "q_fdr_bh", "q_fdr_bh_formatted", "significance", 
+            "is_significant", "cliffs_delta", "delta_95_ci", "effect_size_magnitude", 
+            "is_biologically_significant", "mean(A)", "mean(B)", "cohen_d", "hedges_g"
         ]
-        posthoc_df = posthoc_df[[c for c in cols if c in posthoc_df.columns]]
+        posthoc_df = posthoc_df[[c for c in lead_cols if c in posthoc_df.columns]]
 
-    # 4. Save CSV Reports
+    # Save CSV Reports
     if output_dir:
-        anova_path = os.path.join(output_dir, "welch_anova_results.csv")
-        posthoc_path = os.path.join(output_dir, "games_howell_results.csv")
+        if mode == "nonparametric":
+            omnibus_path = os.path.join(output_dir, "kruskal_wallis_results.csv")
+            posthoc_path = os.path.join(output_dir, "dunns_posthoc_fdr_cliffs_delta.csv")
+        else:
+            omnibus_path = os.path.join(output_dir, "welch_anova_results.csv")
+            posthoc_path = os.path.join(output_dir, "games_howell_results.csv")
+            
         desc_path = os.path.join(output_dir, "descriptive_statistics.csv")
+        strat_path = os.path.join(output_dir, "stratified_replicate_wilcoxon.csv")
         
-        anova_df.to_csv(anova_path, index=False)
+        omnibus_df.to_csv(omnibus_path, index=False)
         posthoc_df.to_csv(posthoc_path, index=False)
         desc_df.to_csv(desc_path, index=False)
+        if not stratified_df.empty:
+            stratified_df.to_csv(strat_path, index=False)
         
         print("\n" + "=" * 80)
         print("Statistical Analysis Complete!")
-        print(f"  [1] Welch's ANOVA:          {anova_path}")
-        print(f"  [2] Games-Howell + Cohen d: {posthoc_path}")
-        print(f"  [3] Descriptive Statistics: {desc_path}")
+        print(f"  [1] Omnibus Test:            {omnibus_path}")
+        print(f"  [2] Pairwise Post-Hoc:       {posthoc_path}")
+        print(f"  [3] Descriptive Statistics:  {desc_path}")
+        if not stratified_df.empty:
+            print(f"  [4] Stratified Concordance:  {strat_path}")
         print("=" * 80)
 
-    return anova_df, posthoc_df, desc_df
+    return omnibus_df, posthoc_df, desc_df, (stratified_df if not stratified_df.empty else None)
 
 
 # ==============================================================================
@@ -459,14 +498,16 @@ def run_group_statistics_pipeline(
 # ==============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Calculate Welch's ANOVA, Games-Howell post-hoc, and Cohen's d effect sizes.")
+    parser = argparse.ArgumentParser(description="Calculate Kruskal-Wallis, Dunn's post-hoc with BH FDR, Cliff's Delta, and Van Elteren stratified Wilcoxon.")
     parser.add_argument("--data", type=str, default=DEFAULT_DATA_PATH, help="Path to input dataset (.csv or .parquet)")
     parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT_DIR, help="Output directory for CSV reports")
     parser.add_argument("--groups", nargs="+", default=GROUP_COLS, help="1 or 2 grouping column names")
     parser.add_argument("--combine", action="store_true", default=COMBINE_TWO_GROUPS, help="Combine 2 grouping columns into single category")
     parser.add_argument("--alpha", type=float, default=ALPHA, help="Significance alpha threshold")
+    parser.add_argument("--min-delta", type=float, default=MIN_CLIFFS_DELTA, help="Minimum Cliff's delta threshold for biological significance")
+    parser.add_argument("--mode", type=str, default=STATS_MODE, choices=["nonparametric", "parametric"], help="Statistical mode (nonparametric or parametric)")
+    parser.add_argument("--sample-col", type=str, default=None, help="Biological sample/replicate column for stratified Wilcoxon")
     parser.add_argument("--ignore-zeros", action="store_true", default=IGNORE_ZEROS, help="Ignore 0, NaN, and Inf values")
-    parser.add_argument("--unweighted-sd", action="store_true", help="Use unweighted average of variances for Cohen's d instead of (n-1) weighted")
     args = parser.parse_args()
 
     data_path = args.data
@@ -489,9 +530,11 @@ def main():
         value_cols=VALUE_COLS,
         combine_two_groups=args.combine,
         alpha=args.alpha,
+        min_cliffs_delta=args.min_delta,
+        mode=args.mode,
+        sample_col=args.sample_col,
         output_dir=args.output,
-        ignore_zeros=args.ignore_zeros,
-        weighted_pooled_sd=not args.unweighted_sd
+        ignore_zeros=args.ignore_zeros
     )
 
 

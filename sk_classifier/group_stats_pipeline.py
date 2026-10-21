@@ -2,20 +2,23 @@
 ========================================================================================
 Group Statistics & Publication-Quality Visualization Pipeline
 ========================================================================================
+Overhauled Non-Parametric Engine (Kruskal-Wallis, Dunn's + BH FDR, Cliff's Delta, Van Elteren)
+Specifically architected for non-Gaussian distributions, large observation counts, and low biological replicates.
+
 Features:
 - Flexible Multi-Column Metric selection (e.g. % Lipids, Turnover, Ratios, Intensity, etc.)
 - Multi-Level Grouping (1, 2, or more grouping columns, combine/facet/hue modes)
-- Robust Statistical Testing:
-    * Welch's ANOVA (robust to heteroscedasticity and unequal sample sizes)
-    * Games-Howell Post-Hoc Test (pairwise comparisons with Welch t-test & adjusted p-values)
-    * Effect Size Calculations:
-        - Cohen's d (sample standard deviation pooled)
-        - Hedges' g (sample-size corrected unbiased Cohen's d)
-        - Percentage Difference between group means
-        - Effect size qualitative interpretation (Negligible, Small, Medium, Large, Very Large)
+- Non-Parametric Statistical Testing:
+    * Kruskal-Wallis H-Test (variation in group medians, η²_H effect size)
+    * Dunn's Post-Hoc Test (exact Kruskal-Wallis pooled rank variance with tie adjustments)
+    * Benjamini-Hochberg (BH) False Discovery Rate (FDR) multiplicity correction (q-values)
+    * Cliff's Delta (δ) Non-Parametric Effect Size & Romano et al. (2006) 95% CIs
+    * Van Elteren Stratified Wilcoxon across biological replicates (Sample ID / tissue_id)
+    * Biological Concordance Validation (identifying potential pseudoreplication)
+    * Dual Significance Filtering (q_BH < 0.05 AND |δ| >= 0.147)
 - Rich Visualizations:
-    * Violin Plots (with boxplot inner, overlayed strip plot, mean point + labels)
-    * Bar Plots (with mean +/- SEM/SD error bars, overlayed strip points, mean labels)
+    * Violin Plots (with inner quartile/box, overlayed strip plot, median point + glow labels)
+    * Bar Plots (with group medians or means +/- IQR / SEM error bars, strip points)
     * Automatic Significance Brackets with multi-level collision avoidance
     * Standalone Legend generation for sample IDs / hue categories
 - Data Formats: Parquet (.parquet), Feather (.feather), CSV (.csv), Excel (.xlsx)
@@ -25,6 +28,7 @@ Features:
 import os
 import re
 import sys
+import json
 import argparse
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Union, Any
@@ -35,84 +39,85 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.patheffects as PathEffects
 import seaborn as sns
-import pingouin as pg
+
+# Add parent directory to sys.path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from core.nonparametric_stats import (
+    compute_cliffs_delta,
+    run_kruskal_wallis,
+    run_dunns_posthoc_fdr,
+    run_stratified_sample_wilcoxon,
+    compute_nonparametric_descriptives,
+    p_to_stars,
+    format_p_value,
+    interpret_cliffs_delta
+)
+
+# Optional pingouin import for legacy parametric fallback
+try:
+    import pingouin as pg
+except ImportError:
+    pg = None
 
 # -----------------------------------------------------------------------------
-# DEFAULT CONFIGURATION
+# PROJECT-AGNOSTIC DEFAULT CONFIGURATION
 # -----------------------------------------------------------------------------
-DEFAULT_DATA_PATH = r"C:\Users\jvill\OneDrive - UC San Diego\Vallon Kidney\headless_arithmetic_outputs\all_images_roi_metrics.parquet"
-DEFAULT_OUTPUT_DIR = r"C:\Users\jvill\OneDrive - UC San Diego\Vallon Kidney\headless_arithmetic_outputs\plots\group_stats"
+DEFAULT_OUTPUT_DIR = "group_stats_output"
+
+# Statistical Mode: "nonparametric" (default) or "parametric"
+STATS_MODE = "nonparametric"
 
 # Plotting parameters
 PLOT_TYPE = "both"             # "violin", "bar", or "both"
-COMBINE_TWO_GROUPS = False     # True: merge 2 group cols into one combined category (e.g. "Ctrl/Veh | PT-S1/S2")
+COMBINE_TWO_GROUPS = False     # True: merge 2 group cols into one combined category (e.g. "GroupA | GroupB")
                                # False: facet by 2nd group column with aligned shared axes
 ALPHA = 0.05                   # Significance threshold for post-hoc tests and brackets
 MAX_BRACKETS = 6               # Cap on brackets per subplot to prevent clutter (None = show all)
-MIN_EFFECT_SIZE_BRACKET = 0.0  # Only draw brackets if |Cohen's d| or |Hedges' g| >= this threshold (0.0 = all sig)
-ERROR_BAR_TYPE = "sem"         # For bar plots: "sem", "sd", or "ci" (95% confidence interval)
+MIN_EFFECT_SIZE_BRACKET = 0.147  # Only draw brackets if |Cliff's δ| >= 0.147 (filters out negligible shifts on massive N)
+ERROR_BAR_TYPE = "iqr"         # For bar plots: "iqr" (median +/- IQR), "sem", or "sd"
+CENTRAL_TENDENCY = "median"    # "median" (recommended for non-parametric) or "mean"
 
-PALETTE = ["#e85b1e", "#f19d78", "#37498b", "#a7b4e3"]        # Seaborn or custom palette name / list / dict
-STRIP_HUE_COL = "Sample ID"    # Color individual strip dots by Sample ID / Animal / Replicate (or None)
+PALETTE = ["#e85b1e", "#f19d78", "#37498b", "#a7b4e3"]        # Base palette; dynamically scales if groups > len(palette)
+STRIP_HUE_COL = None           # Replicate column (auto-detected via canonical aliases if None)
 STRIP_PALETTE = "husl"        # Palette for strip plot dots
 SAVE_STRIP_LEGEND = True       # Save separate clean PNG legend for strip dots
 FONT_SCALE = 1.5               # Global font scaling factor for publication figures
 DPI = 300                      # Output resolution for saved figures
 TRANSPARENT_BG = True          # Save figures with transparent background
 
+# Canonical column aliases for zero-touch schema normalization
+SAMPLE_ID_ALIASES = [
+    "Sample_ID", "Sample ID", "sample_id", "sample", "Sample", 
+    "Animal_ID", "Animal ID", "animal_id", "Subject_ID", "Subject ID"
+]
+IMAGE_NAME_ALIASES = [
+    "Image_Name", "Image Name", "image_name", "image", "Image", 
+    "Tile_Name", "tile_name", "tile"
+]
+ROI_NUMBER_ALIASES = [
+    "ROI_Number", "ROI #", "ROI_Num", "roi_number", "roi_num", "ROI"
+]
+ROI_INSTANCE_ALIASES = [
+    "ROI_instance", "ROI Inst", "roi_instance", "roi_inst"
+]
+AREA_ALIASES = [
+    "Area_px", "Area (px)", "area_px", "area", "Area"
+]
+NON_METRIC_COLS = {
+    "Centroid_X", "Centroid_Y", "ROI_Number", "ROI #", "ROI_Num", "roi_number",
+    "ROI_instance", "ROI Inst", "roi_instance", "slice_index", 
+    "Image_Width", "Image_Height", "Pixel_Size_um", "Area_px", "Area (px)",
+    "UID", "Image_Path", "Vertices_JSON"
+}
+
 
 # -----------------------------------------------------------------------------
-# STATISTICAL UTILITIES & EFFECT SIZES
+# LEGACY PARAMETRIC SUPPORT (Welch / Games-Howell / Cohen's d)
 # -----------------------------------------------------------------------------
-
-def p_to_stars(p: float) -> str:
-    """Converts a p-value to standard scientific asterisk notation."""
-    if pd.isna(p):
-        return ""
-    if p < 0.0001:
-        return "****"
-    if p < 0.001:
-        return "***"
-    if p < 0.01:
-        return "**"
-    if p < 0.05:
-        return "*"
-    return "ns"
-
-
-def format_p_value(p: float) -> str:
-    """Formats p-values cleanly for publication tables."""
-    if pd.isna(p):
-        return "N/A"
-    if p == 0 or p < 1e-15:
-        return "< 1e-15"
-    if p < 0.001:
-        return f"{p:.4e}"
-    return f"{p:.4f}"
-
-
-def interpret_effect_size(d: float) -> str:
-    """Provides Cohen's standard qualitative interpretation of effect size."""
-    if pd.isna(d):
-        return "N/A"
-    abs_d = abs(d)
-    if abs_d < 0.2:
-        return "Negligible"
-    elif abs_d < 0.5:
-        return "Small"
-    elif abs_d < 0.8:
-        return "Medium"
-    elif abs_d < 1.2:
-        return "Large"
-    else:
-        return "Very Large"
-
 
 def compute_cohens_d(group_a: np.ndarray, group_b: np.ndarray) -> Tuple[float, float]:
-    """
-    Computes Cohen's d and Hedges' g (sample-size corrected Cohen's d).
-    Returns (cohens_d, hedges_g).
-    """
+    """Computes Cohen's d and Hedges' g for parametric mode."""
     a = group_a[~np.isnan(group_a)]
     b = group_b[~np.isnan(group_b)]
     n1, n2 = len(a), len(b)
@@ -122,45 +127,14 @@ def compute_cohens_d(group_a: np.ndarray, group_b: np.ndarray) -> Tuple[float, f
     mean1, mean2 = np.mean(a), np.mean(b)
     var1, var2 = np.var(a, ddof=1), np.var(b, ddof=1)
     
-    # Pooled standard deviation
     s_pooled = np.sqrt(((n1 - 1) * var1 + (n2 - 1) * var2) / max(1, (n1 + n2 - 2)))
     if s_pooled == 0 or np.isnan(s_pooled):
         return 0.0, 0.0
     
     d = (mean1 - mean2) / s_pooled
-    # Hedges' g correction factor
     j = 1.0 - (3.0 / max(1.0, (4.0 * (n1 + n2) - 9.0)))
     g = d * j
     return float(d), float(g)
-
-
-def compute_descriptive_stats(
-    df: pd.DataFrame, 
-    value_col: str, 
-    group_col: str,
-    ignore_zeros: bool = False
-) -> pd.DataFrame:
-    """Computes comprehensive summary statistics per group."""
-    sub = df[[group_col, value_col]].dropna()
-    sub = sub[np.isfinite(sub[value_col])]
-    if ignore_zeros:
-        sub = sub[sub[value_col] != 0]
-
-    grouped = sub.groupby(group_col, observed=True)[value_col]
-    stats = grouped.agg(
-        N='count',
-        Mean='mean',
-        Std='std',
-        Median='median',
-        Min='min',
-        Max='max',
-        Q25=lambda x: np.percentile(x.dropna(), 25) if len(x.dropna()) > 0 else np.nan,
-        Q75=lambda x: np.percentile(x.dropna(), 75) if len(x.dropna()) > 0 else np.nan,
-    ).reset_index()
-    stats['SEM'] = stats['Std'] / np.sqrt(stats['N'].clip(lower=1))
-    stats['IQR'] = stats['Q75'] - stats['Q25']
-    stats['Metric'] = value_col
-    return stats
 
 
 def run_welch_games_howell(
@@ -170,13 +144,10 @@ def run_welch_games_howell(
     alpha: float = ALPHA,
     ignore_zeros: bool = False
 ) -> Tuple[Optional[Dict[str, Any]], Optional[pd.DataFrame]]:
-    """
-    Performs Welch's ANOVA and Games-Howell post-hoc testing with Cohen's d & Hedges' g.
-    
-    Returns:
-        anova_dict: Dictionary of ANOVA results (F, df1, df2, p_unc, np2/eta-sq) or None
-        posthoc_df: DataFrame containing pairwise Games-Howell results with effect sizes or None
-    """
+    """Legacy Welch's ANOVA and Games-Howell post-hoc test."""
+    if pg is None:
+        raise ImportError("pingouin is required for parametric Welch/Games-Howell mode.")
+        
     sub = data[[value_col, group_col]].dropna()
     sub = sub[np.isfinite(sub[value_col])]
     if ignore_zeros:
@@ -189,7 +160,6 @@ def run_welch_games_howell(
     if k < 2:
         return None, None
     
-    # 1. Welch's ANOVA
     try:
         aov = pg.welch_anova(dv=value_col, between=group_col, data=sub)
         row = aov.iloc[0]
@@ -206,7 +176,6 @@ def run_welch_games_howell(
         print(f"  [Warning] Welch's ANOVA failed for '{value_col}' on '{group_col}': {e}")
         return None, None
     
-    # 2. Games-Howell Post-Hoc (if groups >= 2)
     posthoc_df = None
     try:
         posthoc_df = pg.pairwise_gameshowell(dv=value_col, between=group_col, data=sub)
@@ -227,10 +196,13 @@ def run_welch_games_howell(
                 mean_b = float(r.get('mean(B)', np.mean(val_b)))
                 pct_diff = ((mean_a - mean_b) / mean_b * 100.0) if mean_b != 0 else np.nan
                 
+                abs_d = abs(d) if not np.isnan(d) else 0
+                interp = "Negligible" if abs_d < 0.2 else ("Small" if abs_d < 0.5 else ("Medium" if abs_d < 0.8 else ("Large" if abs_d < 1.2 else "Very Large")))
+                
                 cohens_d_list.append(d)
                 hedges_g_list.append(g)
                 pct_diff_list.append(pct_diff)
-                effect_interp_list.append(interpret_effect_size(d))
+                effect_interp_list.append(interp)
                 n_a_list.append(len(val_a))
                 n_b_list.append(len(val_b))
                 
@@ -258,6 +230,10 @@ def build_palette_dict(order: List[Any], palette: Union[str, List, Dict]) -> Dic
     if isinstance(palette, dict):
         return {cat: palette.get(cat, "#4C72B0") for cat in order}
     elif isinstance(palette, (list, tuple)):
+        if len(order) > len(palette):
+            # Scale up palette when category count exceeds list length to avoid repeated colors
+            colors = sns.color_palette("tab20" if len(order) <= 20 else "husl", len(order))
+            return {cat: colors[i] for i, cat in enumerate(order)}
         return {cat: palette[i % len(palette)] for i, cat in enumerate(order)}
     elif isinstance(palette, str):
         colors = sns.color_palette(palette, len(order))
@@ -319,7 +295,7 @@ def add_significance_brackets(
 ) -> int:
     """
     Renders non-overlapping significance brackets above categorical groups.
-    sig_pairs: list of tuples (group_a, group_b, p_value, effect_size)
+    sig_pairs: list of tuples (group_a, group_b, p_or_q_value, effect_size)
     """
     if not sig_pairs:
         return 0
@@ -330,7 +306,6 @@ def add_significance_brackets(
     y_start = ymax + 0.04 * y_range
     h = 0.07 * y_range
 
-    # Sort shortest (adjacent) comparisons first so they sit lower
     valid_pairs = []
     for item in sig_pairs:
         g1, g2 = item[0], item[1]
@@ -341,7 +316,7 @@ def add_significance_brackets(
     if max_brackets is not None and max_brackets > 0:
         valid_pairs = valid_pairs[:max_brackets]
 
-    levels_occupied = []  # list of lists of (left, right) x intervals
+    levels_occupied = []
     max_level_used = 0
     star_fs = max(8, int(10 * font_scale))
 
@@ -391,6 +366,9 @@ def plot_single_group_axes(
     ax: Optional[plt.Axes] = None,
     title: Optional[str] = None,
     alpha: float = ALPHA,
+    min_effect_size_bracket: float = MIN_EFFECT_SIZE_BRACKET,
+    stats_mode: str = STATS_MODE,
+    central_tendency: str = CENTRAL_TENDENCY,
     palette: Union[str, List, Dict] = PALETTE,
     add_brackets: bool = True,
     strip_hue_col: Optional[str] = STRIP_HUE_COL,
@@ -401,8 +379,8 @@ def plot_single_group_axes(
     ignore_zeros: bool = False
 ) -> Tuple[Optional[Dict[str, Any]], Optional[pd.DataFrame]]:
     """
-    Renders either a Violin plot or a Bar plot with mean points, strip dots,
-    and statistical testing on a given matplotlib axes.
+    Renders either a Violin plot or a Bar plot with median points, strip dots,
+    and non-parametric statistical testing on a given matplotlib axes.
     """
     cols_to_keep = [value_col, group_col]
     if strip_hue_col and strip_hue_col in df.columns and strip_hue_col not in cols_to_keep:
@@ -435,31 +413,51 @@ def plot_single_group_axes(
 
     # 1. Base Plot (Violin or Bar)
     if plot_type.lower() == "bar":
-        # Calculate means and errors for bar plot
-        means = [sub.loc[sub[group_col] == cat, value_col].mean() for cat in order]
-        if error_bar_type.lower() == "sem":
-            errors = [
-                sub.loc[sub[group_col] == cat, value_col].std() / np.sqrt(max(1, len(sub.loc[sub[group_col] == cat, value_col])))
-                for cat in order
-            ]
-        elif error_bar_type.lower() == "sd":
-            errors = [sub.loc[sub[group_col] == cat, value_col].std() for cat in order]
-        else: # 95% CI
-            errors = [
-                1.96 * sub.loc[sub[group_col] == cat, value_col].std() / np.sqrt(max(1, len(sub.loc[sub[group_col] == cat, value_col])))
-                for cat in order
-            ]
+        if central_tendency.lower() == "median":
+            heights = [float(sub.loc[sub[group_col] == cat, value_col].median()) for cat in order]
+            if error_bar_type.lower() == "iqr":
+                # Asymmetric error bars: [median - Q25, Q75 - median]
+                lower_err = [
+                    max(0, float(sub.loc[sub[group_col] == cat, value_col].median() - np.percentile(sub.loc[sub[group_col] == cat, value_col].dropna(), 25)))
+                    for cat in order
+                ]
+                upper_err = [
+                    max(0, float(np.percentile(sub.loc[sub[group_col] == cat, value_col].dropna(), 75) - sub.loc[sub[group_col] == cat, value_col].median()))
+                    for cat in order
+                ]
+                errors = [lower_err, upper_err]
+            elif error_bar_type.lower() == "sem":
+                errors = [
+                    sub.loc[sub[group_col] == cat, value_col].std() / np.sqrt(max(1, len(sub.loc[sub[group_col] == cat, value_col])))
+                    for cat in order
+                ]
+            else: # SD
+                errors = [sub.loc[sub[group_col] == cat, value_col].std() for cat in order]
+        else: # Mean
+            heights = [sub.loc[sub[group_col] == cat, value_col].mean() for cat in order]
+            if error_bar_type.lower() == "sem":
+                errors = [
+                    sub.loc[sub[group_col] == cat, value_col].std() / np.sqrt(max(1, len(sub.loc[sub[group_col] == cat, value_col])))
+                    for cat in order
+                ]
+            elif error_bar_type.lower() == "sd":
+                errors = [sub.loc[sub[group_col] == cat, value_col].std() for cat in order]
+            else: # 95% CI
+                errors = [
+                    1.96 * sub.loc[sub[group_col] == cat, value_col].std() / np.sqrt(max(1, len(sub.loc[sub[group_col] == cat, value_col])))
+                    for cat in order
+                ]
             
         bar_colors = [palette_dict[cat] for cat in order]
         x_indices = np.arange(len(order))
         ax.bar(
-            x_indices, means, yerr=errors, capsize=4, 
+            x_indices, heights, yerr=errors, capsize=4, 
             color=bar_colors, edgecolor='black', linewidth=1.1, alpha=0.82, zorder=1
         )
         ax.set_xticks(x_indices)
         ax.set_xticklabels(order)
     else:
-        # Violin plot
+        # Violin plot with inner box/quartiles
         sns.violinplot(
             data=sub, x=group_col, y=value_col, order=order,
             hue=group_col, hue_order=order, palette=palette_dict,
@@ -485,7 +483,7 @@ def plot_single_group_axes(
             edgecolor="black", linewidth=0.5, ax=ax, legend=False, zorder=3
         )
 
-    # 3. Mean Marker & Text Overlay
+    # 3. Central Tendency Marker & Text Overlay (Median by default)
     ymin, ymax = ax.get_ylim()
     y_span = max(ymax - ymin, 1e-6)
     y_offset = 0.025 * y_span
@@ -493,15 +491,15 @@ def plot_single_group_axes(
     for idx, category in enumerate(order):
         cat_data = sub.loc[sub[group_col] == category, value_col]
         if len(cat_data) > 0:
-            mean_val = cat_data.mean()
-            # Mean point (white with black outline)
+            rep_val = cat_data.median() if central_tendency.lower() == "median" else cat_data.mean()
+            # White marker point with crisp outline
             ax.plot(
-                idx, mean_val, marker='o', color='white', markeredgecolor='black',
+                idx, rep_val, marker='o', color='white', markeredgecolor='black',
                 markeredgewidth=1.2, markersize=7, zorder=4
             )
-            # Mean text label with white outline glow for readability
+            # Text label with glowing outline for high contrast
             txt = ax.text(
-                idx, mean_val + y_offset, f"{mean_val:.2f}",
+                idx, rep_val + y_offset, f"{rep_val:.2f}",
                 ha='center', va='bottom', fontsize=text_fs, fontweight='bold', zorder=5
             )
             txt.set_path_effects([
@@ -517,23 +515,43 @@ def plot_single_group_axes(
     ax.tick_params(axis="x", labelsize=tick_fs, rotation=25 if len(order) > 4 else 0)
 
     # 5. Statistical Testing & Significance Brackets
-    anova, posthoc = run_welch_games_howell(sub, value_col, group_col, alpha, ignore_zeros=ignore_zeros)
-    if anova is not None:
-        p_val_str = format_p_value(anova['p_unc'])
-        subtitle = f"{title or value_col}\nWelch's ANOVA p = {p_val_str}"
-        ax.set_title(subtitle, fontsize=title_fs, fontweight='bold', pad=10)
+    if stats_mode.lower() == "nonparametric":
+        omnibus = run_kruskal_wallis(sub, value_col, group_col, ignore_zeros=ignore_zeros)
+        posthoc = run_dunns_posthoc_fdr(sub, value_col, group_col, alpha=alpha, min_cliffs_delta=min_effect_size_bracket, ignore_zeros=ignore_zeros)
         
-        if posthoc is not None and add_brackets:
-            sig_pairs = [
-                (row["A"], row["B"], row["pval"], row.get("cohen_d", np.nan))
-                for _, row in posthoc.iterrows() 
-                if row["pval"] < alpha and abs(row.get("cohen_d", 999)) >= MIN_EFFECT_SIZE_BRACKET
-            ]
-            add_significance_brackets(ax, sig_pairs, order, max_brackets=MAX_BRACKETS, font_scale=font_scale)
+        if omnibus is not None:
+            p_val_str = format_p_value(omnibus['p_unc'])
+            subtitle = f"{title or value_col}\nKruskal-Wallis p = {p_val_str}"
+            ax.set_title(subtitle, fontsize=title_fs, fontweight='bold', pad=10)
+            
+            if posthoc is not None and add_brackets:
+                sig_pairs = [
+                    (row["A"], row["B"], row["pval"], row.get("cliffs_delta", np.nan))
+                    for _, row in posthoc.iterrows() 
+                    if row["pval"] < alpha and abs(row.get("cliffs_delta", 999)) >= min_effect_size_bracket
+                ]
+                add_significance_brackets(ax, sig_pairs, order, max_brackets=MAX_BRACKETS, font_scale=font_scale)
+        else:
+            ax.set_title(f"{title or value_col}\n(Insufficient data for Kruskal-Wallis)", fontsize=title_fs)
     else:
-        ax.set_title(f"{title or value_col}\n(Insufficient data for ANOVA)", fontsize=title_fs)
+        # Legacy parametric mode
+        omnibus, posthoc = run_welch_games_howell(sub, value_col, group_col, alpha, ignore_zeros=ignore_zeros)
+        if omnibus is not None:
+            p_val_str = format_p_value(omnibus['p_unc'])
+            subtitle = f"{title or value_col}\nWelch's ANOVA p = {p_val_str}"
+            ax.set_title(subtitle, fontsize=title_fs, fontweight='bold', pad=10)
+            
+            if posthoc is not None and add_brackets:
+                sig_pairs = [
+                    (row["A"], row["B"], row["pval"], row.get("cohen_d", np.nan))
+                    for _, row in posthoc.iterrows() 
+                    if row["pval"] < alpha and abs(row.get("cohen_d", 999)) >= min_effect_size_bracket
+                ]
+                add_significance_brackets(ax, sig_pairs, order, max_brackets=MAX_BRACKETS, font_scale=font_scale)
+        else:
+            ax.set_title(f"{title or value_col}\n(Insufficient data for ANOVA)", fontsize=title_fs)
 
-    return anova, posthoc
+    return omnibus, posthoc
 
 
 # -----------------------------------------------------------------------------
@@ -558,35 +576,217 @@ def _safe_savefig(fig, fpath, dpi=DPI, transparent=TRANSPARENT_BG, bbox_inches='
                 except Exception as e:
                     print(f"[Warning] Failed to save {fpath}: {e}")
 
+
+# -----------------------------------------------------------------------------
+# SCHEMA ADAPTER & LOOKUP MAPPING UTILITIES
+# -----------------------------------------------------------------------------
+
+def resolve_canonical_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    """Finds the first existing column in df that matches any of the candidate alias names."""
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def apply_lookup_mapping(
+    df: pd.DataFrame,
+    source_col: Optional[str] = None,
+    target_col: str = "Condition",
+    mapping: Optional[Union[Dict[Any, Any], str, Path]] = None
+) -> pd.DataFrame:
+    """
+    Applies a key-value lookup mapping from source_col to create target_col.
+    Supports in-memory dicts, JSON files, or 2-column CSV files.
+    Handles type mismatch (e.g. str keys vs int column values) transparently.
+    """
+    if mapping is None:
+        return df
+
+    # If mapping is a path to a file
+    if isinstance(mapping, (str, Path)):
+        map_path = str(mapping)
+        if not os.path.exists(map_path):
+            raise FileNotFoundError(f"Lookup mapping file not found: {map_path}")
+        if map_path.endswith(".json"):
+            with open(map_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict) and "mapping" in loaded:
+                source_col = loaded.get("source_col", source_col)
+                target_col = loaded.get("target_col", target_col)
+                mapping = loaded["mapping"]
+            else:
+                mapping = loaded
+        elif map_path.endswith(".csv"):
+            map_df = pd.read_csv(map_path)
+            if map_df.shape[1] >= 2:
+                source_col = source_col or map_df.columns[0]
+                target_col = target_col or map_df.columns[1]
+                mapping = dict(zip(map_df.iloc[:, 0], map_df.iloc[:, 1]))
+            else:
+                raise ValueError(f"Lookup CSV must have at least 2 columns: {map_path}")
+
+    if isinstance(mapping, dict):
+        if "mapping" in mapping and ("source_col" in mapping or "target_col" in mapping):
+            source_col = mapping.get("source_col", source_col)
+            target_col = mapping.get("target_col", target_col)
+            mapping = mapping["mapping"]
+
+    if source_col is None:
+        source_col = resolve_canonical_column(df, SAMPLE_ID_ALIASES)
+        if source_col is None:
+            raise ValueError("source_col for lookup mapping could not be determined automatically.")
+
+    if source_col not in df.columns:
+        resolved = resolve_canonical_column(df, [source_col] + SAMPLE_ID_ALIASES)
+        if resolved:
+            source_col = resolved
+        else:
+            raise KeyError(f"Source column '{source_col}' not found in DataFrame columns.")
+
+    # Create dual-keyed lookup (matching both str(k) and native k) to handle int/str mismatches
+    dual_map = {}
+    for k, v in mapping.items():
+        dual_map[k] = v
+        dual_map[str(k)] = v
+        try:
+            dual_map[int(k)] = v
+        except (ValueError, TypeError):
+            pass
+
+    df[target_col] = df[source_col].map(dual_map).fillna(df[source_col].astype(str))
+    print(f"Applied lookup mapping from '{source_col}' to '{target_col}'. Category counts: {df[target_col].value_counts().to_dict()}")
+    return df
+
+
+def discover_metric_columns(df: pd.DataFrame, exclude_cols: Optional[List[str]] = None) -> List[str]:
+    """Auto-discovers continuous numeric columns suitable for statistical testing."""
+    excludes = set(NON_METRIC_COLS)
+    if exclude_cols:
+        excludes.update(exclude_cols)
+    
+    numeric_cols = []
+    for col in df.select_dtypes(include=np.number).columns:
+        if col in excludes:
+            continue
+        if col.endswith("_JSON") or col.endswith("_px") or col.endswith("_idx") or col.endswith("_id"):
+            continue
+        if df[col].nunique(dropna=True) <= 1:
+            continue
+        numeric_cols.append(col)
+    return numeric_cols
+
+
+def load_table(input_path: Union[str, Path]) -> pd.DataFrame:
+    """Loads tabular data from Parquet, Feather, CSV, or Excel formats."""
+    p = str(input_path)
+    if not os.path.exists(p):
+        raise FileNotFoundError(f"Input file not found: {p}")
+    if p.endswith(".parquet"):
+        return pd.read_parquet(p)
+    elif p.endswith(".feather"):
+        return pd.read_feather(p)
+    elif p.endswith(".csv"):
+        return pd.read_csv(p)
+    elif p.endswith(".xlsx") or p.endswith(".xls"):
+        return pd.read_excel(p)
+    else:
+        try:
+            return pd.read_parquet(p)
+        except Exception:
+            return pd.read_csv(p)
+
+
+def load_json_config(config_path: Union[str, Path]) -> Dict[str, Any]:
+    """Loads a JSON configuration file for pipeline execution."""
+    p = str(config_path)
+    if not os.path.exists(p):
+        raise FileNotFoundError(f"Configuration file not found: {p}")
+    with open(p, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    if not isinstance(config, dict):
+        raise ValueError(f"JSON configuration must be an object/dict, got {type(config)}")
+    return config
+
+
 def run_group_stats_pipeline(
     df: pd.DataFrame,
-    group_cols: List[str],
-    value_cols: List[str],
+    group_cols: Optional[List[str]] = None,
+    value_cols: Optional[List[str]] = None,
     col_order: Optional[Dict[str, List[Any]]] = None,
     plot_types: Union[str, List[str]] = "both",
     combine_two_groups: bool = COMBINE_TWO_GROUPS,
     filter_values: Optional[Dict[str, List[Any]]] = None,
     palette: Union[str, List, Dict] = PALETTE,
     add_brackets: bool = True,
-    output_dir: str = DEFAULT_OUTPUT_DIR,
-    strip_hue_col: Optional[str] = STRIP_HUE_COL,
+    output_dir: Optional[str] = None,
+    strip_hue_col: Optional[str] = None,
     strip_palette: str = STRIP_PALETTE,
     save_legend: bool = SAVE_STRIP_LEGEND,
     font_scale: float = FONT_SCALE,
-    ignore_zeros: bool = False
+    ignore_zeros: bool = False,
+    stats_mode: str = STATS_MODE,
+    min_effect_size_bracket: float = MIN_EFFECT_SIZE_BRACKET,
+    central_tendency: str = CENTRAL_TENDENCY,
+    error_bar_type: str = ERROR_BAR_TYPE,
+    lookup_table: Optional[Union[Dict[str, Any], str, Path]] = None,
+    lookup_source_col: Optional[str] = None,
+    lookup_target_col: str = "Condition"
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Executes the end-to-end visualization and statistical testing pipeline.
     
     Returns:
-        (anova_results_df, posthoc_results_df, descriptive_stats_df)
+        (omnibus_results_df, posthoc_results_df, descriptive_stats_df)
     """
-    group_subfolder = "_".join([re.sub(r"[^\w\s]", "", g).strip().replace(" ", "_") for g in group_cols])
-    effective_output_dir = os.path.normpath(os.path.join(output_dir, group_subfolder)) if group_subfolder else output_dir
-    os.makedirs(effective_output_dir, exist_ok=True)
     df_proc = df.copy()
 
-    # 1. Apply Filtering
+    # 1. Apply Lookup Mapping (e.g. mapping sample IDs to experimental conditions)
+    if lookup_table is not None:
+        df_proc = apply_lookup_mapping(
+            df=df_proc, 
+            source_col=lookup_source_col, 
+            target_col=lookup_target_col, 
+            mapping=lookup_table
+        )
+
+    # 2. Resolve Group Columns
+    if not group_cols:
+        if "Condition" in df_proc.columns and "Label" in df_proc.columns:
+            group_cols = ["Condition", "Label"]
+        elif "group" in df_proc.columns and "Region" in df_proc.columns:
+            group_cols = ["group", "Region"]
+        elif "group" in df_proc.columns:
+            group_cols = ["group"]
+        elif "Label" in df_proc.columns:
+            group_cols = ["Label"]
+        else:
+            raise ValueError(
+                "group_cols must be specified (e.g. group_cols=['Condition', 'Label'] or ['group', 'Region'])."
+            )
+        print(f"Defaulting group_cols to: {group_cols}")
+
+    # 3. Resolve Value Metric Columns
+    if not value_cols:
+        value_cols = discover_metric_columns(df_proc)
+        if not value_cols:
+            raise ValueError("No numeric metric columns found for statistical testing.")
+        print(f"Auto-discovered {len(value_cols)} numeric metric columns: {value_cols[:8]}...")
+
+    # 4. Resolve Output Directory
+    if not output_dir:
+        output_dir = DEFAULT_OUTPUT_DIR
+    group_subfolder = "_".join([re.sub(r"[^\w\s]", "", str(g)).strip().replace(" ", "_") for g in group_cols])
+    effective_output_dir = os.path.normpath(os.path.join(output_dir, group_subfolder)) if group_subfolder else output_dir
+    os.makedirs(effective_output_dir, exist_ok=True)
+
+    # 5. Resolve Strip Hue Column (Sample Replicates)
+    if strip_hue_col is None:
+        strip_hue_col = resolve_canonical_column(df_proc, SAMPLE_ID_ALIASES)
+        if strip_hue_col:
+            print(f"Auto-detected sample replicate column: '{strip_hue_col}'")
+
+    # 6. Apply Filtering
     if filter_values:
         for col, keep_vals in filter_values.items():
             if col in df_proc.columns and keep_vals:
@@ -596,7 +796,7 @@ def run_group_stats_pipeline(
     if len(df_proc) == 0:
         raise ValueError("DataFrame is empty after applying filter_values! Please check your filter values.")
 
-    # 2. Setup Strip Plot Palette & Separate Legend
+    # 7. Setup Strip Plot Palette & Separate Legend
     strip_order = None
     strip_palette_dict = None
     if strip_hue_col and strip_hue_col in df_proc.columns:
@@ -624,9 +824,10 @@ def run_group_stats_pipeline(
     else:
         active_plot_types = [p.lower() for p in plot_types]
 
-    anova_records = []
+    omnibus_records = []
     posthoc_records = []
     descriptive_records = []
+    stratified_records = []
 
     # 5. Iterate through Value Metrics and Plot Types
     for ptype in active_plot_types:
@@ -663,13 +864,15 @@ def run_group_stats_pipeline(
                 fig_width = max(4.8, 1.35 * len(order))
                 fig, ax = plt.subplots(figsize=(fig_width, 6))
                 
-                aov, ph = plot_single_group_axes(
+                omni, ph = plot_single_group_axes(
                     df=df_proc, value_col=item, group_col=g_col, group_order=order,
                     plot_type=ptype, ax=ax, title=f"{item} by {g_col}",
-                    alpha=ALPHA, palette=palette, add_brackets=add_brackets,
+                    alpha=ALPHA, min_effect_size_bracket=min_effect_size_bracket,
+                    stats_mode=stats_mode, central_tendency=central_tendency,
+                    palette=palette, add_brackets=add_brackets,
                     strip_hue_col=strip_hue_col, strip_order=strip_order,
-                    strip_palette_dict=strip_palette_dict, font_scale=font_scale,
-                    ignore_zeros=ignore_zeros
+                    strip_palette_dict=strip_palette_dict, error_bar_type=error_bar_type,
+                    font_scale=font_scale, ignore_zeros=ignore_zeros
                 )
                 fig.tight_layout()
                 fig_path = os.path.join(ptype_dir, f"{clean_name}.png")
@@ -677,16 +880,24 @@ def run_group_stats_pipeline(
                 plt.close(fig)
 
                 if ptype == active_plot_types[0]:
-                    if aov is not None:
-                        anova_records.append({**aov, "Metric": item, "Group_By": g_col, "Facet": "None"})
+                    if omni is not None:
+                        omnibus_records.append({**omni, "Metric": item, "Group_By": g_col, "Facet": "None"})
                     if ph is not None:
                         ph["Metric"] = item
                         ph["Group_By"] = g_col
                         ph["Facet"] = "None"
                         posthoc_records.append(ph)
-                    desc = compute_descriptive_stats(df_proc, item, g_col, ignore_zeros=ignore_zeros)
+                    desc = compute_nonparametric_descriptives(df_proc, item, g_col, sample_col=strip_hue_col, ignore_zeros=ignore_zeros)
                     desc["Facet"] = "None"
                     descriptive_records.append(desc)
+                    
+                    if strip_hue_col and strip_hue_col in df_proc.columns:
+                        strat = run_stratified_sample_wilcoxon(df_proc, item, g_col, strip_hue_col, alpha=ALPHA, ignore_zeros=ignore_zeros)
+                        if strat is not None and not strat.empty:
+                            strat["Metric"] = item
+                            strat["Group_By"] = g_col
+                            strat["Facet"] = "None"
+                            stratified_records.append(strat)
 
             # ----------------------------------------------------
             # Scenario B: Two Grouping Columns
@@ -712,13 +923,15 @@ def run_group_stats_pipeline(
                     fig_width = max(5.5, 1.35 * len(combined_order))
                     fig, ax = plt.subplots(figsize=(fig_width, 6.5))
                     
-                    aov, ph = plot_single_group_axes(
+                    omni, ph = plot_single_group_axes(
                         df=d_combo, value_col=item, group_col=combo_col, group_order=combined_order,
                         plot_type=ptype, ax=ax, title=f"{item} ({g1} & {g2})",
-                        alpha=ALPHA, palette=palette, add_brackets=add_brackets,
+                        alpha=ALPHA, min_effect_size_bracket=min_effect_size_bracket,
+                        stats_mode=stats_mode, central_tendency=central_tendency,
+                        palette=palette, add_brackets=add_brackets,
                         strip_hue_col=strip_hue_col, strip_order=strip_order,
-                        strip_palette_dict=strip_palette_dict, font_scale=font_scale,
-                        ignore_zeros=ignore_zeros
+                        strip_palette_dict=strip_palette_dict, error_bar_type=error_bar_type,
+                        font_scale=font_scale, ignore_zeros=ignore_zeros
                     )
                     fig.tight_layout()
                     fig_path = os.path.join(ptype_dir, f"{clean_name}.png")
@@ -726,16 +939,24 @@ def run_group_stats_pipeline(
                     plt.close(fig)
 
                     if ptype == active_plot_types[0]:
-                        if aov is not None:
-                            anova_records.append({**aov, "Metric": item, "Group_By": f"{g1}+{g2} (Combined)", "Facet": "None"})
+                        if omni is not None:
+                            omnibus_records.append({**omni, "Metric": item, "Group_By": f"{g1}+{g2} (Combined)", "Facet": "None"})
                         if ph is not None:
                             ph["Metric"] = item
                             ph["Group_By"] = f"{g1}+{g2} (Combined)"
                             ph["Facet"] = "None"
                             posthoc_records.append(ph)
-                        desc = compute_descriptive_stats(d_combo, item, combo_col, ignore_zeros=ignore_zeros)
+                        desc = compute_nonparametric_descriptives(d_combo, item, combo_col, sample_col=strip_hue_col, ignore_zeros=ignore_zeros)
                         desc["Facet"] = "None"
                         descriptive_records.append(desc)
+                        
+                        if strip_hue_col and strip_hue_col in d_combo.columns:
+                            strat = run_stratified_sample_wilcoxon(d_combo, item, combo_col, strip_hue_col, alpha=ALPHA, ignore_zeros=ignore_zeros)
+                            if strat is not None and not strat.empty:
+                                strat["Metric"] = item
+                                strat["Group_By"] = f"{g1}+{g2} (Combined)"
+                                strat["Facet"] = "None"
+                                stratified_records.append(strat)
 
                 else:
                     # Faceted Subplots Mode
@@ -753,42 +974,52 @@ def run_group_stats_pipeline(
                     else:
                         axes = list(axes)
 
-                    # Pass 1: Render subplots without brackets to establish unified shared y-limits
                     temp_results = []
                     for ax, fval in zip(axes, facets):
                         sub_facet = df_proc.loc[df_proc[g2] == fval]
-                        aov, ph = plot_single_group_axes(
+                        omni, ph = plot_single_group_axes(
                             df=sub_facet, value_col=item, group_col=g1, group_order=order1,
                             plot_type=ptype, ax=ax, title=f"{item} | {g2} = {fval}",
-                            alpha=ALPHA, palette=palette, add_brackets=False,
+                            alpha=ALPHA, min_effect_size_bracket=min_effect_size_bracket,
+                            stats_mode=stats_mode, central_tendency=central_tendency,
+                            palette=palette, add_brackets=False,
                             strip_hue_col=strip_hue_col, strip_order=strip_order,
-                            strip_palette_dict=strip_palette_dict, font_scale=font_scale,
-                            ignore_zeros=ignore_zeros
+                            strip_palette_dict=strip_palette_dict, error_bar_type=error_bar_type,
+                            font_scale=font_scale, ignore_zeros=ignore_zeros
                         )
-                        temp_results.append((ax, aov, ph, sub_facet, fval))
+                        temp_results.append((ax, omni, ph, sub_facet, fval))
                         
                         if ptype == active_plot_types[0]:
-                            if aov is not None:
-                                anova_records.append({**aov, "Metric": item, "Group_By": g1, "Facet": f"{g2}={fval}"})
+                            if omni is not None:
+                                omnibus_records.append({**omni, "Metric": item, "Group_By": g1, "Facet": f"{g2}={fval}"})
                             if ph is not None:
                                 ph["Metric"] = item
                                 ph["Group_By"] = g1
                                 ph["Facet"] = f"{g2}={fval}"
                                 posthoc_records.append(ph)
-                            desc = compute_descriptive_stats(sub_facet, item, g1, ignore_zeros=ignore_zeros)
+                            desc = compute_nonparametric_descriptives(sub_facet, item, g1, sample_col=strip_hue_col, ignore_zeros=ignore_zeros)
                             desc["Facet"] = f"{g2}={fval}"
                             descriptive_records.append(desc)
+                            
+                            if strip_hue_col and strip_hue_col in sub_facet.columns:
+                                strat = run_stratified_sample_wilcoxon(sub_facet, item, g1, strip_hue_col, alpha=ALPHA, ignore_zeros=ignore_zeros)
+                                if strat is not None and not strat.empty:
+                                    strat["Metric"] = item
+                                    strat["Group_By"] = g1
+                                    strat["Facet"] = f"{g2}={fval}"
+                                    stratified_records.append(strat)
 
                     # Pass 2: Add brackets using shared y-limits
                     initial_ymin, initial_ymax = axes[0].get_ylim()
                     max_level_overall = 0
                     if add_brackets:
-                        for ax, aov, ph, sub_facet, fval in temp_results:
+                        for ax, omni, ph, sub_facet, fval in temp_results:
                             if ph is not None:
+                                es_col = "cliffs_delta" if stats_mode.lower() == "nonparametric" else "cohen_d"
                                 sig_pairs = [
-                                    (row["A"], row["B"], row["pval"], row.get("cohen_d", np.nan))
+                                    (row["A"], row["B"], row["pval"], row.get(es_col, np.nan))
                                     for _, row in ph.iterrows()
-                                    if row["pval"] < ALPHA and abs(row.get("cohen_d", 999)) >= MIN_EFFECT_SIZE_BRACKET
+                                    if row["pval"] < ALPHA and abs(row.get(es_col, 999)) >= min_effect_size_bracket
                                 ]
                                 levels = add_significance_brackets(
                                     ax, sig_pairs, order1, 
@@ -814,137 +1045,113 @@ def run_group_stats_pipeline(
                 raise ValueError(f"group_cols currently supports 1 or 2 columns (received {len(group_cols)}).")
 
     # 6. Format and Export Statistical Summary CSV Tables
-    anova_df = pd.DataFrame(anova_records)
+    omnibus_df = pd.DataFrame(omnibus_records) if omnibus_records else pd.DataFrame()
     posthoc_df = pd.concat(posthoc_records, ignore_index=True) if posthoc_records else pd.DataFrame()
     desc_df = pd.concat(descriptive_records, ignore_index=True) if descriptive_records else pd.DataFrame()
+    stratified_df = pd.concat(stratified_records, ignore_index=True) if stratified_records else pd.DataFrame()
 
-    if not anova_df.empty:
-        if "p_unc" in anova_df.columns:
-            anova_df["p_unc_formatted"] = anova_df["p_unc"].apply(format_p_value)
-            anova_df["significance"] = anova_df["p_unc"].apply(p_to_stars)
-        anova_path = os.path.join(effective_output_dir, "welch_anova_results.csv")
-        anova_df.to_csv(anova_path, index=False)
-        print(f"Exported Welch's ANOVA results to: {anova_path}")
+    if not omnibus_df.empty:
+        if "p_unc" in omnibus_df.columns:
+            omnibus_df["p_unc_formatted"] = omnibus_df["p_unc"].apply(format_p_value)
+            omnibus_df["significance"] = omnibus_df["p_unc"].apply(p_to_stars)
+        if stats_mode.lower() == "nonparametric":
+            omnibus_path = os.path.join(effective_output_dir, "kruskal_wallis_results.csv")
+        else:
+            omnibus_path = os.path.join(effective_output_dir, "welch_anova_results.csv")
+        omnibus_df.to_csv(omnibus_path, index=False)
+        print(f"Exported Omnibus results to: {omnibus_path}")
 
     if not posthoc_df.empty:
         if "pval" in posthoc_df.columns:
             posthoc_df["pval_formatted"] = posthoc_df["pval"].apply(format_p_value)
-        # Reorder columns logically
-        lead_cols = [c for c in ["Metric", "Group_By", "Facet", "A", "B", "N(A)", "N(B)", "mean(A)", "mean(B)", "diff", "pct_diff", "se", "T", "df", "pval", "pval_formatted", "significance", "cohen_d", "hedges_g", "effect_size_magnitude"] if c in posthoc_df.columns]
+        lead_cols = [c for c in [
+            "Metric", "Group_By", "Facet", "A", "B", "N(A)", "N(B)", 
+            "median(A)", "median(B)", "diff", "pct_diff", "se", "Z", "pval_raw", 
+            "pval", "pval_formatted", "significance", "cliffs_delta", "delta_95_ci", 
+            "effect_size_magnitude", "is_biologically_significant", "mean(A)", "mean(B)", 
+            "cohen_d", "hedges_g"
+        ] if c in posthoc_df.columns]
         other_cols = [c for c in posthoc_df.columns if c not in lead_cols]
         posthoc_df = posthoc_df[lead_cols + other_cols]
-        posthoc_path = os.path.join(effective_output_dir, "games_howell_pairwise_results.csv")
+        if stats_mode.lower() == "nonparametric":
+            posthoc_path = os.path.join(effective_output_dir, "dunns_pairwise_fdr_cliffs_delta.csv")
+        else:
+            posthoc_path = os.path.join(effective_output_dir, "games_howell_pairwise_results.csv")
         posthoc_df.to_csv(posthoc_path, index=False)
-        print(f"Exported Games-Howell pairwise results with Cohen's d & Hedges' g to: {posthoc_path}")
+        print(f"Exported pairwise post-hoc results to: {posthoc_path}")
 
     if not desc_df.empty:
         desc_path = os.path.join(effective_output_dir, "descriptive_statistics_summary.csv")
         desc_df.to_csv(desc_path, index=False)
         print(f"Exported descriptive statistics summary to: {desc_path}")
 
+    if not stratified_df.empty:
+        strat_path = os.path.join(effective_output_dir, "stratified_sample_wilcoxon.csv")
+        stratified_df.to_csv(strat_path, index=False)
+        print(f"Exported Stratified Wilcoxon & Replicate Concordance to: {strat_path}")
+
     print(f"\n=======================================================")
     print(f" Pipeline Complete! Visualizations & Stats saved to:")
     print(f" {effective_output_dir}")
     print(f"=======================================================\n")
-    return anova_df, posthoc_df, desc_df
+    return omnibus_df, posthoc_df, desc_df
 
 
 # -----------------------------------------------------------------------------
 # CLI & DEMO SCRIPT ENTRYPOINT
 # -----------------------------------------------------------------------------
 
-def map_vallon_sample_conditions(sample_id: Any) -> str:
-    """Helper to map Vallon kidney sample IDs (string or numeric) to conditions."""
-    try:
-        s_num = int(sample_id)
-        if s_num < 5:
-            return "Ctrl/Veh"
-        elif s_num < 9:
-            return "Ctrl/SGLT2i"
-        elif s_num < 16:
-            return "WD/Veh"
-        else:
-            return "WD/SGLT2i"
-    except (ValueError, TypeError):
-        return str(sample_id)
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Multi-Group Statistical Testing & Publication-Quality Visualization Pipeline")
-    parser.add_argument("--input", "-i", type=str, default=DEFAULT_DATA_PATH, help="Path to input table (.parquet, .feather, .csv, .xlsx)")
-    parser.add_argument("--output", "-o", type=str, default=DEFAULT_OUTPUT_DIR, help="Output directory for plots and statistical tables")
-    parser.add_argument("--plot-type", type=str, default=PLOT_TYPE, choices=["violin", "bar", "both"], help="Plot style to render")
-    parser.add_argument("--combine", action="store_true", help="Combine two group columns into single unified category x-axis")
+    parser = argparse.ArgumentParser(
+        description="Multi-Group Statistical Testing & Publication-Quality Visualization Pipeline"
+    )
+    parser.add_argument("--config", "-c", type=str, default=None, help="Path to JSON configuration file")
+    parser.add_argument("--input", "-i", type=str, default=None, help="Path to input table (.parquet, .feather, .csv, .xlsx)")
+    parser.add_argument("--output", "-o", type=str, default=None, help="Output directory for plots and statistical tables")
+    parser.add_argument("--group-cols", "-g", nargs="+", default=None, help="1 or 2 categorical column names to group by")
+    parser.add_argument("--value-cols", "-v", nargs="+", default=None, help="Numeric metric column names to analyze (auto-discovered if omitted)")
+    parser.add_argument("--sample-col", "-s", type=str, default=None, help="Sample/replicate column for strip dots & stratified Wilcoxon")
+    parser.add_argument("--lookup-file", type=str, default=None, help="Path to JSON or CSV lookup table to assign condition metadata")
+    parser.add_argument("--lookup-source", type=str, default=None, help="Source column for lookup mapping (e.g. Sample_ID)")
+    parser.add_argument("--lookup-target", type=str, default="Condition", help="Target column name to create from lookup (default: Condition)")
+    parser.add_argument("--plot-type", type=str, default=None, choices=["violin", "bar", "both"], help="Plot style to render")
+    parser.add_argument("--combine", action="store_true", default=None, help="Combine two group columns into single unified category x-axis")
+    parser.add_argument("--mode", type=str, default=None, choices=["nonparametric", "parametric"], help="Statistical mode (nonparametric or parametric)")
+    parser.add_argument("--min-delta", type=float, default=None, help="Minimum Cliff's delta threshold for bracket rendering")
+    parser.add_argument("--ignore-zeros", action="store_true", default=None, help="Exclude 0, NaN, and Inf values from analysis")
     args, unknown = parser.parse_known_args()
 
-    input_path = args.input
-    output_dir = args.output
-    plot_type = args.plot_type
-    combine = args.combine or COMBINE_TWO_GROUPS
+    # Load configuration from JSON if provided
+    config = {}
+    if args.config:
+        print(f"Loading configuration from JSON: {args.config}")
+        config = load_json_config(args.config)
+
+    # CLI arguments override JSON config
+    input_path = args.input or config.get("input_path")
+    if not input_path:
+        raise ValueError("Input data path must be specified via --input or inside a --config JSON file.")
+
+    output_dir = args.output or config.get("output_dir", DEFAULT_OUTPUT_DIR)
+    group_cols = args.group_cols or config.get("group_cols")
+    value_cols = args.value_cols or config.get("value_cols")
+    sample_col = args.sample_col or config.get("sample_col")
+    plot_type = args.plot_type or config.get("plot_types", PLOT_TYPE)
+    combine = args.combine if args.combine is not None else config.get("combine_two_groups", COMBINE_TWO_GROUPS)
+    stats_mode = args.mode or config.get("stats_mode", STATS_MODE)
+    min_delta = args.min_delta if args.min_delta is not None else config.get("min_effect_size_bracket", MIN_EFFECT_SIZE_BRACKET)
+    ignore_zeros = args.ignore_zeros if args.ignore_zeros is not None else config.get("ignore_zeros", False)
+    filter_values = config.get("filter_values")
+    col_order = config.get("col_order")
+
+    # Resolve lookup table
+    lookup_table = args.lookup_file or config.get("lookup_table")
+    lookup_source = args.lookup_source
+    lookup_target = args.lookup_target or "Condition"
 
     print(f"Loading data from: {input_path}")
-    if input_path.endswith(".parquet"):
-        df = pd.read_parquet(input_path)
-    elif input_path.endswith(".feather"):
-        df = pd.read_feather(input_path)
-    elif input_path.endswith(".csv"):
-        df = pd.read_csv(input_path)
-    elif input_path.endswith(".xlsx") or input_path.endswith(".xls"):
-        df = pd.read_excel(input_path)
-    else:
-        try:
-            df = pd.read_parquet(input_path)
-        except Exception:
-            df = pd.read_csv(input_path)
-
-    print(f"Loaded dataset: {df.shape[0]} rows x {df.shape[1]} columns.")
-
-    # -------------------------------------------------------------------------
-    # DATA PRE-PROCESSING & CONDITION MAPPING
-    # -------------------------------------------------------------------------
-    if "Sample ID" in df.columns and "Condition" not in df.columns:
-        df["Condition"] = df["Sample ID"].apply(map_vallon_sample_conditions)
-        print(f"Mapped Sample IDs to Conditions: {df['Condition'].value_counts().to_dict()}")
-
-    # -------------------------------------------------------------------------
-    # USER CONFIGURABLE GROUPS & VALUES
-    # (Easily customize these lists for your experiment)
-    # -------------------------------------------------------------------------
-    # Grouping columns: 1 column (e.g. ["Condition"]) or 2 columns (e.g. ["Condition", "Label"])
-    group_cols = ["Condition", "Label"]
-    
-    # Selected metric columns of interest
-    value_cols = [
-        '% Sterols', '% Cardiolipins', '% Phospholipids', 
-        '% Lysophospholipids', '% Glycerols', '% Sphingolipids', 
-        '% SFA', '% PUFA', 
-        'Protein_Turnover Mean', 'Lipid_Turnover Mean', 
-        'Lipid_to_Protein Mean', 'Lipid_Unsaturation Mean'
-    ]
-    # Filter to only columns that actually exist in df
-    value_cols = [c for c in value_cols if c in df.columns]
-    if not value_cols:
-        value_cols = df.select_dtypes(include=np.number).columns.tolist()[:10]
-        print(f"Defaulting to first numeric columns: {value_cols}")
-
-    group_order = ['Ctrl/Veh', 'Ctrl/SGLT2i', 'WD/Veh', 'WD/SGLT2i']
-    unit_order = ['PT-S1/S2', 'PT-S3', 'cTAL', 'mTAL']
-    
-    col_order = {
-        'Condition': group_order,
-        'Label': unit_order
-    }
-    
-    filter_values = {
-        'Label': unit_order,
-        'Condition': group_order
-    }
-
-    # Set up specific output subdirectory based on selected grouping
-    run_output_dir = os.path.join(
-        output_dir, 
-        f"{group_cols[0]}_{group_cols[1]}" if len(group_cols) == 2 else group_cols[0]
-    )
+    df = load_table(input_path)
+    print(f"Loaded dataset: {df.shape[0]:,} rows x {df.shape[1]} columns.")
 
     run_group_stats_pipeline(
         df=df,
@@ -954,13 +1161,19 @@ def main():
         plot_types=plot_type,
         combine_two_groups=combine,
         filter_values=filter_values,
-        palette=PALETTE,
-        add_brackets=True,
-        output_dir=run_output_dir,
-        strip_hue_col=STRIP_HUE_COL if STRIP_HUE_COL in df.columns else None,
-        strip_palette=STRIP_PALETTE,
-        save_legend=SAVE_STRIP_LEGEND,
-        font_scale=FONT_SCALE
+        palette=config.get("palette", PALETTE),
+        add_brackets=config.get("add_brackets", True),
+        output_dir=output_dir,
+        strip_hue_col=sample_col,
+        strip_palette=config.get("strip_palette", STRIP_PALETTE),
+        save_legend=config.get("save_strip_legend", SAVE_STRIP_LEGEND),
+        font_scale=config.get("font_scale", FONT_SCALE),
+        ignore_zeros=ignore_zeros,
+        stats_mode=stats_mode,
+        min_effect_size_bracket=min_delta,
+        lookup_table=lookup_table,
+        lookup_source_col=lookup_source,
+        lookup_target_col=lookup_target
     )
 
 

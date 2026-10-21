@@ -50,11 +50,19 @@ SAMPLE_ID="${SAMPLE_ID:-1}"
 FORMAT="${FORMAT:-both}"
 GENERATE_MASKS="${GENERATE_MASKS:-true}"
 PIXEL_SIZE="${PIXEL_SIZE:-0.4971847}"
+
+# Cohesive vs individual tile parquet/csv output
+SAVE_INDIVIDUAL="${SAVE_INDIVIDUAL:-false}"
+COHESIVE_NAME="${COHESIVE_NAME:-}"
+STITCHED_IMAGE="${STITCHED_IMAGE:-}"
+TARGET_CANVAS_SHAPE="${TARGET_CANVAS_SHAPE:-}"
 # ------------------------------------------------------------------------------
 
 # Detect Python interpreter
 if [ -n "$PYTHON_EXEC" ] && [ -x "$PYTHON_EXEC" ]; then
     : # User specified PYTHON_EXEC
+elif [ -f "/opt/miniconda3/envs/gui_analysis_312/bin/python" ]; then
+    PYTHON_EXEC="/opt/miniconda3/envs/gui_analysis_312/bin/python"
 elif [ -f "/opt/miniconda3/envs/gui_analysis/bin/python" ]; then
     PYTHON_EXEC="/opt/miniconda3/envs/gui_analysis/bin/python"
 elif [ -f "/opt/miniconda3/envs/hsi_machine_learning/bin/python" ]; then
@@ -69,7 +77,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_SCRIPT="$SCRIPT_DIR/split_roi_mosaic_subsections.py"
 
 echo "======================================================================"
-echo "RUNNING STEP 4: SPLIT ROI CELLS INTO MOSAIC SUBSECTIONS"
+echo "RUNNING STEP 4: GENERATE COHESIVE MOSAIC SUBSECTIONS"
 echo "======================================================================"
 echo "Python Exec     : $PYTHON_EXEC"
 echo "Input ROI Table : $INPUT_FILE"
@@ -78,6 +86,7 @@ echo "Tile Directory  : $TILE_DIR"
 echo "Grid Layout     : ${GRID_ROWS:-auto} rows x ${GRID_COLS:-auto} cols (overlap ${OVERLAP_PERCENT}%)"
 echo "Coordinate Mode : $COORD_MODE"
 echo "Crop/Overlap    : $CROP_MODE"
+echo "Save Individual : $SAVE_INDIVIDUAL"
 echo "Format          : $FORMAT"
 echo "======================================================================"
 
@@ -123,6 +132,22 @@ fi
 
 if [ "$GENERATE_MASKS" = "true" ]; then
     ARGS+=(--generate-masks)
+fi
+
+if [ "$SAVE_INDIVIDUAL" = "true" ]; then
+    ARGS+=(--save-individual)
+fi
+
+if [ -n "$COHESIVE_NAME" ]; then
+    ARGS+=(--cohesive-name "$COHESIVE_NAME")
+fi
+
+if [ -n "$STITCHED_IMAGE" ]; then
+    ARGS+=(--stitched-image "$STITCHED_IMAGE")
+fi
+
+if [ -n "$TARGET_CANVAS_SHAPE" ]; then
+    ARGS+=(--target-canvas-shape "$TARGET_CANVAS_SHAPE")
 fi
 
 "$PYTHON_EXEC" "$PYTHON_SCRIPT" "${ARGS[@]}" "$@"

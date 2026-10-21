@@ -12,9 +12,9 @@ Features:
 - Slice-to-cluster dictionary mapping (MASK_DICTS)
 - Value channel naming via Python dictionaries OR CSV files (e.g., neg_annotations.csv)
 - Scheduled multi-scale dilation (e.g., 2 px for lipids/cells, 10 px for collagen)
-- Coordinate-space projection: maps dilated polygons to native (251x2088) MALDI grid
-  using matrix_xy_px_inv from .i2r.json (avoids 315 GB image inflation)
-- Vectorized sparse bincount quantification (< 1s for 213 channels)
+- Coordinate-space projection: maps dilated polygons to native raw image grid
+  using matrix_xy_px_inv from .i2r.json 
+- Vectorized sparse bincount quantification
 - Direct compatibility with multimodal_gui (Vertices_JSON, Centroid_X, Centroid_Y, etc.)
 - Output formats: Parquet (.parquet) and CSV (.csv)
 """
@@ -449,7 +449,7 @@ class GeometryQuantifier:
         transformed = homo @ matrix_3x3.T
         return transformed[:, :2].tolist()
 
-    def quantify_raw_maldi(
+    def quantify_after_transformation(
         self,
         df: pd.DataFrame,
         image_path: str,
@@ -457,26 +457,26 @@ class GeometryQuantifier:
         annotations_source: Union[str, Dict, None],
         dilation_px: int = 2,
         wsi_dilation_px: int = 0,
-        prefix: str = "MALDI_neg_"
+        prefix: str = ""
     ) -> pd.DataFrame:
         """
-        Quantify multi-channel raw MALDI MSI image by projecting dilated cell geometries
-        down into native MALDI space.
+        Quantify multi-channel image by projecting dilated cell geometries
+        down into native space.
         
         Guarantees:
         1. Dilation occurs FIRST:
            - Optional high-res polygon dilation (wsi_dilation_px) in WSI/CODEX space before transformation.
-           - In MALDI space, a spatial dilation kernel of radius dilation_px is constructed first.
-           - Every cell within the MALDI image canvas is guaranteed a valid non-empty sampling footprint
+           - In the image space, a spatial dilation kernel of radius dilation_px is constructed first.
+           - Every cell within the image canvas is guaranteed a valid non-empty sampling footprint
              (combining dilated polygon and/or centroid neighborhood) so downscaling never obliterates small cells.
         2. No cell disappears:
            - Uses normalized NaN-aware convolution so cells never overwrite or erase each other.
            - Background NaNs are masked so tissue cells near boundaries are never contaminated.
-           - Every cell within the MALDI image bounds is 100% quantified.
-           - A cell will only receive a value of 0.0 if the actual average MALDI intensity in its dilated region is 0.
+           - Every cell within the image bounds is 100% quantified.
+           - A cell will only receive a value of 0.0 if the actual average image intensity in its dilated region is 0.
         """
         t0 = time.time()
-        print(f"\n--- Quantifying Raw MALDI: {os.path.basename(image_path)} ---")
+        print(f"\n--- Quantifying Raw Image: {os.path.basename(image_path)} ---")
         if not os.path.exists(image_path):
             print(f"[Warning] Image not found: {image_path}, skipping.")
             return df
@@ -510,21 +510,21 @@ class GeometryQuantifier:
 
         n_cells = len(df)
         pts_codex = np.column_stack([cx_arr, cy_arr, np.ones(n_cells, dtype=np.float64)])
-        pts_maldi = (pts_codex @ mat_inv.T)[:, :2]
-        cx_m = pts_maldi[:, 0]
-        cy_m = pts_maldi[:, 1]
+        pts_image = (pts_codex @ mat_inv.T)[:, :2]
+        cx_m = pts_image[:, 0]
+        cy_m = pts_image[:, 1]
 
         with tifffile.TiffFile(image_path) as tif:
             num_channels = len(tif.pages)
             p0 = tif.pages[0].asarray()
             m_h, m_w = p0.shape[-2], p0.shape[-1]
-            print(f"MALDI canvas shape: {m_h} x {m_w} | Channels: {num_channels} | Cells: {n_cells:,d}")
+            print(f"image canvas shape: {m_h} x {m_w} | Channels: {num_channels} | Cells: {n_cells:,d}")
 
             in_crop = (cx_m >= 0) & (cx_m < m_w) & (cy_m >= 0) & (cy_m < m_h)
             xi = np.clip(np.round(cx_m).astype(np.int32), 0, m_w - 1)
             yi = np.clip(np.round(cy_m).astype(np.int32), 0, m_h - 1)
             n_in = int(np.count_nonzero(in_crop))
-            print(f"Cells within MALDI canvas bounds: {n_in:,d} / {n_cells:,d} ({n_in / max(1, n_cells) * 100:.1f}%)")
+            print(f"Cells within image canvas bounds: {n_in:,d} / {n_cells:,d} ({n_in / max(1, n_cells) * 100:.1f}%)")
 
             # 1. Dilation kernel setup (Dilation occurs FIRST)
             dil_r = max(0, int(dilation_px))
@@ -537,11 +537,11 @@ class GeometryQuantifier:
             valid_mask = np.isfinite(p0).astype(np.float32)
             count_conv = cv2.filter2D(valid_mask, -1, kernel)
 
-            # 3. Detect large structures (e.g. Glomeruli) with area >= 2 px in MALDI space
-            scale_maldi = np.sqrt(mat_inv[0, 0]**2 + mat_inv[1, 0]**2)
+            # 3. Detect large structures (e.g. Glomeruli) with area >= 2 px in image space
+            scale_image = np.sqrt(mat_inv[0, 0]**2 + mat_inv[1, 0]**2)
             area_col = next((col_map[c] for c in ["area_px", "area", "area (px)"] if c in col_map), None)
-            areas_maldi = (df[area_col].values * (scale_maldi**2)) if area_col else np.zeros(n_cells)
-            large_indices = np.where(in_crop & (areas_maldi >= 2.0))[0]
+            areas_image = (df[area_col].values * (scale_image**2)) if area_col else np.zeros(n_cells)
+            large_indices = np.where(in_crop & (areas_image >= 2.0))[0]
 
             multi_pixel_cells = {}
             if len(large_indices) > 0 and 'Vertices_JSON' in df.columns:
@@ -593,7 +593,7 @@ class GeometryQuantifier:
                 for idx_large, (py, px) in multi_pixel_cells.items():
                     val_results[c, idx_large] = mean_conv[py, px].mean()
 
-            print(f"Quantified all {num_channels} MALDI channels in {time.time() - t_scan:.2f}s")
+            print(f"Quantified all {num_channels} image channels in {time.time() - t_scan:.2f}s")
 
             # 5. Build output columns
             # Cells inside bounds NEVER disappear: in_crop is True, pixel_count >= 1.
@@ -613,7 +613,7 @@ class GeometryQuantifier:
 
             df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
-        print(f"MALDI quantification finished in {time.time() - t0:.2f}s | 0 cells lost!")
+        print(f"Image quantification finished in {time.time() - t0:.2f}s | 0 cells lost!")
         return df
 
     def quantify_preregistered_wsi(
@@ -707,7 +707,7 @@ class GeometryQuantifier:
             prefix = cfg.get('prefix', '')
 
             if img_type == 'raw_multichannel':
-                df = self.quantify_raw_maldi(
+                df = self.quantify_after_transformation(
                     df=df,
                     image_path=img_path,
                     transform_json=cfg.get('transform_json'),
@@ -764,7 +764,7 @@ def main():
         # Save initial extracted table
         extractor.save(df_rois, init_out)
 
-    # 2. Run Scheduled Quantification (both raw MALDI and WSI Ratio)
+    # 2. Run Scheduled Quantification (both raw images and registered images)
     quantifier = GeometryQuantifier()
     df_quantified = quantifier.run_scheduled_quantification(df_rois, VAL_CONFIGS)
 

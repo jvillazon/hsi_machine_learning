@@ -82,117 +82,154 @@ def compute_polygon_area(pts: np.ndarray) -> float:
     return float(0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))))
 
 
-def clip_polygon_to_box(pts: np.ndarray, x0: float, y0: float, x1: float, y1: float) -> np.ndarray:
+def clip_polygon_to_box(pts: np.ndarray, x0: float, y0: float, x1: float, y1: float, max_stretch_ratio: float = 4.0) -> np.ndarray:
     """
     Clips a 2D polygon against an axis-aligned bounding box [x0, y0, x1, y1]
     using the Sutherland-Hodgman polygon clipping algorithm.
+
+    Safeguards:
+    1. Un-loops polygon if first and last vertices are identical, preventing duplicate edges.
+    2. Drops polygons completely outside bounding box (returns empty array, NEVER np.clip fallback).
+    3. Eliminates consecutive duplicate vertices.
+    4. Prevents 1D line collapse: rejects polygons with dx < 0.5, dy < 0.5, or Shoelace area < 0.5.
+    5. Prevents cross-boundary horizontal/vertical stretching artifacts: rejects small cells (orig_dx < 250 px)
+       that bridge across opposing margins (dx > 30% box width and dx > 4 * orig_dx).
     """
     if len(pts) < 3:
-        return np.clip(pts, [x0, y0], [x1, y1])
+        return np.zeros((0, 2), dtype=np.float64)
 
-    poly = pts[:-1].tolist() if (len(pts) > 2 and np.allclose(pts[0], pts[-1])) else pts.tolist()
+    # 1. Un-loop if first and last vertices are identical
+    if len(pts) > 2 and np.allclose(pts[0], pts[-1]):
+        pts = pts[:-1]
 
-    def clip_edge(poly_pts, edge):
-        if not poly_pts:
-            return []
+    if len(pts) < 3:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    orig_min_x, orig_max_x = float(pts[:, 0].min()), float(pts[:, 0].max())
+    orig_min_y, orig_max_y = float(pts[:, 1].min()), float(pts[:, 1].max())
+    orig_dx = orig_max_x - orig_min_x
+    orig_dy = orig_max_y - orig_min_y
+
+    # Prevent 1D line collapse or degenerate input
+    if orig_dx < 0.5 or orig_dy < 0.5 or compute_polygon_area(pts) < 0.5:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    # If completely outside the box on any one side, drop cleanly
+    if orig_max_x <= x0 or orig_min_x >= x1 or orig_max_y <= y0 or orig_min_y >= y1:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    # If completely inside the box, return copy
+    if orig_min_x >= x0 and orig_max_x <= x1 and orig_min_y >= y0 and orig_max_y <= y1:
+        return pts.copy()
+
+    def clip_edge(poly_pts, edge_test, edge_intersect):
         clipped = []
+        if not poly_pts:
+            return clipped
         for i in range(len(poly_pts)):
-            p1 = poly_pts[i]
-            p2 = poly_pts[(i + 1) % len(poly_pts)]
+            cur_pt = poly_pts[i]
+            prev_pt = poly_pts[i - 1]
+            cur_inside = edge_test(cur_pt)
+            prev_inside = edge_test(prev_pt)
 
-            if edge == "left":
-                inside1 = p1[0] >= x0
-                inside2 = p2[0] >= x0
-                if inside1 and inside2:
-                    clipped.append(p2)
-                elif inside1 and not inside2:
-                    dy = p2[1] - p1[1]
-                    dx = p2[0] - p1[0]
-                    y = p1[1] + dy * (x0 - p1[0]) / dx if dx != 0 else p1[1]
-                    clipped.append([x0, y])
-                elif not inside1 and inside2:
-                    dy = p2[1] - p1[1]
-                    dx = p2[0] - p1[0]
-                    y = p1[1] + dy * (x0 - p1[0]) / dx if dx != 0 else p1[1]
-                    clipped.append([x0, y])
-                    clipped.append(p2)
-
-            elif edge == "right":
-                inside1 = p1[0] <= x1
-                inside2 = p2[0] <= x1
-                if inside1 and inside2:
-                    clipped.append(p2)
-                elif inside1 and not inside2:
-                    dy = p2[1] - p1[1]
-                    dx = p2[0] - p1[0]
-                    y = p1[1] + dy * (x1 - p1[0]) / dx if dx != 0 else p1[1]
-                    clipped.append([x1, y])
-                elif not inside1 and inside2:
-                    dy = p2[1] - p1[1]
-                    dx = p2[0] - p1[0]
-                    y = p1[1] + dy * (x1 - p1[0]) / dx if dx != 0 else p1[1]
-                    clipped.append([x1, y])
-                    clipped.append(p2)
-
-            elif edge == "top":
-                inside1 = p1[1] >= y0
-                inside2 = p2[1] >= y0
-                if inside1 and inside2:
-                    clipped.append(p2)
-                elif inside1 and not inside2:
-                    dx = p2[0] - p1[0]
-                    dy = p2[1] - p1[1]
-                    x = p1[0] + dx * (y0 - p1[1]) / dy if dy != 0 else p1[0]
-                    clipped.append([x, y0])
-                elif not inside1 and inside2:
-                    dx = p2[0] - p1[0]
-                    dy = p2[1] - p1[1]
-                    x = p1[0] + dx * (y0 - p1[1]) / dy if dy != 0 else p1[0]
-                    clipped.append([x, y0])
-                    clipped.append(p2)
-
-            elif edge == "bottom":
-                inside1 = p1[1] <= y1
-                inside2 = p2[1] <= y1
-                if inside1 and inside2:
-                    clipped.append(p2)
-                elif inside1 and not inside2:
-                    dx = p2[0] - p1[0]
-                    dy = p2[1] - p1[1]
-                    x = p1[0] + dx * (y1 - p1[1]) / dy if dy != 0 else p1[0]
-                    clipped.append([x, y1])
-                elif not inside1 and inside2:
-                    dx = p2[0] - p1[0]
-                    dy = p2[1] - p1[1]
-                    x = p1[0] + dx * (y1 - p1[1]) / dy if dy != 0 else p1[0]
-                    clipped.append([x, y1])
-                    clipped.append(p2)
-
+            if cur_inside:
+                if not prev_inside:
+                    inter = edge_intersect(prev_pt, cur_pt)
+                    if inter is not None:
+                        clipped.append(inter)
+                clipped.append(cur_pt)
+            elif prev_inside:
+                inter = edge_intersect(prev_pt, cur_pt)
+                if inter is not None:
+                    clipped.append(inter)
         return clipped
 
-    res = poly
-    for e in ["left", "right", "top", "bottom"]:
-        res = clip_edge(res, e)
+    def intersect_x(p1, p2, x_edge):
+        dx = p2[0] - p1[0]
+        denom = dx if abs(dx) > 1e-12 else (1e-12 if dx >= 0 else -1e-12)
+        y = p1[1] + (p2[1] - p1[1]) * (x_edge - p1[0]) / denom
+        return [float(x_edge), float(np.clip(y, y0, y1))]
 
-    if len(res) >= 3:
-        return np.array(res, dtype=np.float64)
-    return np.clip(pts, [x0, y0], [x1, y1])
+    def intersect_y(p1, p2, y_edge):
+        dy = p2[1] - p1[1]
+        denom = dy if abs(dy) > 1e-12 else (1e-12 if dy >= 0 else -1e-12)
+        x = p1[0] + (p2[0] - p1[0]) * (y_edge - p1[1]) / denom
+        return [float(np.clip(x, x0, x1)), float(y_edge)]
+
+    poly = pts.tolist()
+    poly = clip_edge(poly, lambda p: p[0] >= x0, lambda p1, p2: intersect_x(p1, p2, x0))
+    poly = clip_edge(poly, lambda p: p[0] <= x1, lambda p1, p2: intersect_x(p1, p2, x1))
+    poly = clip_edge(poly, lambda p: p[1] >= y0, lambda p1, p2: intersect_y(p1, p2, y0))
+    poly = clip_edge(poly, lambda p: p[1] <= y1, lambda p1, p2: intersect_y(p1, p2, y1))
+
+    if len(poly) < 3:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    # Filter out consecutive duplicate vertices
+    cleaned = [poly[0]]
+    for pt in poly[1:]:
+        if abs(pt[0] - cleaned[-1][0]) > 1e-6 or abs(pt[1] - cleaned[-1][1]) > 1e-6:
+            cleaned.append(pt)
+    if len(cleaned) > 2 and abs(cleaned[0][0] - cleaned[-1][0]) < 1e-6 and abs(cleaned[0][1] - cleaned[-1][1]) < 1e-6:
+        cleaned.pop()
+
+    if len(cleaned) < 3:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    res_arr = np.asarray(cleaned, dtype=np.float64)
+    res_dx = float(res_arr[:, 0].max() - res_arr[:, 0].min())
+    res_dy = float(res_arr[:, 1].max() - res_arr[:, 1].min())
+
+    # Prevent 1D line collapse
+    if res_dx < 0.5 or res_dy < 0.5:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    # Area check (must have real 2D polygon area)
+    if compute_polygon_area(res_arr) < 0.5:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    box_w = x1 - x0
+    box_h = y1 - y0
+    # Safeguard against cross-boundary horizontal/vertical stretching artifacts
+    if box_w > 100:
+        if orig_dx < 250.0 and res_dx > 0.3 * box_w and res_dx > (orig_dx * max_stretch_ratio):
+            return np.zeros((0, 2), dtype=np.float64)
+        if res_dx > 0.3 * box_w and (res_dx / (res_dy + 1e-6) > 10.0):
+            return np.zeros((0, 2), dtype=np.float64)
+    if box_h > 100:
+        if orig_dy < 250.0 and res_dy > 0.3 * box_h and res_dy > (orig_dy * max_stretch_ratio):
+            return np.zeros((0, 2), dtype=np.float64)
+        if res_dy > 0.3 * box_h and (res_dy / (res_dx + 1e-6) > 10.0):
+            return np.zeros((0, 2), dtype=np.float64)
+
+    return res_arr
 
 
 def discover_tiff_tiles(folder_path: Union[str, Path]) -> List[Path]:
-    """Discover and naturally sort all TIFF files in folder excluding existing stitched files."""
+    """Discover and naturally sort all tile image files in folder excluding existing stitched files."""
     folder_path = Path(folder_path)
     if not folder_path.exists():
         raise FileNotFoundError(f"Tile directory not found: {folder_path}")
 
+    patterns = ("*.tif", "*.tiff", "*.TIF", "*.TIFF", "*.png", "*.PNG", "*.jpg", "*.jpeg", "*.JPG", "*.JPEG")
     paths = []
-    for pattern in ("*.tif", "*.tiff", "*.TIF", "*.TIFF"):
+    for pattern in patterns:
         paths.extend(folder_path.glob(pattern))
+
+    # If top-level has no images, check direct subdirectories (e.g. processed-tifs, tiles)
+    if not paths:
+        for sub in folder_path.iterdir():
+            if sub.is_dir() and not sub.name.startswith("."):
+                for pattern in patterns:
+                    paths.extend(sub.glob(pattern))
+                if paths:
+                    break
 
     unique_paths = {}
     for p in paths:
         norm = os.path.normcase(os.path.normpath(str(p)))
-        if "stitch" in p.name.lower() or "mosaic" in p.name.lower() or "preview" in p.name.lower():
+        p_name_lower = p.name.lower()
+        if any(keyword in p_name_lower for keyword in ("stitch", "mosaic", "preview", "mask", "transformed", ".tmp")):
             continue
         unique_paths[norm] = p
 
@@ -200,24 +237,22 @@ def discover_tiff_tiles(folder_path: Union[str, Path]) -> List[Path]:
 
 
 def get_tile_spatial_shape(tile_path: Path) -> Tuple[int, int]:
-    """Read spatial (height, width) of a 2D or 3D TIFF tile without full memory load."""
-    with tifffile.TiffFile(tile_path) as tif:
-        shape = tif.series[0].shape
-        if len(shape) == 2:
-            return int(shape[0]), int(shape[1])
-        elif len(shape) >= 3:
-            return int(shape[-2]), int(shape[-1])
-        else:
-            raise ValueError(f"Unsupported TIFF shape {shape} in {tile_path}")
-
-
-def compute_polygon_area(pts: np.ndarray) -> float:
-    """Compute polygon area using Shoelace formula or Shapely."""
-    if len(pts) < 3:
-        return 0.0
-    x = pts[:, 0]
-    y = pts[:, 1]
-    return float(0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))))
+    """Read spatial (height, width) of a 2D or 3D TIFF or image tile without full memory load."""
+    ext = tile_path.suffix.lower()
+    if ext in (".tif", ".tiff"):
+        with tifffile.TiffFile(tile_path) as tif:
+            shape = tif.series[0].shape
+            if len(shape) == 2:
+                return int(shape[0]), int(shape[1])
+            elif len(shape) >= 3:
+                return int(shape[-2]), int(shape[-1])
+            else:
+                raise ValueError(f"Unsupported TIFF shape {shape} in {tile_path}")
+    else:
+        from PIL import Image as PILImage
+        with PILImage.open(tile_path) as img:
+            w, h = img.size
+            return int(h), int(w)
 
 
 def build_mosaic_grid_layout(
@@ -251,9 +286,19 @@ def build_mosaic_grid_layout(
 
     # Organize tile paths in snake or raster grid if provided
     tile_path_grid: List[List[Optional[Path]]] = []
-    if tile_paths and len(tile_paths) == rows * cols:
+    if tile_paths:
+        num_tiles_needed = rows * cols
+        if len(tile_paths) < num_tiles_needed:
+            print(f"Warning: Grid has {num_tiles_needed} positions ({rows}x{cols}) but only {len(tile_paths)} tiles discovered. Missing positions will be unassigned.")
+            padded_tiles = list(tile_paths) + [None] * (num_tiles_needed - len(tile_paths))
+        elif len(tile_paths) > num_tiles_needed:
+            print(f"Note: Found {len(tile_paths)} tiles in tile directory, using the first {num_tiles_needed} for the {rows}x{cols} grid.")
+            padded_tiles = list(tile_paths[:num_tiles_needed])
+        else:
+            padded_tiles = list(tile_paths)
+
         for r in range(rows):
-            row_tiles = tile_paths[r * cols : (r + 1) * cols]
+            row_tiles = padded_tiles[r * cols : (r + 1) * cols]
             if order == "snake" and r % 2 == 1:
                 row_tiles = list(reversed(row_tiles))
             tile_path_grid.append(row_tiles)
@@ -285,7 +330,8 @@ def build_mosaic_grid_layout(
                 "row": r,
                 "col": c,
                 "tile_name": tile_name,
-                "tile_file": str(tile_file) if tile_file else "",
+                "tile_file": str(tile_file.resolve()) if tile_file else "",
+                "tile_filename": tile_file.name if tile_file else "",
                 "tile_height": tile_height,
                 "tile_width": tile_width,
                 "raw_bounds": {"x0": raw_x0, "y0": raw_y0, "x1": raw_x1, "y1": raw_y1},
@@ -409,12 +455,16 @@ def split_roi_table_into_mosaic_tiles(
     tile_width: Optional[int] = None,
     overlap_percent: float = 5.0,
     order: str = "snake",
+    stitched_image: Optional[Union[str, Path]] = None,
     target_canvas_shape: Optional[Tuple[int, int]] = None,
     coord_mode: str = "both",  # "local", "global", or "both"
     crop_mode: str = "intersect",  # "intersect", "centroid", "strict"
     clip_vertices: bool = False,
     sample_id: str = "1",
     output_prefix: Optional[str] = None,
+    cohesive_name: Optional[str] = None,
+    save_cohesive: bool = True,
+    save_individual: bool = False,
     export_format: str = "both",  # "parquet", "csv", "both"
     generate_masks: bool = False,
     pixel_size_um: float = 1.0,
@@ -422,7 +472,8 @@ def split_roi_table_into_mosaic_tiles(
     metadata_list: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Main function to split an ROI cell table into mosaic subsections.
+    Main function to split an ROI cell table into mosaic subsections and produce
+    a cohesive .parquet / .csv table with tile image names from tile_dir.
     """
     t0 = time.time()
     input_path = Path(input_path)
@@ -437,7 +488,7 @@ def split_roi_table_into_mosaic_tiles(
     if tile_dir:
         tile_dir_path = Path(tile_dir)
         tile_paths = discover_tiff_tiles(tile_dir_path)
-        print(f"Discovered {len(tile_paths)} raw TIFF tiles in {tile_dir_path}")
+        print(f"Discovered {len(tile_paths)} raw tiles in {tile_dir_path}")
         if len(tile_paths) > 0:
             first_th, first_tw = get_tile_spatial_shape(tile_paths[0])
             if tile_height is None:
@@ -463,36 +514,35 @@ def split_roi_table_into_mosaic_tiles(
     if grid_rows is None or grid_cols is None:
         if tile_paths and len(tile_paths) > 0:
             total = len(tile_paths)
-            sq = int(np.sqrt(total))
-            if sq * sq == total:
-                grid_rows, grid_cols = sq, sq
-            else:
-                # Find all factor pairs (r, c) such that r * c == total
-                factors = [(r, total // r) for r in range(1, total + 1) if total % r == 0]
-                # Pick the factor pair whose aspect ratio (r / c) best matches canvas aspect ratio (max_cell_y / max_cell_x)
-                aspect_target = (max_cell_y / max_cell_x) if max_cell_x > 0 else 1.0
-                best_pair = min(factors, key=lambda pair: abs((pair[0] / pair[1]) * (tile_width / tile_height) - aspect_target))
-                grid_rows, grid_cols = best_pair
-                print(f"Auto-inferred grid layout from {total} tiles and canvas aspect ratio: {grid_rows} rows x {grid_cols} cols")
+            factors = [(r, total // r) for r in range(1, total + 1) if total % r == 0]
+            aspect_target = (max_cell_y / max_cell_x) if max_cell_x > 0 else 1.0
+            best_pair = min(factors, key=lambda pair: abs((pair[0] / pair[1]) * (tile_width / tile_height) - aspect_target))
+            grid_rows, grid_cols = best_pair
+            print(f"Auto-inferred grid layout from {total} tiles and canvas aspect ratio: {grid_rows} rows x {grid_cols} cols")
         else:
             raise ValueError("Must provide either --tile-dir or both --grid-rows and --grid-cols.")
 
-    # Auto-detect target canvas shape if resized
-    if target_canvas_shape is None:
-        overlap_fraction = (overlap_percent or 0.0) / 100.0
-        step_x = max(1, int(round(tile_width * (1.0 - overlap_fraction))))
-        step_y = max(1, int(round(tile_height * (1.0 - overlap_fraction))))
-        raw_canvas_w = tile_width + (grid_cols - 1) * step_x
-        raw_canvas_h = tile_height + (grid_rows - 1) * step_y
-
-        # If cells span a known resized canvas (e.g. 2460 x 3434 vs raw ~2500 x 3500)
-        if abs(max_cell_x - raw_canvas_w) > 5 or abs(max_cell_y - raw_canvas_h) > 5:
-            # Check if cell max coordinates suggest a specific canvas size
-            cand_w = int(round(max_cell_x))
-            cand_h = int(round(max_cell_y))
-            if cand_w > 0 and cand_h > 0:
-                target_canvas_shape = (cand_h, cand_w)
-                print(f"Detected resized canvas: {cand_w} x {cand_h} px (raw grid was {raw_canvas_w} x {raw_canvas_h} px)")
+    # Canvas dimensions & optional stitched reference
+    if stitched_image and os.path.exists(stitched_image):
+        canvas_h, canvas_w = get_tile_spatial_shape(Path(stitched_image))
+        target_canvas_shape = (canvas_h, canvas_w)
+        print(f"Canvas shape read from stitched image: {canvas_w} x {canvas_h} px ({stitched_image})")
+    elif target_canvas_shape is None and tile_dir:
+        cand_stitched = []
+        for p in Path(tile_dir).glob("*.tif*"):
+            if "stitch" in p.name.lower() or "mosaic" in p.name.lower():
+                cand_stitched.append(p)
+        if not cand_stitched and input_path.parent.exists():
+            for p in input_path.parent.glob("*.tif*"):
+                if "stitch" in p.name.lower() or "mosaic" in p.name.lower() or p.stem == output_prefix:
+                    cand_stitched.append(p)
+        if cand_stitched:
+            try:
+                canvas_h, canvas_w = get_tile_spatial_shape(cand_stitched[0])
+                target_canvas_shape = (canvas_h, canvas_w)
+                print(f"Auto-discovered stitched mosaic image: {cand_stitched[0].name} ({canvas_w} x {canvas_h} px)")
+            except Exception:
+                pass
 
     print(f"Mosaic Grid: {grid_rows} rows x {grid_cols} cols ({grid_rows * grid_cols} tiles), overlap={overlap_percent}%, order='{order}'")
     print(f"Tile dimensions: {tile_width} x {tile_height} px")
@@ -547,12 +597,15 @@ def split_roi_table_into_mosaic_tiles(
         "coord_mode": coord_mode,
         "crop_mode": crop_mode,
         "total_source_cells": len(cells),
+        "save_cohesive": save_cohesive,
+        "save_individual": save_individual,
         "label_to_id": label_to_id,
         "id_to_label": {str(k): v for k, v in id_to_label.items()},
         "tiles": [],
     }
 
     tile_summary = []
+    all_records: List[Dict[str, Any]] = []
 
     for tile in tiles_layout:
         bx0 = tile["canvas_bounds"]["x0"]
@@ -591,9 +644,15 @@ def split_roi_table_into_mosaic_tiles(
                 local_pts = clip_polygon_to_box(local_pts, 0.0, 0.0, float(t_w), float(t_h))
                 canvas_pts = clip_polygon_to_box(canvas_pts, bx0, by0, bx1, by1)
 
-            # Ensure minimum polygon area after clipping
+            # Ensure minimum polygon area, vertex count, and 2D extent after clipping
+            if len(local_pts) < 3 or len(canvas_pts) < 3:
+                continue
             area_loc = compute_polygon_area(local_pts)
-            if area_loc < 0.5 and len(local_pts) < 3:
+            if area_loc < 0.5:
+                continue
+            ldx = float(local_pts[:, 0].max() - local_pts[:, 0].min())
+            ldy = float(local_pts[:, 1].max() - local_pts[:, 1].min())
+            if ldx < 0.5 or ldy < 0.5:
                 continue
 
             loc_u = local_pts[:-1] if (len(local_pts) > 2 and np.allclose(local_pts[0], local_pts[-1])) else local_pts
@@ -614,15 +673,15 @@ def split_roi_table_into_mosaic_tiles(
         }
 
         if tile_cell_count == 0:
-            print(f"[{tile['tile_index']}/{len(tiles_layout)}] {t_name}: 0 cells (skipping output file)")
+            print(f"[{tile['tile_index']}/{len(tiles_layout)}] {t_name}: 0 cells")
             manifest["tiles"].append(tile_manifest_entry)
             continue
 
         # Format records for this tile
         records = []
-        tile_label_counters = {}
+        tile_label_counters: Dict[str, int] = {}
 
-        for idx, (cell_item, local_pts, canvas_pts, cxl, cyl, cxc, cyc) in enumerate(matched_cells, start=1):
+        for cell_idx_in_tile, (cell_item, local_pts, canvas_pts, cxl, cyl, cxc, cyc) in enumerate(matched_cells, start=1):
             lbl = cell_item.label
             tile_label_counters[lbl] = tile_label_counters.get(lbl, 0) + 1
             roi_inst = tile_label_counters[lbl]
@@ -660,13 +719,14 @@ def split_roi_table_into_mosaic_tiles(
 
             area = compute_polygon_area(primary_pts)
 
-            rec = {
+            # Preserve any existing columns from source table
+            rec = dict(cell_item.raw_record) if cell_item.raw_record else {}
+            rec.update({
                 "Sample_ID": sample_id,
-                "ROI_Number": idx,
+                "ROI_Number": len(all_records) + 1,
+                "ROI_Number_tile": cell_idx_in_tile,
                 "ROI_instance": roi_inst,
-                "Region_Index": idx,
                 "Label": lbl,
-                "Fluorescence_Label": lbl,
                 "Vertex_Count": len(primary_pts_closed),
                 "Geometry_WKT": wkt_primary,
                 "Vertices_JSON": pts_json_primary,
@@ -675,10 +735,11 @@ def split_roi_table_into_mosaic_tiles(
                 "Area_px": round(area, 2),
                 "UID": cell_item.cell_id,
                 "cell_id": cell_item.cell_id,
-                "Tile_Name": t_name,
                 "Tile_Row": tile["row"],
                 "Tile_Col": tile["col"],
-                "Image_Name": t_name,
+                "Tile_Index": tile["tile_index"],
+                "Tile_Filename": tile.get("tile_filename", ""),
+                "Image_Name": os.path.splitext(t_name)[0],
                 "Image_Path": tile["tile_file"],
                 # Auxiliary dual-coordinate system columns
                 "Centroid_X_local": round(cxl, 3),
@@ -689,22 +750,24 @@ def split_roi_table_into_mosaic_tiles(
                 "Geometry_WKT_canvas": wkt_canvas,
                 "Vertices_JSON_local": pts_json_local,
                 "Vertices_JSON_canvas": pts_json_canvas,
-            }
+            })
             records.append(rec)
+            all_records.append(rec)
 
         df_tile = pd.DataFrame(records)
         tile_base = output_dir / f"{output_prefix}_{t_name}"
 
-        # Export Parquet / CSV
-        if export_format in ("parquet", "both"):
-            pq_out = f"{tile_base}_rois.parquet"
-            df_tile.to_parquet(pq_out, index=False)
-            tile_manifest_entry["output_files"]["parquet"] = str(pq_out)
+        # Export individual Parquet / CSV only if save_individual is requested
+        if save_individual:
+            if export_format in ("parquet", "both"):
+                pq_out = f"{tile_base}_rois.parquet"
+                df_tile.to_parquet(pq_out, index=False)
+                tile_manifest_entry["output_files"]["parquet"] = str(pq_out)
 
-        if export_format in ("csv", "both"):
-            csv_out = f"{tile_base}_rois.csv"
-            df_tile.to_csv(csv_out, index=False)
-            tile_manifest_entry["output_files"]["csv"] = str(csv_out)
+            if export_format in ("csv", "both"):
+                csv_out = f"{tile_base}_rois.csv"
+                df_tile.to_csv(csv_out, index=False)
+                tile_manifest_entry["output_files"]["csv"] = str(csv_out)
 
         # Optional: Generate per-tile labeled mask TIFF
         if generate_masks:
@@ -739,9 +802,72 @@ def split_roi_table_into_mosaic_tiles(
 
         manifest["tiles"].append(tile_manifest_entry)
         tile_summary.append((t_name, tile_cell_count))
-        print(f"[{tile['tile_index']}/{len(tiles_layout)}] {t_name}: {tile_cell_count:,} cells exported.")
+        print(f"[{tile['tile_index']}/{len(tiles_layout)}] {t_name}: {tile_cell_count:,} cells processed.")
 
-    # Save summary manifest and legend
+    # 6. Save Cohesive Output Parquet / CSV across all tiles
+    cohesive_files: Dict[str, str] = {}
+    if save_cohesive and all_records:
+        df_cohesive = pd.DataFrame(all_records)
+
+        # Re-index global sequential ROI_Number and Region_Index
+        df_cohesive["ROI_Number"] = np.arange(1, len(df_cohesive) + 1)
+        # df_cohesive["Region_Index"] = np.arange(1, len(df_cohesive) + 1)
+
+        # Clean column ordering with key identifiers first
+        primary_cols = [
+            "Sample_ID",
+            "ROI_Number",
+            "ROI_Number_tile",
+            "ROI_instance",
+            "Label",
+            "Vertex_Count",
+            "Geometry_WKT",
+            "Vertices_JSON",
+            "Centroid_X",
+            "Centroid_Y",
+            "Area_px",
+            "UID",
+            "cell_id",
+            "Image_Name",
+            "Image_Path",
+            "Tile_Row",
+            "Tile_Col",
+            "Tile_Index",
+            "Tile_Filename",
+            "Centroid_X_local",
+            "Centroid_Y_local",
+            "Centroid_X_canvas",
+            "Centroid_Y_canvas",
+            "Geometry_WKT_local",
+            "Geometry_WKT_canvas",
+            "Vertices_JSON_local",
+            "Vertices_JSON_canvas",
+        ]
+        ordered = [c for c in primary_cols if c in df_cohesive.columns]
+        extra = [c for c in df_cohesive.columns if c not in ordered]
+        df_cohesive = df_cohesive[ordered + extra]
+
+        c_name = cohesive_name or f"{output_prefix}_cohesive_rois"
+        cohesive_base = output_dir / c_name
+
+        if export_format in ("parquet", "both"):
+            cohesive_pq = f"{cohesive_base}.parquet"
+            df_cohesive.to_parquet(cohesive_pq, index=False)
+            sz_mb = os.path.getsize(cohesive_pq) / (1024 * 1024)
+            print(f"Saved cohesive Parquet : {cohesive_pq} ({sz_mb:.2f} MB, {len(df_cohesive):,} records)")
+            cohesive_files["parquet"] = str(cohesive_pq)
+
+        if export_format in ("csv", "both"):
+            cohesive_csv = f"{cohesive_base}.csv"
+            df_cohesive.to_csv(cohesive_csv, index=False)
+            sz_mb = os.path.getsize(cohesive_csv) / (1024 * 1024)
+            print(f"Saved cohesive CSV     : {cohesive_csv} ({sz_mb:.2f} MB, {len(df_cohesive):,} records)")
+            cohesive_files["csv"] = str(cohesive_csv)
+
+    manifest["cohesive_output_files"] = cohesive_files
+    manifest["total_subsections_cells"] = len(all_records)
+
+    # 7. Save summary manifest and legend
     manifest_path = output_dir / f"{output_prefix}_mosaic_split_manifest.json"
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
@@ -754,8 +880,12 @@ def split_roi_table_into_mosaic_tiles(
         }, f, indent=2)
 
     print("\n" + "=" * 60)
-    print(f"Mosaic Subsections Splitting Finished in {time.time() - t0:.2f}s")
+    print(f"Mosaic Subsections Processing Finished in {time.time() - t0:.2f}s")
     print(f"Total tiles processed: {len(tiles_layout)}")
+    print(f"Total cohesive records: {len(all_records):,}")
+    if cohesive_files:
+        for fmt, p in cohesive_files.items():
+            print(f"Cohesive {fmt.upper()} output: {p}")
     print(f"Manifest written to  : {manifest_path}")
     print(f"Legend written to    : {legend_path}")
     print("=" * 60)
@@ -782,12 +912,23 @@ def main():
     parser.add_argument("--clip-vertices", action="store_true", default=False, help="Clip polygon vertices to exact tile bounding box [0, W] x [0, H]")
     parser.add_argument("--sample-id", default="1", help="Sample ID for metadata")
     parser.add_argument("--format", choices=["parquet", "csv", "both"], default="both", help="Output file format (default: both)")
+    parser.add_argument("--cohesive-name", default=None, help="Base filename for cohesive output (default: {output_prefix}_cohesive_rois)")
+    parser.add_argument("--save-individual", action="store_true", default=False, help="Also save individual parquet/csv files for each tile (default: False)")
+    parser.add_argument("--no-cohesive", action="store_true", default=False, help="Disable cohesive output export")
+    parser.add_argument("--stitched-image", default=None, help="Path to stitched mosaic TIFF image (for reading exact canvas shape)")
+    parser.add_argument("--target-canvas-shape", default=None, help="Target canvas shape as 'height,width' (e.g. '2460,3434')")
     parser.add_argument("--generate-masks", action="store_true", default=False, help="Generate per-tile labeled mask TIFFs")
     parser.add_argument("--pixel-size", type=float, default=1.0, help="Pixel size in microns for mask metadata")
     parser.add_argument("--metadata-dict", default=None, help="JSON file or string with {label: integer_id} mappings")
     parser.add_argument("--metadata-list", default=None, help="JSON file, text file, or list of ordered label names")
 
     args = parser.parse_args()
+
+    target_canvas_shape = None
+    if args.target_canvas_shape:
+        parts = [int(p.strip()) for p in args.target_canvas_shape.split(",") if p.strip()]
+        if len(parts) == 2:
+            target_canvas_shape = (parts[0], parts[1])
 
     split_roi_table_into_mosaic_tiles(
         input_path=args.input,
@@ -800,10 +941,15 @@ def main():
         tile_width=args.tile_width,
         overlap_percent=args.overlap_percent,
         order=args.order,
+        stitched_image=args.stitched_image,
+        target_canvas_shape=target_canvas_shape,
         coord_mode=args.coord_mode,
         crop_mode=args.crop_mode,
         clip_vertices=args.clip_vertices,
         sample_id=args.sample_id,
+        cohesive_name=args.cohesive_name,
+        save_cohesive=not args.no_cohesive,
+        save_individual=args.save_individual,
         export_format=args.format,
         generate_masks=args.generate_masks,
         pixel_size_um=args.pixel_size,

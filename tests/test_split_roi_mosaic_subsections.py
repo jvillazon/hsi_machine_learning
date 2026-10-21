@@ -107,8 +107,8 @@ def test_split_workflow():
 
         create_synthetic_gui_rois(input_pq)
 
-        # 1. Test Manual 2x2 Grid with 10% overlap
-        print("\n--- Testing Manual Grid Specification ---")
+        # 1. Test Default Cohesive Output (Manual 2x2 Grid with 10% overlap, no individual files)
+        print("\n--- Testing Default Cohesive Output (Manual Grid Specification) ---")
         manifest = split_roi_table_into_mosaic_tiles(
             input_path=input_pq,
             output_dir=out_dir,
@@ -124,31 +124,46 @@ def test_split_workflow():
         assert manifest["total_source_cells"] == 3
         assert len(manifest["tiles"]) == 4
 
-        # Tile 0 (r0, c0, x:[0, 1000], y:[0, 1000]) should have cell_001 and cell_002_overlap
+        # By default, individual parquet files should NOT be saved
         tile0 = manifest["tiles"][0]
         assert tile0["cell_count"] == 2, f"Expected 2 cells in tile 0, got {tile0['cell_count']}"
-        df_t0 = pd.read_parquet(tile0["output_files"]["parquet"])
+        assert "parquet" not in tile0["output_files"], "Individual parquet should not be exported by default"
+
+        # Cohesive parquet and csv must exist
+        assert "parquet" in manifest["cohesive_output_files"]
+        assert "csv" in manifest["cohesive_output_files"]
+        cohesive_pq = Path(manifest["cohesive_output_files"]["parquet"])
+        assert cohesive_pq.exists()
+
+        df_cohesive = pd.read_parquet(cohesive_pq)
+        # Total records in cohesive output: tile 0 (2) + tile 1 (1) + tile 2 (0) + tile 3 (1) = 4 records
+        assert len(df_cohesive) == 4, f"Expected 4 cohesive records, got {len(df_cohesive)}"
+        assert manifest["total_subsections_cells"] == 4
+
+        # Verify Tile 0 cells in cohesive dataframe
+        df_t0 = df_cohesive[df_cohesive["Image_Name"] == tile0["tile_name"]]
+        assert len(df_t0) == 2
         assert "cell_001" in df_t0["cell_id"].values
         assert "cell_002_overlap" in df_t0["cell_id"].values
 
-        # Tile 1 (r0, c1, x:[900, 1900], y:[0, 1000]) should also have cell_002_overlap
+        # Verify Tile 1 cells in cohesive dataframe
         tile1 = manifest["tiles"][1]
         assert tile1["cell_count"] == 1, f"Expected 1 cell in tile 1, got {tile1['cell_count']}"
-        df_t1 = pd.read_parquet(tile1["output_files"]["parquet"])
+        df_t1 = df_cohesive[df_cohesive["Image_Name"] == tile1["tile_name"]]
+        assert len(df_t1) == 1
         assert "cell_002_overlap" in df_t1["cell_id"].values
 
         # Verify local coordinate transform on Tile 1 for cell_002_overlap:
-        # Global x range was [880, 950]. Tile 1 starts at x0=900.
-        # Local x range should be [880 - 900, 950 - 900] = [-20, 50].
-        # Global x centroid was 915.0 -> Local x centroid should be 15.0!
+        # Global x range [880, 950] clipped to Tile 1 [900, 1900] is [900, 950].
+        # In Tile 1 local coords [0, 50] -> Local Centroid_X is 25.0, Canvas Centroid_X is 925.0!
         row_t1 = df_t1[df_t1["cell_id"] == "cell_002_overlap"].iloc[0]
-        assert abs(row_t1["Centroid_X"] - 15.0) < 1e-2, f"Expected local Centroid_X 15.0, got {row_t1['Centroid_X']}"
-        assert abs(row_t1["Centroid_X_canvas"] - 915.0) < 1e-2
+        assert abs(row_t1["Centroid_X"] - 25.0) < 1e-2, f"Expected local Centroid_X 25.0, got {row_t1['Centroid_X']}"
+        assert abs(row_t1["Centroid_X_canvas"] - 925.0) < 1e-2
 
-        print("Manual Grid & Overlap Assignment verified successfully!")
+        print("Manual Grid & Cohesive Overlap Assignment verified successfully!")
 
-        # 2. Test Tile Directory Automatic Discovery
-        print("\n--- Testing Automatic Tile Directory Discovery ---")
+        # 2. Test Tile Directory Automatic Discovery with Image Names
+        print("\n--- Testing Automatic Tile Directory Discovery & Image Names ---")
         tiles_dir = tmp_path / "raw_tiles"
         tiles_dir.mkdir()
         # Create 4 dummy TIFF tiles
@@ -182,9 +197,42 @@ def test_split_workflow():
         # In snake mode, row 1 is reversed (tile 04 then tile 03)
         assert manifest_auto["tiles"][2]["tile_name"] == "ROI_HSI_tile_04"
         assert manifest_auto["tiles"][3]["tile_name"] == "ROI_HSI_tile_03"
-        print("Tile Directory Discovery & Snake layout verified successfully!")
 
-        # 3. Test Step 3 Integration (transform_and_crop_rois with split_mosaic=True)
+        # Check cohesive parquet output from auto-discovery
+        df_auto_cohesive = pd.read_parquet(manifest_auto["cohesive_output_files"]["parquet"])
+        unique_image_names = set(df_auto_cohesive["Image_Name"].unique())
+        # Tile 0 has cell_001 & cell_002_overlap -> ROI_HSI_tile_01
+        # Tile 1 has cell_002_overlap -> ROI_HSI_tile_02
+        # Tile 3 (bottom right) has cell_003 -> ROI_HSI_tile_03
+        assert "ROI_HSI_tile_01" in unique_image_names
+        assert "ROI_HSI_tile_02" in unique_image_names
+        assert "ROI_HSI_tile_03" in unique_image_names
+
+        # Check that Image_Path is populated with real file path
+        row_img = df_auto_cohesive[df_auto_cohesive["Image_Name"] == "ROI_HSI_tile_01"].iloc[0]
+        assert "ROI_HSI_tile_01.tif" in row_img["Image_Path"]
+
+        print("Tile Directory Discovery & Image Names verified successfully!")
+
+        # 3. Test Save Individual Option
+        print("\n--- Testing save_individual=True Option ---")
+        out_dir_indiv = tmp_path / "subsections_individual"
+        manifest_indiv = split_roi_table_into_mosaic_tiles(
+            input_path=input_pq,
+            output_dir=out_dir_indiv,
+            grid_rows=2,
+            grid_cols=2,
+            tile_height=1000,
+            tile_width=1000,
+            overlap_percent=10.0,
+            save_individual=True,
+        )
+        assert "parquet" in manifest_indiv["tiles"][0]["output_files"]
+        assert Path(manifest_indiv["tiles"][0]["output_files"]["parquet"]).exists()
+        assert "parquet" in manifest_indiv["cohesive_output_files"]
+        print("Save individual toggle verified successfully!")
+
+        # 4. Test Step 3 Integration (transform_and_crop_rois with split_mosaic=True)
         print("\n--- Testing Step 3 transform_and_crop_rois with Integrated Splitting ---")
         from task_specific.Xenium_profile.transform_and_crop_rois import transform_and_crop_rois
 
@@ -214,6 +262,8 @@ def test_split_workflow():
 
         assert "split_manifest" in saved
         assert len(saved["split_manifest"]["tiles"]) == 4
+        assert "cohesive_parquet" in saved
+        assert Path(saved["cohesive_parquet"]).exists()
         print("Step 3 transform_and_crop_rois integrated splitting verified successfully!")
 
 

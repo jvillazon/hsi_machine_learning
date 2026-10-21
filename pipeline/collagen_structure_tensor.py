@@ -32,7 +32,7 @@ from tkinter import filedialog
 
 image_path = r"C:\Users\jvill\OneDrive - UC San Diego\integrated_pipeline\WSI_data\SRS\collagen\S24-K21_273_3-collagen.ome.tiff"
 image_name = os.path.basename(image_path).split('.')[0]
-output_dir = os.path.join(os.path.dirname(image_path), f"{image_name}_collagen_output")
+output_dir = os.path.join(os.path.dirname(image_path), f"{image_name}_collagen-new_output")
 
 # Choose thresholding method based on your ROI:
 # - 'otsu': Best for small, clean ROIs with clear background/signal distinction
@@ -393,10 +393,10 @@ def compute_structure_tensor(
     denominator = lambda_max + lambda_min
     coherence = np.zeros_like(denominator, dtype=np.float32)
     valid = denominator > 1e-10
-    coherence[valid] = np.square((lambda_max[valid] - lambda_min[valid]) / denominator[valid]).astype(np.float32)
+    coherence[valid] = ((lambda_max[valid] - lambda_min[valid]) / denominator[valid]).astype(np.float32)
     
     # Orientation from eigenvector of largest eigenvalue
-    # For 2x2 symmetric matrix, if lambda is eigenvalue, eigenvector is proportional to
+    # For 2x2 symmetric matrix, if lambda is eigenvalue, eigenvector is proportional topipeline/collagen_structure_tensor.py
     # [Txy, lambda - Txx] or [lambda - Tyy, Txy]
     # Orientation angle = atan2(Gy_dominant, Gx_dominant) / 2 (divided by 2 because orientation is pi-periodic)
     
