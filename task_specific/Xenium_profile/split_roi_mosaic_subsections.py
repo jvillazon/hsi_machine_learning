@@ -82,127 +82,101 @@ def compute_polygon_area(pts: np.ndarray) -> float:
     return float(0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))))
 
 
-def clip_polygon_to_box(pts: np.ndarray, x0: float, y0: float, x1: float, y1: float, max_stretch_ratio: float = 4.0) -> np.ndarray:
+def clip_polygon_to_box(pts: np.ndarray, x0: float, y0: float, x1: float, y1: float) -> np.ndarray:
     """
     Clips a 2D polygon against an axis-aligned bounding box [x0, y0, x1, y1]
     using the Sutherland-Hodgman polygon clipping algorithm.
-
-    Safeguards:
-    1. Un-loops polygon if first and last vertices are identical, preventing duplicate edges.
-    2. Drops polygons completely outside bounding box (returns empty array, NEVER np.clip fallback).
-    3. Eliminates consecutive duplicate vertices.
-    4. Prevents 1D line collapse: rejects polygons with dx < 0.5, dy < 0.5, or Shoelace area < 0.5.
-    5. Prevents cross-boundary horizontal/vertical stretching artifacts: rejects small cells (orig_dx < 250 px)
-       that bridge across opposing margins (dx > 30% box width and dx > 4 * orig_dx).
     """
     if len(pts) < 3:
-        return np.zeros((0, 2), dtype=np.float64)
+        return np.clip(pts, [x0, y0], [x1, y1])
 
-    # 1. Un-loop if first and last vertices are identical
-    if len(pts) > 2 and np.allclose(pts[0], pts[-1]):
-        pts = pts[:-1]
+    poly = pts[:-1].tolist() if (len(pts) > 2 and np.allclose(pts[0], pts[-1])) else pts.tolist()
 
-    if len(pts) < 3:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    orig_min_x, orig_max_x = float(pts[:, 0].min()), float(pts[:, 0].max())
-    orig_min_y, orig_max_y = float(pts[:, 1].min()), float(pts[:, 1].max())
-    orig_dx = orig_max_x - orig_min_x
-    orig_dy = orig_max_y - orig_min_y
-
-    # Prevent 1D line collapse or degenerate input
-    if orig_dx < 0.5 or orig_dy < 0.5 or compute_polygon_area(pts) < 0.5:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    # If completely outside the box on any one side, drop cleanly
-    if orig_max_x <= x0 or orig_min_x >= x1 or orig_max_y <= y0 or orig_min_y >= y1:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    # If completely inside the box, return copy
-    if orig_min_x >= x0 and orig_max_x <= x1 and orig_min_y >= y0 and orig_max_y <= y1:
-        return pts.copy()
-
-    def clip_edge(poly_pts, edge_test, edge_intersect):
-        clipped = []
+    def clip_edge(poly_pts, edge):
         if not poly_pts:
-            return clipped
+            return []
+        clipped = []
         for i in range(len(poly_pts)):
-            cur_pt = poly_pts[i]
-            prev_pt = poly_pts[i - 1]
-            cur_inside = edge_test(cur_pt)
-            prev_inside = edge_test(prev_pt)
+            p1 = poly_pts[i]
+            p2 = poly_pts[(i + 1) % len(poly_pts)]
 
-            if cur_inside:
-                if not prev_inside:
-                    inter = edge_intersect(prev_pt, cur_pt)
-                    if inter is not None:
-                        clipped.append(inter)
-                clipped.append(cur_pt)
-            elif prev_inside:
-                inter = edge_intersect(prev_pt, cur_pt)
-                if inter is not None:
-                    clipped.append(inter)
+            if edge == "left":
+                inside1 = p1[0] >= x0
+                inside2 = p2[0] >= x0
+                if inside1 and inside2:
+                    clipped.append(p2)
+                elif inside1 and not inside2:
+                    dy = p2[1] - p1[1]
+                    dx = p2[0] - p1[0]
+                    y = p1[1] + dy * (x0 - p1[0]) / dx if dx != 0 else p1[1]
+                    clipped.append([x0, y])
+                elif not inside1 and inside2:
+                    dy = p2[1] - p1[1]
+                    dx = p2[0] - p1[0]
+                    y = p1[1] + dy * (x0 - p1[0]) / dx if dx != 0 else p1[1]
+                    clipped.append([x0, y])
+                    clipped.append(p2)
+
+            elif edge == "right":
+                inside1 = p1[0] <= x1
+                inside2 = p2[0] <= x1
+                if inside1 and inside2:
+                    clipped.append(p2)
+                elif inside1 and not inside2:
+                    dy = p2[1] - p1[1]
+                    dx = p2[0] - p1[0]
+                    y = p1[1] + dy * (x1 - p1[0]) / dx if dx != 0 else p1[1]
+                    clipped.append([x1, y])
+                elif not inside1 and inside2:
+                    dy = p2[1] - p1[1]
+                    dx = p2[0] - p1[0]
+                    y = p1[1] + dy * (x1 - p1[0]) / dx if dx != 0 else p1[1]
+                    clipped.append([x1, y])
+                    clipped.append(p2)
+
+            elif edge == "top":
+                inside1 = p1[1] >= y0
+                inside2 = p2[1] >= y0
+                if inside1 and inside2:
+                    clipped.append(p2)
+                elif inside1 and not inside2:
+                    dx = p2[0] - p1[0]
+                    dy = p2[1] - p1[1]
+                    x = p1[0] + dx * (y0 - p1[1]) / dy if dy != 0 else p1[0]
+                    clipped.append([x, y0])
+                elif not inside1 and inside2:
+                    dx = p2[0] - p1[0]
+                    dy = p2[1] - p1[1]
+                    x = p1[0] + dx * (y0 - p1[1]) / dy if dy != 0 else p1[0]
+                    clipped.append([x, y0])
+                    clipped.append(p2)
+
+            elif edge == "bottom":
+                inside1 = p1[1] <= y1
+                inside2 = p2[1] <= y1
+                if inside1 and inside2:
+                    clipped.append(p2)
+                elif inside1 and not inside2:
+                    dx = p2[0] - p1[0]
+                    dy = p2[1] - p1[1]
+                    x = p1[0] + dx * (y1 - p1[1]) / dy if dy != 0 else p1[0]
+                    clipped.append([x, y1])
+                elif not inside1 and inside2:
+                    dx = p2[0] - p1[0]
+                    dy = p2[1] - p1[1]
+                    x = p1[0] + dx * (y1 - p1[1]) / dy if dy != 0 else p1[0]
+                    clipped.append([x, y1])
+                    clipped.append(p2)
+
         return clipped
 
-    def intersect_x(p1, p2, x_edge):
-        dx = p2[0] - p1[0]
-        denom = dx if abs(dx) > 1e-12 else (1e-12 if dx >= 0 else -1e-12)
-        y = p1[1] + (p2[1] - p1[1]) * (x_edge - p1[0]) / denom
-        return [float(x_edge), float(np.clip(y, y0, y1))]
+    res = poly
+    for e in ["left", "right", "top", "bottom"]:
+        res = clip_edge(res, e)
 
-    def intersect_y(p1, p2, y_edge):
-        dy = p2[1] - p1[1]
-        denom = dy if abs(dy) > 1e-12 else (1e-12 if dy >= 0 else -1e-12)
-        x = p1[0] + (p2[0] - p1[0]) * (y_edge - p1[1]) / denom
-        return [float(np.clip(x, x0, x1)), float(y_edge)]
-
-    poly = pts.tolist()
-    poly = clip_edge(poly, lambda p: p[0] >= x0, lambda p1, p2: intersect_x(p1, p2, x0))
-    poly = clip_edge(poly, lambda p: p[0] <= x1, lambda p1, p2: intersect_x(p1, p2, x1))
-    poly = clip_edge(poly, lambda p: p[1] >= y0, lambda p1, p2: intersect_y(p1, p2, y0))
-    poly = clip_edge(poly, lambda p: p[1] <= y1, lambda p1, p2: intersect_y(p1, p2, y1))
-
-    if len(poly) < 3:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    # Filter out consecutive duplicate vertices
-    cleaned = [poly[0]]
-    for pt in poly[1:]:
-        if abs(pt[0] - cleaned[-1][0]) > 1e-6 or abs(pt[1] - cleaned[-1][1]) > 1e-6:
-            cleaned.append(pt)
-    if len(cleaned) > 2 and abs(cleaned[0][0] - cleaned[-1][0]) < 1e-6 and abs(cleaned[0][1] - cleaned[-1][1]) < 1e-6:
-        cleaned.pop()
-
-    if len(cleaned) < 3:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    res_arr = np.asarray(cleaned, dtype=np.float64)
-    res_dx = float(res_arr[:, 0].max() - res_arr[:, 0].min())
-    res_dy = float(res_arr[:, 1].max() - res_arr[:, 1].min())
-
-    # Prevent 1D line collapse
-    if res_dx < 0.5 or res_dy < 0.5:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    # Area check (must have real 2D polygon area)
-    if compute_polygon_area(res_arr) < 0.5:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    box_w = x1 - x0
-    box_h = y1 - y0
-    # Safeguard against cross-boundary horizontal/vertical stretching artifacts
-    if box_w > 100:
-        if orig_dx < 250.0 and res_dx > 0.3 * box_w and res_dx > (orig_dx * max_stretch_ratio):
-            return np.zeros((0, 2), dtype=np.float64)
-        if res_dx > 0.3 * box_w and (res_dx / (res_dy + 1e-6) > 10.0):
-            return np.zeros((0, 2), dtype=np.float64)
-    if box_h > 100:
-        if orig_dy < 250.0 and res_dy > 0.3 * box_h and res_dy > (orig_dy * max_stretch_ratio):
-            return np.zeros((0, 2), dtype=np.float64)
-        if res_dy > 0.3 * box_h and (res_dy / (res_dx + 1e-6) > 10.0):
-            return np.zeros((0, 2), dtype=np.float64)
-
-    return res_arr
+    if len(res) >= 3:
+        return np.array(res, dtype=np.float64)
+    return np.clip(pts, [x0, y0], [x1, y1])
 
 
 def discover_tiff_tiles(folder_path: Union[str, Path]) -> List[Path]:
@@ -640,19 +614,15 @@ def split_roi_table_into_mosaic_tiles(
             local_pts[:, 0] = (local_pts[:, 0] - bx0) / scale_x
             local_pts[:, 1] = (local_pts[:, 1] - by0) / scale_y
 
-            if clip_vertices or crop_mode == "intersect":
+            if clip_vertices:
                 local_pts = clip_polygon_to_box(local_pts, 0.0, 0.0, float(t_w), float(t_h))
                 canvas_pts = clip_polygon_to_box(canvas_pts, bx0, by0, bx1, by1)
 
-            # Ensure minimum polygon area, vertex count, and 2D extent after clipping
+            # Ensure minimum polygon area and vertex count
             if len(local_pts) < 3 or len(canvas_pts) < 3:
                 continue
             area_loc = compute_polygon_area(local_pts)
             if area_loc < 0.5:
-                continue
-            ldx = float(local_pts[:, 0].max() - local_pts[:, 0].min())
-            ldy = float(local_pts[:, 1].max() - local_pts[:, 1].min())
-            if ldx < 0.5 or ldy < 0.5:
                 continue
 
             loc_u = local_pts[:-1] if (len(local_pts) > 2 and np.allclose(local_pts[0], local_pts[-1])) else local_pts

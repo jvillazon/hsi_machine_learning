@@ -55,127 +55,7 @@ def compute_polygon_area(pts: np.ndarray) -> float:
     return float(0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))))
 
 
-def clip_polygon_to_box(pts: np.ndarray, x0: float, y0: float, x1: float, y1: float, max_stretch_ratio: float = 4.0) -> np.ndarray:
-    """
-    Clips a 2D polygon against an axis-aligned bounding box [x0, y0, x1, y1]
-    using the Sutherland-Hodgman polygon clipping algorithm.
 
-    Safeguards:
-    1. Un-loops polygon if first and last vertices are identical, preventing duplicate edges.
-    2. Drops polygons completely outside bounding box (returns empty array, NEVER np.clip fallback).
-    3. Eliminates consecutive duplicate vertices.
-    4. Prevents 1D line collapse: rejects polygons with dx < 0.5, dy < 0.5, or Shoelace area < 0.5.
-    5. Prevents cross-boundary horizontal/vertical stretching artifacts: rejects small cells (orig_dx < 250 px)
-       that bridge across opposing margins (dx > 30% box width and dx > 4 * orig_dx).
-    """
-    if len(pts) < 3:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    # 1. Un-loop if first and last vertices are identical
-    if len(pts) > 2 and np.allclose(pts[0], pts[-1]):
-        pts = pts[:-1]
-
-    if len(pts) < 3:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    orig_min_x, orig_max_x = float(pts[:, 0].min()), float(pts[:, 0].max())
-    orig_min_y, orig_max_y = float(pts[:, 1].min()), float(pts[:, 1].max())
-    orig_dx = orig_max_x - orig_min_x
-    orig_dy = orig_max_y - orig_min_y
-
-    # Prevent 1D line collapse or degenerate input
-    if orig_dx < 0.5 or orig_dy < 0.5 or compute_polygon_area(pts) < 0.5:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    # If completely outside the box on any one side, drop cleanly
-    if orig_max_x <= x0 or orig_min_x >= x1 or orig_max_y <= y0 or orig_min_y >= y1:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    # If completely inside the box, return copy
-    if orig_min_x >= x0 and orig_max_x <= x1 and orig_min_y >= y0 and orig_max_y <= y1:
-        return pts.copy()
-
-    def clip_edge(poly_pts, edge_test, edge_intersect):
-        clipped = []
-        if not poly_pts:
-            return clipped
-        for i in range(len(poly_pts)):
-            cur_pt = poly_pts[i]
-            prev_pt = poly_pts[i - 1]
-            cur_inside = edge_test(cur_pt)
-            prev_inside = edge_test(prev_pt)
-
-            if cur_inside:
-                if not prev_inside:
-                    inter = edge_intersect(prev_pt, cur_pt)
-                    if inter is not None:
-                        clipped.append(inter)
-                clipped.append(cur_pt)
-            elif prev_inside:
-                inter = edge_intersect(prev_pt, cur_pt)
-                if inter is not None:
-                    clipped.append(inter)
-        return clipped
-
-    def intersect_x(p1, p2, x_edge):
-        dx = p2[0] - p1[0]
-        denom = dx if abs(dx) > 1e-12 else (1e-12 if dx >= 0 else -1e-12)
-        y = p1[1] + (p2[1] - p1[1]) * (x_edge - p1[0]) / denom
-        return [float(x_edge), float(np.clip(y, y0, y1))]
-
-    def intersect_y(p1, p2, y_edge):
-        dy = p2[1] - p1[1]
-        denom = dy if abs(dy) > 1e-12 else (1e-12 if dy >= 0 else -1e-12)
-        x = p1[0] + (p2[0] - p1[0]) * (y_edge - p1[1]) / denom
-        return [float(np.clip(x, x0, x1)), float(y_edge)]
-
-    poly = pts.tolist()
-    poly = clip_edge(poly, lambda p: p[0] >= x0, lambda p1, p2: intersect_x(p1, p2, x0))
-    poly = clip_edge(poly, lambda p: p[0] <= x1, lambda p1, p2: intersect_x(p1, p2, x1))
-    poly = clip_edge(poly, lambda p: p[1] >= y0, lambda p1, p2: intersect_y(p1, p2, y0))
-    poly = clip_edge(poly, lambda p: p[1] <= y1, lambda p1, p2: intersect_y(p1, p2, y1))
-
-    if len(poly) < 3:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    # Filter out consecutive duplicate vertices
-    cleaned = [poly[0]]
-    for pt in poly[1:]:
-        if abs(pt[0] - cleaned[-1][0]) > 1e-6 or abs(pt[1] - cleaned[-1][1]) > 1e-6:
-            cleaned.append(pt)
-    if len(cleaned) > 2 and abs(cleaned[0][0] - cleaned[-1][0]) < 1e-6 and abs(cleaned[0][1] - cleaned[-1][1]) < 1e-6:
-        cleaned.pop()
-
-    if len(cleaned) < 3:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    res_arr = np.asarray(cleaned, dtype=np.float64)
-    res_dx = float(res_arr[:, 0].max() - res_arr[:, 0].min())
-    res_dy = float(res_arr[:, 1].max() - res_arr[:, 1].min())
-
-    # Prevent 1D line collapse
-    if res_dx < 0.5 or res_dy < 0.5:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    # Area check (must have real 2D polygon area)
-    if compute_polygon_area(res_arr) < 0.5:
-        return np.zeros((0, 2), dtype=np.float64)
-
-    box_w = x1 - x0
-    box_h = y1 - y0
-    # Safeguard against cross-boundary horizontal/vertical stretching artifacts
-    if box_w > 100:
-        if orig_dx < 250.0 and res_dx > 0.3 * box_w and res_dx > (orig_dx * max_stretch_ratio):
-            return np.zeros((0, 2), dtype=np.float64)
-        if res_dx > 0.3 * box_w and (res_dx / (res_dy + 1e-6) > 10.0):
-            return np.zeros((0, 2), dtype=np.float64)
-    if box_h > 100:
-        if orig_dy < 250.0 and res_dy > 0.3 * box_h and res_dy > (orig_dy * max_stretch_ratio):
-            return np.zeros((0, 2), dtype=np.float64)
-        if res_dy > 0.3 * box_h and (res_dy / (res_dx + 1e-6) > 10.0):
-            return np.zeros((0, 2), dtype=np.float64)
-
-    return res_arr
 
 
 def load_dataframe(path: str) -> pd.DataFrame:
@@ -525,7 +405,7 @@ def transform_and_crop_rois(
                 continue
             pts_use = pts_u
         elif crop_mode == "intersect":
-            # Fast bounding box rejection if completely outside
+            # Keep cells with at least one vertex inside ROI bounds without clipping/clamping vertices
             if (
                 pts_u[:, 0].max() <= 0.0
                 or pts_u[:, 0].min() >= roi_w
@@ -533,22 +413,13 @@ def transform_and_crop_rois(
                 or pts_u[:, 1].min() >= roi_h
             ):
                 continue
-            # Geometric Sutherland-Hodgman polygon clipping (no 1D clamping)
-            pts_clipped = clip_polygon_to_box(pts_u, 0.0, 0.0, float(roi_w), float(roi_h))
-            if len(pts_clipped) < 3:
-                continue
-            pts_use = pts_clipped
+            pts_use = pts_u
         else:  # 'none'
             pts_use = pts_u
 
-        # 3. Safeguard against 1D line collapse and degenerate polygons
+        # 3. Safeguard against degenerate polygons
         area = compute_polygon_area(pts_use)
         if area < 0.5 or len(pts_use) < 3:
-            continue
-
-        p_dx = float(pts_use[:, 0].max() - pts_use[:, 0].min())
-        p_dy = float(pts_use[:, 1].max() - pts_use[:, 1].min())
-        if p_dx < 0.5 or p_dy < 0.5:
             continue
 
         label_counters[lbl] = label_counters.get(lbl, 0) + 1
@@ -676,6 +547,38 @@ def transform_and_crop_rois(
         if "cohesive_output_files" in split_manifest:
             for fmt, path in split_manifest["cohesive_output_files"].items():
                 saved_files[f"cohesive_{fmt}"] = path
+
+    # 8. Export run configuration JSON
+    cfg_suffix = "transform_config.json" if (output_prefix.endswith("-") or output_prefix.endswith("_")) else "_transform_config.json"
+    cfg_path = f"{output_prefix}{cfg_suffix}"
+    config_record = {
+        "input_path": str(input_path),
+        "transform_json": str(transform_json),
+        "output_prefix": str(output_prefix),
+        "cell_col": cell_col,
+        "label_col": label_col,
+        "x_col": x_col,
+        "y_col": y_col,
+        "offset_x": offset_x,
+        "offset_y": offset_y,
+        "reference_mask": reference_mask,
+        "flip_y": flip_y,
+        "use_inverse": use_inverse,
+        "crop_mode": crop_mode,
+        "sample_id": sample_id,
+        "roi_name": roi_name,
+        "image_path": image_path,
+        "generate_mask": generate_mask,
+        "export_format": export_format,
+        "roi_bounds": bounds,
+        "pixel_size_um": pixel_size,
+        "total_cells_retained": total_cells_transformed,
+        "output_files": saved_files,
+    }
+    with open(cfg_path, "w") as f:
+        json.dump(config_record, f, indent=2)
+    print(f"Saved run configuration JSON : {cfg_path}")
+    saved_files["transform_config"] = cfg_path
 
     print(f"Step 3 completed in {time.time() - t0:.2f}s.")
     return df_gui_rois, saved_files
