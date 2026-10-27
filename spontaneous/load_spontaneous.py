@@ -137,8 +137,9 @@ def snv_normalize(spectra, axis=0):
         raise ValueError("Input must be 1D or 2D array")
 
 
-def load_txt_folder_to_array(folder_dir, skip_first_column=True, remove_spectra=[], baseline_correction=None):
-    """Load all .txt files in a folder into a single array, optionally skipping the first column and applying baseline correction.
+def load_txt_folder_to_array(folder_dir, skip_first_column=True, remove_spectra=[], baseline_correction=None, shift=0):
+    """Load all .txt files in a folder into a single array, optionally skipping the first column,
+    applying baseline correction, and shifting spectra along the wavenumber axis.
     
     Parameters:
     -----------
@@ -150,52 +151,74 @@ def load_txt_folder_to_array(folder_dir, skip_first_column=True, remove_spectra=
         List of spectrum indices to remove.
     baseline_correction : callable
         Function to apply baseline correction (default: None).
+    shift : int
+        Number of wavenumber points to shift spectra.
+        Positive (>0) shifts spectra to the RIGHT (towards higher wavenumbers).
+        Negative (<0) shifts spectra to the LEFT (towards lower wavenumbers).
+        0 means no shift (default).
 
     Returns:
     --------
     np.ndarray : Combined array of spectra.
     """
 
-    files = glob.glob(os.path.join(folder_dir, '*.txt'))
-    arr = np.loadtxt(files[0])
+    files = sorted(glob.glob(os.path.join(folder_dir, '*.txt')))
+    first_data = np.loadtxt(files[0])
+
+    if shift > 0:
+        # Shift to the RIGHT (higher wavenumbers)
+        arr_wn = first_data[shift:, 0]
+        arr_spec = first_data[:-shift, 1:]
+    elif shift < 0:
+        # Shift to the LEFT (lower wavenumbers)
+        s = abs(shift)
+        arr_wn = first_data[:-s, 0]
+        arr_spec = first_data[s:, 1:]
+    else:
+        arr_wn = first_data[:, 0]
+        arr_spec = first_data[:, 1:]
+
+    arr = np.column_stack([arr_wn, arr_spec])
 
     if baseline_correction is not None:
-        # Correct only the first spectrum (which is in column 1, after wavenumbers in column 0)
-        # We use flatten to ensure it's 1D, and the corrected version is re-inserted as a column.
         arr[:, 1:] = baseline_correct(arr[:, 1:], arr[:, 0], mode='als', show_plot=True)[:, np.newaxis]
-    
 
-    for idx, file in enumerate(files[1:]):
+    for idx, file in enumerate(files[1:], start=1):
+        if idx in remove_spectra or os.path.basename(file) in remove_spectra:
+            continue
+
         temp = np.loadtxt(file)
         
-        # If shapes don't match, interpolate to match arr's wavenumber grid
-        if temp.shape[0] != arr.shape[0]:
-            # Extract wavenumber columns (first column)
-            arr_wavenumbers = arr[:, 0]
-            temp_wavenumbers = temp[:, 0]
-            
-            # Create interpolated array with arr's wavenumber grid
-            temp_interpolated = np.zeros((arr.shape[0], temp.shape[1]))
-            temp_interpolated[:, 0] = arr_wavenumbers  # Use arr's wavenumbers
-            
-            # Interpolate each spectrum column (skip first column which is wavenumbers)
-            for col in range(1, temp.shape[1]):
-                interp_spectrum = np.interp(arr_wavenumbers, temp_wavenumbers, temp[:, col])
-                    
-                temp_interpolated[:, col] = interp_spectrum   
+        if shift > 0:
+            temp_wn = temp[shift:, 0]
+            temp_spec = temp[:-shift, 1:]
+        elif shift < 0:
+            s = abs(shift)
+            temp_wn = temp[:-s, 0]
+            temp_spec = temp[s:, 1:]
+        else:
+            temp_wn = temp[:, 0]
+            temp_spec = temp[:, 1:]
 
-            temp = temp_interpolated  # Use the interpolated array for further processing  
-        
+        # If shapes don't match or grids differ, interpolate to match arr's wavenumber grid
+        if temp_wn.shape[0] != arr[:, 0].shape[0] or not np.array_equal(temp_wn, arr[:, 0]):
+            interp_spec = np.zeros((arr.shape[0], temp_spec.shape[1]))
+            for col in range(temp_spec.shape[1]):
+                interp_spec[:, col] = np.interp(arr[:, 0], temp_wn, temp_spec[:, col])
+            temp_spec = interp_spec
+
         if baseline_correction is not None:
+            temp_spec = baseline_correct(temp_spec, arr[:, 0], mode='als', show_plot=True)
+            if temp_spec.ndim == 1:
+                temp_spec = temp_spec[:, np.newaxis]
 
-            temp_spec = baseline_correct(temp[:, 1:], arr[:, 0], mode='als', show_plot=True)  # Apply baseline correction to spectra (skip wavenumbers)
-            temp[:, 1:] = temp_spec[:, np.newaxis]  # Add back the wavenumber column for concatenation
-
-        
-        arr = np.concatenate((arr, temp[:, 1:]), axis=1)
+        arr = np.concatenate((arr, temp_spec), axis=1)
 
     if len(remove_spectra) > 0:
-        arr = np.delete(arr, remove_spectra, axis=1)
+        # Filter indices if provided as integer column indices
+        int_removes = [r for r in remove_spectra if isinstance(r, int)]
+        if int_removes:
+            arr = np.delete(arr, int_removes, axis=1)
     return arr
 
 
