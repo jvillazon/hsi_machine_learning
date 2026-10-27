@@ -11,6 +11,8 @@ Key Functions:
 
 
 """
+import argparse
+import gc
 import json
 import os
 import sys
@@ -37,9 +39,16 @@ import time
 import tkinter as tk
 from tkinter import filedialog
 
-image_path = r"C:\Users\jvill\OneDrive - UC San Diego\integrated_pipeline\WSI_data\SRS\collagen\S21-K21_198_3-collagen.ome.tiff"
-image_name = os.path.basename(image_path).split('.')[0]
-output_dir = os.path.join(os.path.dirname(image_path), f"{image_name}_collagen_10-20-26-output")
+# Set 'input_path' to either:
+# 1) A directory containing multiple images for batch processing (creates a dedicated folder per file)
+# 2) A path to a single image file (.tif, .tiff, .ome.tiff)
+# 3) None to prompt via interactive file/folder dialog
+input_path = r"C:\Users\jvill\OneDrive - UC San Diego\integrated_pipeline\WSI_data\SRS\collagen"
+
+# Base directory for outputs:
+# If None, output folders are created in each image's parent directory.
+# For each file '{image_name}', an output folder '{image_name}{output_folder_suffix}' is created.
+output_dir = input_path
 
 # Choose thresholding method based on your ROI:
 # - 'otsu': Best for small, clean ROIs with clear background/signal distinction
@@ -55,19 +64,28 @@ output_dir = os.path.join(os.path.dirname(image_path), f"{image_name}_collagen_1
 # image = load_image(image_path, threshold_method='percentile', threshold_value=75)
 
 CONFIG = {
-    'image_path': image_path,
-    'output_dir': output_dir,
-    'image_name': image_name,
+    'input_path': input_path,              # Directory or single image path
+    'image_path': input_path,              # Backwards compatibility alias
+    'output_dir': output_dir,              # Base output folder (None = beside input images)
+    'output_folder_suffix': '_output',     # Suffix appended to image name for its folder
+    # 'pixel_size_um': 0.4971845,
     'pixel_size_um': 0.65,
     'map_type': 'propagated_diameter_um',  # 'propagated_diameter_um', 'skeleton_diameter_um', 'diameter_um', 'distance_um'
-    'tophat_radius_um':None,              
-    'auto_scale_from_thickness': True,    # Automatically calibrate sigma_gradient and sigma_tensor to fiber width
-    'sigma_gradient': 0.5,                # Fallback inner scale in microns (if auto_scale is False)
-    'sigma_tensor': 2.0,                  # Fallback outer scale in microns (if auto_scale is False)
+    'tophat_radius_um': None,              
+    'auto_scale_from_thickness': True,     # Automatically calibrate sigma_gradient and sigma_tensor to fiber width
+    'sigma_gradient': 0.5,                 # Fallback inner scale in microns (if auto_scale is False)
+    'sigma_tensor': 2.0,                   # Fallback outer scale in microns (if auto_scale is False)
     'threshold_method': 'percentile',
     'threshold_value': 10,
     'plot_images': True,
     'export_config_only': False,           # If True, exports config JSON and exits immediately without running pipeline
+    # Preferential orientation vector map settings
+    'vector_bin_size': None,               # Pixel size for vector bins (None = auto-calculate dense distribution across tissue)
+    'vector_target_bins': 80,              # Number of bins across the tissue major dimension (denser sampling)
+    'vector_length_scale': 0.85,           # Arrow length scale factor
+    'vector_crop_to_tissue': True,         # Fit canvas and aspect ratio tightly to non-background tissue bounding box
+    'img_extensions': ('.tif', '.tiff', '.ome.tif', '.ome.tiff'),
+    'recursive': False,                    # Set True to search subdirectories for images
 }
 
 
@@ -149,7 +167,7 @@ def _auto_downsample_2d(*arrays, max_pixels=80_000_000):
     return downs, stride
 
 
-def load_image(image_path, threshold_method='otsu', threshold_value=None):
+def load_image(image_path, threshold_method='otsu', threshold_value=None, return_diagnostics=False):
     """
     Load and convert image to grayscale.
     Apply thresholding to remove background noise before structure tensor.
@@ -163,77 +181,87 @@ def load_image(image_path, threshold_method='otsu', threshold_value=None):
             - 'percentile': Manual percentile threshold (use threshold_value parameter)
             - 'none': No thresholding, returns raw image
         threshold_value (float): For 'percentile' method, the percentile (0-100) to use as threshold
+        return_diagnostics (bool): If True, returns (processed_image, raw_image, threshold_val, threshold_method)
         
     Returns:
-        image (ndarray): Grayscale image with background removed
+        image (ndarray) or tuple: Grayscale image with background removed (and diagnostics if return_diagnostics=True)
     """
     try:
         image = tifffile.imread(image_path)
         print(f"Loaded image: {image.shape}, dtype: {image.dtype}")
     except Exception as e:
         print(f"Error reading image: {e}")
-        return None
+        return (None, None, None, None) if return_diagnostics else None
     
     if image.ndim == 3:
         print("Converting multi-channel to grayscale")
         image = rgb2gray(image)
     
-    # Use float16 for large images to reduce memory pressure.
+    # Use float32 for processing.
     if image.dtype != np.float32:
         image = image.astype(np.float32)
-        print(f"Converted to float16: range [{image.min():.3f}, {image.max():.3f}]")
+        print(f"Converted to float32: range [{image.min():.3f}, {image.max():.3f}]")
+    
+    raw_image = image.copy()
+    threshold_val = None
     
     # Apply thresholding based on selected method
     if threshold_method.lower() == 'none':
         print("No thresholding applied")
+        threshold_val = 0.0
         print(f"  Background pixels (0): {np.sum(image == 0)}")
         print(f"  Signal pixels (>0): {np.sum(image > 0)}")
+        if return_diagnostics:
+            return image, raw_image, threshold_val, threshold_method
         return image
     
     elif threshold_method.lower() == 'otsu':
-        
-        threshold = filters.threshold_otsu(image)
-        image[image <= threshold] = 0
-        print(f"Applied Otsu threshold: {threshold:.3f}")
+        threshold_val = float(filters.threshold_otsu(image))
+        image[image <= threshold_val] = 0
+        print(f"Applied Otsu threshold: {threshold_val:.3f}")
 
     elif threshold_method.lower() == 'triangle':
         nonzero_pixels = image[image > 10]
-        threshold = filters.threshold_triangle(nonzero_pixels)
-        image[image <= threshold] = 0
-        print(f"Applied Triangle threshold: {threshold:.3f}")
+        threshold_val = float(filters.threshold_triangle(nonzero_pixels)) if len(nonzero_pixels) > 0 else 0.0
+        image[image <= threshold_val] = 0
+        print(f"Applied Triangle threshold: {threshold_val:.3f}")
     
     elif threshold_method.lower() == 'li':
         otsu_threshold = filters.threshold_otsu(image)
-        threshold = filters.threshold_li(image, initial_guess=otsu_threshold)
-        image[image <= threshold] = 0
-        print(f"Applied Li's threshold: {threshold:.3f}")
+        threshold_val = float(filters.threshold_li(image, initial_guess=otsu_threshold))
+        image[image <= threshold_val] = 0
+        print(f"Applied Li's threshold: {threshold_val:.3f}")
     
     elif threshold_method.lower() == 'yen':
-        threshold = filters.threshold_yen(image)
-        image[image <= threshold] = 0
-        print(f"Applied Yen's threshold: {threshold:.3f}")
+        threshold_val = float(filters.threshold_yen(image))
+        image[image <= threshold_val] = 0
+        print(f"Applied Yen's threshold: {threshold_val:.3f}")
     
     elif threshold_method.lower() == 'percentile':
         if threshold_value is None:
             print("ERROR: percentile method requires threshold_value parameter (0-100)")
-            return None
-        threshold = np.percentile(image[image>1e-4], threshold_value)
-        image[image <= threshold] = 0
-        print(f"Applied percentile {threshold_value}% threshold: {threshold:.3f}")
+            return (None, None, None, None) if return_diagnostics else None
+        pos_pixels = image[image > 1e-4]
+        threshold_val = float(np.percentile(pos_pixels, threshold_value)) if len(pos_pixels) > 0 else 0.0
+        image[image <= threshold_val] = 0
+        print(f"Applied percentile {threshold_value}% threshold: {threshold_val:.3f}")
     
     else:
         print(f"ERROR: Unknown threshold_method '{threshold_method}'")
-        return None
+        return (None, None, None, None) if return_diagnostics else None
     
-    # Set values below a certain threshold to 0
+    # Set values below a certain threshold to 0 and apply morphological opening
     image = image > 1e-4
-    selem = morphology.disk(2)
+    selem = morphology.disk(3)
     image = ndimage.binary_opening(image, selem)
+    # image = ndimage.binary_dilation(image, selem)
 
     print(f"  Background pixels: {np.sum(image == 0)}")
     print(f"  Signal pixels: {np.sum(image > 0)}")
     print(f"Threshold BEFORE structure tensor prevents boundary artifacts")
 
+    if return_diagnostics:
+        return image, raw_image, threshold_val, threshold_method
     return image
 
 
@@ -243,7 +271,7 @@ def compute_thickness(
     pixel_size_um=1.0,
     map_type='propagated_diameter_um',
     tophat_radius_um=4.0,
-    file_name="thickness.tif",
+    file_name="col_thickness.tif",
     output_dir=None,
     return_stats=False
 ):
@@ -260,7 +288,7 @@ def compute_thickness(
             - 'distance_um': Per-pixel distance to nearest background in microns (radius)
         tophat_radius_um (float): Scale in um for morphological White Top-Hat filtering to separate
                                   individual fibrils in dense sheets. Set None to disable.
-        file_name (str): Filename to save quantitative map.
+        file_name (str): Filename to save quantitative map (default 'col_thickness.tif').
         output_dir (str): Output directory path.
         return_stats (bool): If True, returns (out_map, stats_dict). If False, returns out_map.
 
@@ -408,7 +436,7 @@ def compute_thickness(
     if output_dir:
         full_path = os.path.join(output_dir, f"{file_name}")
         tifffile.imwrite(full_path, out_map)
-        print(f"Saved quantitative map: {map_type} to {full_path}")
+        print(f"Saved collagen thickness map ({map_type}): {full_path}")
     else:
         print("Save cancelled: No output directory selected.")
 
@@ -706,10 +734,11 @@ def visualize_coherence_heatmap(coherence, filename_png="coherence_heatmap_viz.p
     return fig
 
 def visualize_preferential_orientation_vector_map(orientation, coherence, image=None, 
-                                                  bin_size=32, figsize=None, 
-                                                  overlay_image=True, coherence_threshold=0.1,
-                                                  vector_length_scale=1.0, filename_png="vector_map.png",
-                                                  max_display_dim=3500):
+                                                  bin_size=None, figsize=None, 
+                                                  overlay_image=False, coherence_threshold=0.1,
+                                                  vector_length_scale=0.85, filename_png="vector_map.png",
+                                                  max_display_dim=3500, crop_to_tissue=True,
+                                                  target_bins=80):
     """
     Visualize preferential fiber orientation as a vector map with spatial binning.
     Bins nearby pixels and computes their median orientation using circular statistics.
@@ -721,36 +750,64 @@ def visualize_preferential_orientation_vector_map(orientation, coherence, image=
         orientation (ndarray): Orientation map in radians (0 to pi)
         coherence (ndarray): Coherence/anisotropy map (0 to 1) - used for coloring
         image (ndarray): Original image (for masking and optional overlay)
-        bin_size (int): Spatial bin size in pixels (default 32)
-        figsize (tuple): Figure size
+        bin_size (int): Spatial bin size in pixels. If None, auto-calculated from target_bins
+        figsize (tuple): Figure size. If None, matches tissue aspect ratio
         overlay_image (bool): If True, show original image in background
         coherence_threshold (float): Minimum coherence to display vectors (0-1)
-        vector_length_scale (float): Scale factor for vector sizes
-        filename (str): Output filename for PNG
+        vector_length_scale (float): Scale factor for vector sizes (default 0.85)
+        filename_png (str): Output filename for PNG
+        max_display_dim (int): Max resolution for downsampled overlay background
+        crop_to_tissue (bool): If True, bounds the figure and bins strictly to non-background tissue
+        target_bins (int): Target number of bins across the major tissue dimension (default 80)
         
     Returns:
         fig: Matplotlib figure object
     """
-    
     h, w = orientation.shape
     
-    # Create bin grid
-    y_bins = np.arange(0, h, bin_size)
-    x_bins = np.arange(0, w, bin_size)
+    # Determine spatial bounding box (crop to tissue if requested and valid foreground exists)
+    if crop_to_tissue and image is not None and np.any(image > 0):
+        y_coords, x_coords = np.where(image > 0)
+        y_min_raw, y_max_raw = int(y_coords.min()), int(y_coords.max())
+        x_min_raw, x_max_raw = int(x_coords.min()), int(x_coords.max())
+        
+        span_y = y_max_raw - y_min_raw
+        span_x = x_max_raw - x_min_raw
+        pad = max(16, int(0.02 * max(span_y, span_x)))
+        
+        y_min = max(0, y_min_raw - pad)
+        y_max = min(h, y_max_raw + pad + 1)
+        x_min = max(0, x_min_raw - pad)
+        x_max = min(w, x_max_raw + pad + 1)
+    else:
+        y_min, y_max = 0, h
+        x_min, x_max = 0, w
+
+    tissue_w = max(1, x_max - x_min)
+    tissue_h = max(1, y_max - y_min)
+
+    # Automatically calculate bin_size if not specified to ensure dense distribution
+    if bin_size is None or bin_size <= 0:
+        major_dim = max(tissue_w, tissue_h)
+        bin_size = max(6, int(round(major_dim / float(target_bins))))
+    
+    # Create bin grid strictly within the region of interest
+    y_bins = np.arange(y_min, y_max, bin_size)
+    x_bins = np.arange(x_min, x_max, bin_size)
     
     bin_orientations = []
     bin_coherences = []
     bin_positions_y = []
     bin_positions_x = []
     
-    print(f"Creating vector field with bin_size={bin_size}px...")
+    print(f"Creating vector field with bin_size={bin_size}px across {tissue_w}x{tissue_h} tissue ROI...")
     
     # For each bin, compute the median orientation using circular statistics
-    for i, y_start in enumerate(y_bins[:-1]):
-        y_end = min(y_start + bin_size, h)
+    for y_start in y_bins[:-1]:
+        y_end = min(y_start + bin_size, y_max)
         
-        for j, x_start in enumerate(x_bins[:-1]):
-            x_end = min(x_start + bin_size, w)
+        for x_start in x_bins[:-1]:
+            x_end = min(x_start + bin_size, x_max)
             
             # Extract orientations and coherences in this bin
             bin_orient = orientation[y_start:y_end, x_start:x_end]
@@ -769,21 +826,18 @@ def visualize_preferential_orientation_vector_map(orientation, coherence, image=
                 valid_coher = bin_coher[valid_mask]
                 
                 # Compute circular mean of orientation using resultant vector method
-                # This is more robust for circular data than standard mean
-                # Convert angle to unit vector: x = cos(2*θ), y = sin(2*θ)
-                # (multiply by 2 because orientation is π-periodic, not 2π)
                 cos_vals = np.cos(2 * valid_orient)
                 sin_vals = np.sin(2 * valid_orient)
                 
                 mean_cos = cos_vals.mean()
                 mean_sin = sin_vals.mean()
                 
-                # Compute mean orientation (and divide by 2 to undo the doubling)
+                # Compute mean orientation (and divide by 2 to undo doubling)
                 mean_orient = 0.5 * np.arctan2(mean_sin, mean_cos)
                 mean_orient = mean_orient % np.pi  # Normalize to [0, pi]
                 
                 # Mean coherence in bin
-                mean_coher = valid_coher.mean()
+                mean_coher = float(valid_coher.mean())
                 
                 # Only add if coherence exceeds threshold
                 if mean_coher >= coherence_threshold:
@@ -797,16 +851,28 @@ def visualize_preferential_orientation_vector_map(orientation, coherence, image=
     bin_positions_y = np.array(bin_positions_y)
     bin_positions_x = np.array(bin_positions_x)
     
-    print(f"  Created {len(bin_orientations)} valid bins")
+    print(f"  Created {len(bin_orientations)} valid vectors")
     
-    # Create figure with exact pixel aspect ratio matching the input image
-    dpi = 600
-    fig = plt.figure(figsize=(w / dpi, h / dpi), dpi=dpi)
-    ax = fig.add_axes([0, 0, 1, 1])  # Span the entire figure (no margins)
+    # Create figure matching the aspect ratio of the non-background tissue
+    aspect_ratio = tissue_w / float(tissue_h)
+    base_dim = 12.0
+    if tissue_w >= tissue_h:
+        fig_w = base_dim
+        fig_h = max(2.0, base_dim / aspect_ratio)
+    else:
+        fig_h = base_dim
+        fig_w = max(2.0, base_dim * aspect_ratio)
+        
+    dpi = 300
+    if figsize is not None:
+        fig = plt.figure(figsize=figsize, dpi=dpi)
+    else:
+        fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi)
+        
+    ax = fig.add_axes([0, 0, 1, 1])  # Span entire figure (no margins)
     
     # Optionally show original image in background
     if overlay_image and image is not None:
-        # Render as single-channel float 16 with colormap, avoiding explicit RGBA expansion.
         ds = 1
         if max_display_dim is not None and max(h, w) > max_display_dim:
             ds = int(np.ceil(max(h, w) / float(max_display_dim)))
@@ -823,83 +889,73 @@ def visualize_preferential_orientation_vector_map(orientation, coherence, image=
             'magenta', ['black', 'magenta', 'white']
         )
 
-        # Mask background so it stays black without creating a full RGBA ndarray.
         img_masked = np.ma.masked_where(img_display <= 0, img_display)
         ax.set_facecolor('black')
-        ax.axis('off')
         ax.imshow(
             img_masked,
             cmap=magenta_cmap,
-            aspect='auto',
+            aspect='equal',
             interpolation='nearest',
             extent=(0, w, h, 0),
         )
     
     # Draw vectors colored by coherence
-    # Normalize coherence for colormap
     if len(bin_coherences) > 0:
-        coher_norm = (bin_coherences - bin_coherences.min()) / (bin_coherences.max() - bin_coherences.min() + 1e-8)
-        cmap = plt.cm.jet  # Use jet colormap for coherence
+        c_min = float(bin_coherences.min())
+        c_max = float(bin_coherences.max())
+        coher_norm = (bin_coherences - c_min) / (c_max - c_min + 1e-8)
+        cmap = plt.cm.jet
         
-        # Draw each vector
+        # Base arrow scaling relative to bin_size
+        base_h_width = max(0.4, bin_size * 0.16 * vector_length_scale)
+        base_h_length = max(0.3, bin_size * 0.20 * vector_length_scale)
+        l_width = max(0.2, bin_size * 0.04 * vector_length_scale)
+
         for idx in range(len(bin_orientations)):
             x = bin_positions_x[idx]
             y = bin_positions_y[idx]
             angle = bin_orientations[idx]
             coher = bin_coherences[idx]
             
-            # Vector direction (2 perpendicular directions since orientation is π-periodic)
-            length = (bin_size / 2) * coher * vector_length_scale
+            # Vector direction (bidirectional centered arrow)
+            length = (bin_size / 2.0) * coher * vector_length_scale
             dx = length * np.cos(angle)
-            dy = -length * np.sin(angle)  # Negative because positive Cartesian angle points "UP" (smaller image-Y)
+            dy = -length * np.sin(angle)  # Inverted Y for image coordinates
             
-            # Color by coherence
             color = cmap(coher_norm[idx])
             
-            # Dynamic arrow styling proportional to bin_size
-            h_width = max(0.5, bin_size * 0.15)
-            h_length = max(0.2, bin_size * 0.08)
-            l_width = max(0.2, bin_size * 0.03)
+            # Arrow head safeguards for shorter arrows
+            tot_len = 2.0 * length
+            h_len = min(base_h_length, tot_len * 0.45)
+            h_wid = min(base_h_width, h_len * 0.9)
             
-            # Draw line segment
             ax.arrow(x - dx, y - dy, 2*dx, 2*dy, 
-                    head_width=h_width, head_length=h_length, fc=color, ec=color, 
-                    alpha=0.8, linewidth=l_width, length_includes_head=True)
+                    head_width=h_wid, head_length=h_len, fc=color, ec=color, 
+                    alpha=0.85, linewidth=l_width, length_includes_head=True)
             
-    # Customize plot boundaries (spines)
-    for spine in ax.spines.values():
-        if not overlay_image:
-            spine.set_visible(False)
-        else:
-            spine.set_linewidth(2)   # Thickness of the boundary
-            spine.set_color("black") # Color of the boundary
-
-    # Set axis properties to cover the full image area precisely
-    ax.set_xlim(0, w)
-    ax.set_ylim(h, 0)  # Invert y-axis for image coordinates
+    # Set axis properties to cover the tissue area precisely with equal aspect ratio
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_max, y_min)  # Invert y-axis for image coordinates
     ax.set_aspect('equal')
-    # ax.set_title(f'Fiber Orientation Vector Map', 
-    #             fontsize=PLOT_STYLE['title_size'], fontweight='bold')
-    if not overlay_image:
-        ax.axis('off')
+    ax.axis('off')
     
-    # Add colorbar for coherence
+    # Standalone colorbar for coherence
     if len(bin_coherences) > 0:
-        sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=bin_coherences.min(), 
-                                                                   vmax=bin_coherences.max()))
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=float(bin_coherences.min()), 
+                                                                   vmax=float(bin_coherences.max())))
         sm.set_array([])
-        # Save standalone colorbar
         cbar_filename = filename_png.replace('.png', '_colorbar.png')
         save_standalone_colorbar(sm, cbar_filename, 'Mean Coherence')
     
     if not overlay_image:
         fig.patch.set_facecolor('none')
         ax.set_facecolor('none')
+        plt.savefig(filename_png, dpi=dpi, bbox_inches='tight', pad_inches=0, transparent=True)
     else:
         fig.patch.set_facecolor('black')
         ax.set_facecolor('black')
+        plt.savefig(filename_png, dpi=dpi, bbox_inches='tight', pad_inches=0, facecolor='black', transparent=False)
         
-    plt.savefig(filename_png, dpi=600, transparent=True)
     print(f"Saved: {filename_png}")
     plt.close(fig)
     
@@ -994,132 +1050,426 @@ def plot_polar_orientation_histogram(image, orientation, coherence=None, coheren
     
     return fig
 
-if __name__ == "__main__":
-    try:
-        # 1. Immediately export configuration parameters to JSON
-        os.makedirs(output_dir, exist_ok=True)
-        json_path = os.path.join(output_dir, f"{CONFIG['image_name']}_config.json")
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(CONFIG, f, indent=4)
-        print(f"Exported configuration parameters JSON to: {json_path}")
-        print("\n--- Configuration Parameters ---")
-        print(json.dumps(CONFIG, indent=4))
 
-        # If export_config_only is set, exit immediately without executing heavy image processing
-        if CONFIG.get('export_config_only', False) or ('--config-only' in sys.argv) or ('--export-config' in sys.argv):
-            print("\n'export_config_only' is enabled. Exiting without running processing pipeline.")
-            sys.exit(0)
+def visualize_threshold_efficacy(raw_image, binary_mask, threshold_val=None, method_name="threshold", filename_png="threshold_efficacy_viz.png"):
+    """
+    Diagnostic visualization showing the efficacy of the threshold method at separating collagen fibers.
+    Creates a 4-panel figure:
+    1. Raw Grayscale Collagen Image
+    2. Segmented Binary Collagen Mask (with coverage stats)
+    3. Spatial Overlay (separated collagen highlighted over raw tissue background)
+    4. Log-scale Pixel Intensity Histogram with the threshold cut-off marked
+    """
+    (raw_ds, mask_ds), _ = _auto_downsample_2d(raw_image, binary_mask, max_pixels=10_000_000)
+    
+    total_px = raw_ds.size
+    fg_px = int(np.count_nonzero(mask_ds))
+    fg_pct = (fg_px / total_px) * 100.0 if total_px > 0 else 0.0
 
-        # Compute structure tensor with optimized parameters
-        start_time = time.time()
-        pixel_size_um = CONFIG['pixel_size_um']
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    
+    # Panel 1: Raw Image
+    im0 = axes[0, 0].imshow(raw_ds, cmap='gray')
+    axes[0, 0].set_title("1. Raw Image (Pre-Threshold)", fontsize=PLOT_STYLE['label_size'] + 2, fontweight='bold')
+    axes[0, 0].axis('off')
+    plt.colorbar(im0, ax=axes[0, 0], fraction=0.046, pad=0.04)
+
+    # Panel 2: Binary Collagen Mask
+    axes[0, 1].imshow(mask_ds, cmap='gray')
+    axes[0, 1].set_title(
+        f"2. Separated Collagen Mask\n(Foreground: {fg_pct:.2f}% | {fg_px:,} px)", 
+        fontsize=PLOT_STYLE['label_size'] + 2, fontweight='bold'
+    )
+    axes[0, 1].axis('off')
+
+    # Panel 3: Mask Overlay (raw image with green collagen segmentation)
+    raw_norm = raw_ds.astype(np.float32)
+    raw_min, raw_max = raw_norm.min(), raw_norm.max()
+    if raw_max > raw_min:
+        raw_norm = (raw_norm - raw_min) / (raw_max - raw_min)
+    else:
+        raw_norm = np.zeros_like(raw_norm)
         
-        image = load_image(
-            image_path=CONFIG['image_path'], 
-            threshold_method=CONFIG['threshold_method'], 
-            threshold_value=CONFIG['threshold_value']
-        )
+    rgb_overlay = np.dstack([raw_norm, raw_norm, raw_norm])
+    fiber_mask = mask_ds > 0
+    rgb_overlay[fiber_mask, 0] = rgb_overlay[fiber_mask, 0] * 0.3
+    rgb_overlay[fiber_mask, 1] = 0.85 + rgb_overlay[fiber_mask, 1] * 0.15
+    rgb_overlay[fiber_mask, 2] = rgb_overlay[fiber_mask, 2] * 0.3
+    
+    axes[1, 0].imshow(np.clip(rgb_overlay, 0.0, 1.0))
+    axes[1, 0].set_title("3. Collagen Overlay (Green = Separated)", fontsize=PLOT_STYLE['label_size'] + 2, fontweight='bold')
+    axes[1, 0].axis('off')
 
-        # 1. Quantitative per-pixel distance/thickness (in microns)
-        distance_um_map, thickness_stats = compute_thickness(
-            image,
-            pixel_size_um=pixel_size_um,
-            map_type=CONFIG['map_type'],
-            tophat_radius_um=CONFIG.get('tophat_radius_um', 4.0),
-            file_name=f'{CONFIG["image_name"]}_{CONFIG["map_type"]}.tif',
-            output_dir=output_dir,
-            return_stats=True
-        )
+    # Panel 4: Intensity Histogram with Threshold Cutoff
+    nonzero_vals = raw_ds[raw_ds > 1e-5].ravel()
+    if len(nonzero_vals) > 0:
+        axes[1, 1].hist(nonzero_vals, bins=100, color='#1f77b4', alpha=0.75, log=True, edgecolor='none')
+        if threshold_val is not None and not np.isnan(threshold_val):
+            axes[1, 1].axvline(
+                threshold_val, color='crimson', linestyle='--', linewidth=2.5,
+                label=f"Threshold = {threshold_val:.4f}"
+            )
+            axes[1, 1].legend(fontsize=PLOT_STYLE['tick_size'])
+    axes[1, 1].set_title(f"4. Intensity Distribution ({method_name})", fontsize=PLOT_STYLE['label_size'] + 2, fontweight='bold')
+    axes[1, 1].set_xlabel("Pixel Intensity", fontsize=PLOT_STYLE['tick_size'])
+    axes[1, 1].set_ylabel("Count (Log Scale)", fontsize=PLOT_STYLE['tick_size'])
+    axes[1, 1].tick_params(labelsize=PLOT_STYLE['tick_size'])
+    axes[1, 1].grid(True, alpha=0.3, linestyle=':')
 
-        # 2. Correlate Gaussian filter scales to actual fiber thickness or use config
-        if CONFIG.get('auto_scale_from_thickness', True) and thickness_stats.get('median_um'):
-            median_diam_um = thickness_stats['median_um']
-            # Inner differentiation scale: ~0.25 * fiber diameter (clamped to at least 1.0 px)
-            sigma_grad_um = max(0.25 * median_diam_um, 1.0 * pixel_size_um)
-            sigma_grad_px = sigma_grad_um / pixel_size_um
+    plt.tight_layout()
+    plt.savefig(filename_png, dpi=300, bbox_inches='tight')
+    print(f"Saved threshold efficacy diagnostic plot to: {filename_png}")
+    plt.close(fig)
+    return fig
 
-            # Outer integration scale: ~1.75 * fiber diameter (integrates across fiber bundle)
-            sigma_tensor_um = max(1.75 * median_diam_um, 2.0 * pixel_size_um)
-            sigma_tensor_px = sigma_tensor_um / pixel_size_um
 
-            print(f"\n--- Physically Calibrated Scale Selection ---")
-            print(f"Median Fiber Thickness: {median_diam_um:.2f} um")
-            print(f"Gradient Scale (Inner): {sigma_grad_um:.2f} um ({sigma_grad_px:.2f} px)")
-            print(f"Tensor Scale   (Outer): {sigma_tensor_um:.2f} um ({sigma_tensor_px:.2f} px)")
+def get_image_stem(filepath):
+    """
+    Extract base image name without multi-part TIFF extensions (.ome.tiff, .ome.tif, .tiff, .tif).
+    """
+    filename = os.path.basename(filepath)
+    for ext in ('.ome.tiff', '.ome.tif', '.tiff', '.tif'):
+        if filename.lower().endswith(ext):
+            return filename[:-len(ext)]
+    return os.path.splitext(filename)[0]
+
+
+def find_image_files(input_dir, extensions=('.tif', '.tiff', '.ome.tif', '.ome.tiff'), recursive=False):
+    """
+    Find candidate collagen images in directory, excluding generated analysis output files.
+    """
+    skip_keywords = (
+        '_coherence', '_orientation', 'col_thickness', '_thickness',
+        'heatmap', 'vector_map', 'rose_plot', '_colorbar', 'mask', 'efficacy'
+    )
+    
+    image_files = []
+    if recursive:
+        for root, _, files in os.walk(input_dir):
+            for f in files:
+                f_lower = f.lower()
+                if any(f_lower.endswith(ext) for ext in extensions):
+                    if not any(k in f_lower for k in skip_keywords):
+                        image_files.append(os.path.join(root, f))
+    else:
+        for f in os.listdir(input_dir):
+            full_path = os.path.join(input_dir, f)
+            if os.path.isfile(full_path):
+                f_lower = f.lower()
+                if any(f_lower.endswith(ext) for ext in extensions):
+                    if not any(k in f_lower for k in skip_keywords):
+                        image_files.append(full_path)
+                        
+    return sorted(image_files)
+
+
+def process_single_image(image_path, output_dir=None, config=None):
+    """
+    Process a single collagen image through structure tensor and thickness quantification,
+    saving all outputs and figures into an isolated output folder per file.
+    
+    Args:
+        image_path (str): Path to input image file.
+        output_dir (str, optional): Target output directory for this image.
+            If None, creates '{image_name}{output_folder_suffix}' alongside image or inside config['output_dir'].
+        config (dict, optional): Configuration dictionary. Defaults to global CONFIG.
+        
+    Returns:
+        dict: Processing results including paths and statistics.
+    """
+    current_config = dict(CONFIG if config is None else config)
+    current_config['image_path'] = image_path
+    
+    image_name = get_image_stem(image_path)
+    current_config['image_name'] = image_name
+    
+    folder_suffix = current_config.get('output_folder_suffix', '_output')
+    base_out = output_dir or current_config.get('output_dir')
+    if base_out:
+        if os.path.basename(base_out).startswith(image_name):
+            file_output_dir = base_out
         else:
-            sigma_grad_px = CONFIG['sigma_gradient'] / pixel_size_um
-            sigma_tensor_px = CONFIG['sigma_tensor'] / pixel_size_um
+            file_output_dir = os.path.join(base_out, f"{image_name}{folder_suffix}")
+    else:
+        file_output_dir = os.path.join(os.path.dirname(image_path), f"{image_name}{folder_suffix}")
+        
+    os.makedirs(file_output_dir, exist_ok=True)
+    current_config['output_dir'] = file_output_dir
+    
+    print(f"\n{'='*70}")
+    print(f"Processing: {image_name}")
+    print(f"Input:      {image_path}")
+    print(f"Output dir: {file_output_dir}")
+    print(f"{'='*70}")
+    
+    # 1. Immediately export configuration parameters to JSON
+    json_path = os.path.join(file_output_dir, f"{image_name[0:10]}_config.json")
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(current_config, f, indent=4)
+    print(f"Exported configuration parameters JSON to: {json_path}")
+    
+    # If export_config_only is set, exit immediately without executing heavy image processing
+    if current_config.get('export_config_only', False) or ('--config-only' in sys.argv) or ('--export-config' in sys.argv):
+        print(f"\n'export_config_only' is enabled. Skipping processing for {image_name}.")
+        return {'status': 'config_only', 'output_dir': file_output_dir}
+        
+    # Compute structure tensor with optimized parameters
+    start_time = time.time()
+    pixel_size_um = current_config.get('pixel_size_um', 0.65)
+    
+    image, raw_image, threshold_val, threshold_method = load_image(
+        image_path=image_path,
+        threshold_method=current_config.get('threshold_method', 'percentile'),
+        threshold_value=current_config.get('threshold_value', 10),
+        return_diagnostics=True
+    )
+    if image is None:
+        raise RuntimeError(f"Failed to load image from {image_path}")
+        
+    # 1. Quantitative per-pixel distance/thickness (in microns)
+    # Saved specifically as 'col_thickness.tif'
+    distance_um_map, thickness_stats = compute_thickness(
+        image,
+        pixel_size_um=pixel_size_um,
+        map_type=current_config.get('map_type', 'propagated_diameter_um'),
+        tophat_radius_um=current_config.get('tophat_radius_um', 4.0),
+        file_name="col_thickness.tif",
+        output_dir=file_output_dir,
+        return_stats=True
+    )
+    
+    # 2. Correlate Gaussian filter scales to actual fiber thickness or use config
+    if current_config.get('auto_scale_from_thickness', True) and thickness_stats.get('median_um'):
+        median_diam_um = thickness_stats['median_um']
+        # Inner differentiation scale: ~0.25 * fiber diameter (clamped to at least 1.0 px)
+        sigma_grad_um = max(0.25 * median_diam_um, 1.0 * pixel_size_um)
+        sigma_grad_px = sigma_grad_um / pixel_size_um
 
-        # 3. Compute structure tensor and coherence of collagen signal
-        image, orientation, coherence = compute_structure_tensor(
-            image, 
-            sigma_gradient=sigma_grad_px,
-            sigma_tensor=sigma_tensor_px,
-            linear_coherence=True,
-            coherence_file_name=f'{CONFIG["image_name"]}_coherence.tif',
-            orientation_file_name=f'{CONFIG["image_name"]}_orientation.tif',
-            output_dir=output_dir
+        # Outer integration scale: ~1.75 * fiber diameter (integrates across fiber bundle)
+        sigma_tensor_um = max(1.75 * median_diam_um, 2.0 * pixel_size_um)
+        sigma_tensor_px = sigma_tensor_um / pixel_size_um
+
+        print(f"\n--- Physically Calibrated Scale Selection ---")
+        print(f"Median Fiber Thickness: {median_diam_um:.2f} um")
+        print(f"Gradient Scale (Inner): {sigma_grad_um:.2f} um ({sigma_grad_px:.2f} px)")
+        print(f"Tensor Scale   (Outer): {sigma_tensor_um:.2f} um ({sigma_tensor_px:.2f} px)")
+    else:
+        sigma_grad_px = current_config.get('sigma_gradient', 0.5) / pixel_size_um
+        sigma_tensor_px = current_config.get('sigma_tensor', 2.0) / pixel_size_um
+        
+    # 3. Compute structure tensor and coherence of collagen signal
+    image, orientation, coherence = compute_structure_tensor(
+        image,
+        sigma_gradient=sigma_grad_px,
+        sigma_tensor=sigma_tensor_px,
+        linear_coherence=True,
+        coherence_file_name=f'col_coherence.tif',
+        orientation_file_name=f'col_orientation.tif',
+        output_dir=file_output_dir
+    )
+    
+    elapsed = time.time() - start_time
+    print(f"\nComputation time: {elapsed:.2f} seconds")
+    
+    if current_config.get('plot_images', True):
+        # Calculate figure size to match image aspect ratio
+        image_figsize = get_figsize(image.shape)
+
+        # Create threshold efficacy diagnostic plot
+        print("\nCreating threshold efficacy diagnostic plot...")
+        visualize_threshold_efficacy(
+            raw_image=raw_image,
+            binary_mask=image,
+            threshold_val=threshold_val,
+            method_name=threshold_method,
+            filename_png=os.path.join(file_output_dir, "threshold_efficacy_viz.png")
         )
 
-        elapsed = time.time() - start_time
-        print(f"\nComputation time: {elapsed:.2f} seconds")
+        # Create coherence heatmap visualization png
+        print("\nCreating coherence heatmap...")
+        visualize_coherence_heatmap(
+            coherence,
+            filename_png=os.path.join(file_output_dir, "coherence_heatmap_viz.png"),
+            image=image
+        )
+
+        # Create orientation heatmap visualization png
+        print("\nCreating orientation heatmap...")
+        visualize_orientation_heatmap(
+            image,
+            orientation,
+            coherence=coherence,
+            coherence_threshold=0.1,
+            filename_png=os.path.join(file_output_dir, "orientation_heatmap_viz.png")
+        )
+
+        # Create preferential orientation vector map (transparent, framed to non-background tissue)
+        print("\nCreating preferential orientation vector map...")
+        visualize_preferential_orientation_vector_map(
+            orientation, coherence, image=image,
+            bin_size=current_config.get('vector_bin_size', None),
+            target_bins=current_config.get('vector_target_bins', 80),
+            crop_to_tissue=current_config.get('vector_crop_to_tissue', True),
+            overlay_image=False,
+            coherence_threshold=0.1,
+            vector_length_scale=current_config.get('vector_length_scale', 0.85),
+            filename_png=os.path.join(file_output_dir, "preferential_orientation_vector_map.png"),
+            figsize=None
+        )
+
+        # Create polar rose plot of orientation (polar)
+        print("\nPlotting rose plot of polar orientation...")
+        plot_polar_orientation_histogram(
+            image, orientation, coherence=coherence, coherence_threshold=0.1,
+            filename_png=os.path.join(file_output_dir, "orientation_rose_plot.png")
+        )
         
-        if CONFIG['plot_images']:
-            # Calculate figure size to match image aspect ratio
-            image_figsize = get_figsize(image.shape)
-
-            # Create coherence heatmap visualization png
-            print("\nCreating coherence heatmap...")
-            visualize_coherence_heatmap(
-                coherence,
-                filename_png=os.path.join(output_dir, "coherence_heatmap_viz.png"),
-                image=image
-            )
-
-            # Create orientation heatmap visualization png
-            print("\nCreating orientation heatmap...")
-            visualize_orientation_heatmap(
-                image,
-                orientation,
-                coherence=coherence,
-                coherence_threshold=0.1,
-                filename_png=os.path.join(output_dir, "orientation_heatmap_viz.png")
-            )
-
-            # Create preferential orientation vector map (transparent)
-            print("\nCreating preferential orientation vector map...")
-            visualize_preferential_orientation_vector_map(
-                orientation, coherence, image=image, 
-                bin_size= int(64 * (image.size/ 50000000)),  # Adjust this for different levels of detail
-                overlay_image=False,
-                coherence_threshold=0.1,  # Only show vectors with coherence > 0.1
-                vector_length_scale=1.0,
-                filename_png=os.path.join(output_dir, "preferential_orientation_vector_map.png"),
-                figsize=image_figsize
-            )
-
-            # Create polar rose plot of orientation (polar)
-            print("\nPlotting rose plot of polar orientation...")
-            plot_polar_orientation_histogram(
-                image, orientation, coherence=coherence, coherence_threshold=0.1,
-                filename_png=os.path.join(output_dir, "orientation_rose_plot.png"))
-            
-        # Update run configuration parameters and summary metrics to JSON
-        config_to_save = dict(CONFIG)
-        config_to_save['elapsed_seconds'] = round(elapsed, 2)
-        if 'thickness_stats' in locals() and thickness_stats:
-            config_to_save['thickness_stats'] = thickness_stats
-        config_to_save['calculated_scales'] = {
-            'sigma_gradient_px': round(float(sigma_grad_px), 3),
-            'sigma_tensor_px': round(float(sigma_tensor_px), 3),
+    # Update run configuration parameters and summary metrics to JSON
+    config_to_save = dict(current_config)
+    config_to_save['elapsed_seconds'] = round(elapsed, 2)
+    if 'thickness_stats' in locals() and thickness_stats:
+        config_to_save['thickness_stats'] = thickness_stats
+    if threshold_val is not None:
+        config_to_save['threshold_stats'] = {
+            'method': threshold_method,
+            'threshold_value': float(threshold_val),
+            'foreground_pixels': int(np.count_nonzero(image)),
+            'foreground_pct': round(float((np.count_nonzero(image) / image.size) * 100), 2)
         }
-        
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(config_to_save, f, indent=4)
-        print(f"Updated configuration and run statistics JSON at: {json_path}")
+    config_to_save['calculated_scales'] = {
+        'sigma_gradient_px': round(float(sigma_grad_px), 3),
+        'sigma_tensor_px': round(float(sigma_tensor_px), 3),
+    }
+    
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(config_to_save, f, indent=4)
+    print(f"Updated configuration and run statistics JSON at: {json_path}")
+    print(f"All plots and figures saved to: {file_output_dir}")
+    
+    # Memory cleanup for large batch processing
+    del image, raw_image, orientation, coherence, distance_um_map
+    plt.close('all')
+    gc.collect()
+    
+    return {
+        'status': 'success',
+        'image_name': image_name,
+        'output_dir': file_output_dir,
+        'elapsed_seconds': elapsed,
+        'thickness_stats': thickness_stats
+    }
 
-        print(f"\nAll plots and figures saved to: {output_dir}")
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
+
+def process_batch(input_path=None, output_dir=None, config=None):
+    """
+    Run batch processing on all images in a directory or on a single image file.
+    
+    Args:
+        input_path (str, optional): Path to a directory or a single image file.
+            If None, uses config['input_path'] (or opens file dialog if not set).
+        output_dir (str, optional): Base output directory.
+            If None, uses config['output_dir'].
+        config (dict, optional): Configuration dict. Defaults to CONFIG.
+    """
+    cfg = dict(CONFIG if config is None else config)
+    target_input = input_path or cfg.get('input_path') or cfg.get('image_path')
+    
+    if not target_input or not os.path.exists(target_input):
+        print(f"Input path '{target_input}' not found. Prompting for folder/file...")
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            target_input = filedialog.askdirectory(title="Select Folder Containing Collagen Images")
+            if not target_input:
+                target_input = filedialog.askopenfilename(
+                    title="Select Collagen Image",
+                    filetypes=[("TIFF images", "*.tif;*.tiff;*.ome.tif;*.ome.tiff"), ("All files", "*.*")]
+                )
+            root.destroy()
+        except Exception:
+            pass
+            
+    if not target_input or not os.path.exists(target_input):
+        print("No valid input path provided. Exiting.")
+        return []
+
+    # Determine files to process
+    if os.path.isfile(target_input):
+        image_files = [target_input]
+    elif os.path.isdir(target_input):
+        extensions = cfg.get('img_extensions', ('.tif', '.tiff', '.ome.tif', '.ome.tiff'))
+        recursive = cfg.get('recursive', False)
+        image_files = find_image_files(target_input, extensions=extensions, recursive=recursive)
+    else:
+        print(f"Invalid input path: {target_input}")
+        return []
+        
+    if not image_files:
+        print(f"No matching images found in: {target_input}")
+        return []
+        
+    print(f"\n========================================================")
+    print(f"Found {len(image_files)} image(s) to process in batch mode")
+    print(f"========================================================")
+    for idx, f in enumerate(image_files, 1):
+        print(f"  [{idx}/{len(image_files)}] {os.path.basename(f)}")
+    print(f"========================================================\n")
+    
+    results = []
+    for idx, img_path in enumerate(image_files, 1):
+        print(f"\n>>> [{idx}/{len(image_files)}] Starting: {os.path.basename(img_path)}")
+        try:
+            res = process_single_image(img_path, output_dir=output_dir, config=cfg)
+            results.append(res)
+        except Exception as e:
+            print(f"ERROR processing {img_path}: {e}")
+            import traceback
+            traceback.print_exc()
+            results.append({'status': 'failed', 'image_path': img_path, 'error': str(e)})
+            
+    # Print batch summary
+    success_count = sum(1 for r in results if r.get('status') == 'success')
+    print(f"\n{'='*70}")
+    print(f"BATCH PROCESSING COMPLETE")
+    print(f"Total images:   {len(image_files)}")
+    print(f"Successful:     {success_count}")
+    print(f"Failed:         {len(image_files) - success_count}")
+    print(f"{'='*70}\n")
+    
+    return results
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Structure Tensor & Thickness Analysis for Collagen Images")
+    parser.add_argument('-i', '--input', type=str, default=None,
+                        help="Path to an image file or directory of images for batch processing")
+    parser.add_argument('-o', '--output', type=str, default=None,
+                        help="Base output directory for per-file output folders")
+    parser.add_argument('--config-only', action='store_true',
+                        help="Export configuration JSON and exit without running heavy pipeline")
+    parser.add_argument('--pixel-size', type=float, default=None,
+                        help="Pixel size in microns (um/pixel)")
+    parser.add_argument('--map-type', type=str, default=None,
+                        choices=['propagated_diameter_um', 'skeleton_diameter_um', 'diameter_um', 'distance_um'],
+                        help="Type of thickness map to compute")
+    args, unknown = parser.parse_known_args()
+    
+    # Update CONFIG with CLI args if specified
+    if args.input:
+        CONFIG['input_path'] = args.input
+        CONFIG['image_path'] = args.input
+    if args.output:
+        CONFIG['output_dir'] = args.output
+    if args.config_only:
+        CONFIG['export_config_only'] = True
+    if args.pixel_size:
+        CONFIG['pixel_size_um'] = args.pixel_size
+    if args.map_type:
+        CONFIG['map_type'] = args.map_type
+        
+    process_batch(
+        input_path=CONFIG.get('input_path'),
+        output_dir=CONFIG.get('output_dir'),
+        config=CONFIG
+    )

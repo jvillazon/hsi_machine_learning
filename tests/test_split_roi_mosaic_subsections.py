@@ -119,6 +119,7 @@ def test_split_workflow():
             overlap_percent=10.0,
             coord_mode="both",
             crop_mode="intersect",
+            clip_vertices=True,
         )
 
         assert manifest["total_source_cells"] == 3

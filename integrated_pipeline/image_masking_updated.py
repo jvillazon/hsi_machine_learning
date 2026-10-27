@@ -200,11 +200,25 @@ def load_channel_annotations(annotations_source: Union[str, Dict, None], num_cha
     return {i: f"Channel_{i}" for i in range(num_channels)}
 
 
-def load_affine_matrix(json_path: str, reverse: bool = True) -> Tuple[np.ndarray, Optional[Tuple[int, int]]]:
+def load_affine_matrix(
+    json_path: str,
+    use_inverse: bool = True,
+    reverse: Optional[bool] = None
+) -> Tuple[np.ndarray, Optional[Tuple[int, int]]]:
     """
-    Parse affine 3x3 matrix from .i2r.json or affine JSON file.
-    If reverse=True, loads matrix_xy_px_inv or inverts matrix_xy_px.
+    Parse affine/projective 3x3 matrix from .i2r.json or affine JSON file.
+    If use_inverse=True, loads matrix_xy_px_inv or inverts matrix_xy_px.
     """
+    if reverse is not None:
+        use_inverse = reverse
+
+    try:
+        from core.roi_transform import load_i2r_transform
+        t_info = load_i2r_transform(json_path, use_inverse=use_inverse)
+        return t_info.matrix, t_info.target_shape
+    except ImportError:
+        pass
+
     if not os.path.exists(json_path):
         raise FileNotFoundError(f"Transform JSON file not found: {json_path}")
 
@@ -212,27 +226,27 @@ def load_affine_matrix(json_path: str, reverse: bool = True) -> Tuple[np.ndarray
         data = json.load(f)
 
     target_shape = None
-    if 'moving_paths' in data and len(data['moving_paths']) > 0 and reverse:
+    if 'moving_paths' in data and len(data['moving_paths']) > 0 and use_inverse:
         mp = data['moving_paths'][0]
         if 'image_shape' in mp:
             target_shape = tuple(mp['image_shape'][:2])
-    elif 'fixed_paths' in data and len(data['fixed_paths']) > 0 and not reverse:
+    elif 'fixed_paths' in data and len(data['fixed_paths']) > 0 and not use_inverse:
         fp = data['fixed_paths'][0]
         if 'image_shape' in fp:
             target_shape = tuple(fp['image_shape'][:2])
 
-    if reverse and 'matrix_xy_px_inv' in data:
+    if use_inverse and 'matrix_xy_px_inv' in data:
         mat = np.array(data['matrix_xy_px_inv'], dtype=np.float64)
     elif 'matrix_xy_px' in data:
         mat = np.array(data['matrix_xy_px'], dtype=np.float64)
-        if reverse:
+        if use_inverse:
             mat = np.linalg.inv(mat)
     elif 'matrix' in data or 'transform_matrix' in data:
         raw_mat = data.get('matrix', data.get('transform_matrix'))
         mat = np.array(raw_mat, dtype=np.float64)
         if mat.shape == (2, 3):
             mat = np.vstack([mat, [0.0, 0.0, 1.0]])
-        if reverse:
+        if use_inverse:
             mat = np.linalg.inv(mat)
     else:
         raise ValueError(f"Could not find valid transformation matrix in: {json_path}")
@@ -457,23 +471,12 @@ class GeometryQuantifier:
         annotations_source: Union[str, Dict, None],
         dilation_px: int = 2,
         wsi_dilation_px: int = 0,
-        prefix: str = ""
+        prefix: str = "",
+        use_inverse: bool = True
     ) -> pd.DataFrame:
         """
         Quantify multi-channel image by projecting dilated cell geometries
         down into native space.
-        
-        Guarantees:
-        1. Dilation occurs FIRST:
-           - Optional high-res polygon dilation (wsi_dilation_px) in WSI/CODEX space before transformation.
-           - In the image space, a spatial dilation kernel of radius dilation_px is constructed first.
-           - Every cell within the image canvas is guaranteed a valid non-empty sampling footprint
-             (combining dilated polygon and/or centroid neighborhood) so downscaling never obliterates small cells.
-        2. No cell disappears:
-           - Uses normalized NaN-aware convolution so cells never overwrite or erase each other.
-           - Background NaNs are masked so tissue cells near boundaries are never contaminated.
-           - Every cell within the image bounds is 100% quantified.
-           - A cell will only receive a value of 0.0 if the actual average image intensity in its dilated region is 0.
         """
         t0 = time.time()
         print(f"\n--- Quantifying Raw Image: {os.path.basename(image_path)} ---")
@@ -481,8 +484,8 @@ class GeometryQuantifier:
             print(f"[Warning] Image not found: {image_path}, skipping.")
             return df
 
-        # Load transform matrix (matrix_xy_px_inv)
-        mat_inv, target_shape = load_affine_matrix(transform_json, reverse=True)
+        # Load transform matrix (forward or inverse based on use_inverse)
+        mat_inv, target_shape = load_affine_matrix(transform_json, use_inverse=use_inverse)
 
         # Retrieve or compute centroids robustly across case variations
         col_map = {str(c).strip().lower(): c for c in df.columns}
@@ -707,6 +710,7 @@ class GeometryQuantifier:
             prefix = cfg.get('prefix', '')
 
             if img_type == 'raw_multichannel':
+                use_inv = cfg.get('use_inverse', cfg.get('reverse_transform', True))
                 df = self.quantify_after_transformation(
                     df=df,
                     image_path=img_path,
@@ -714,7 +718,8 @@ class GeometryQuantifier:
                     annotations_source=annots,
                     dilation_px=dil_px,
                     wsi_dilation_px=cfg.get('wsi_dilation_px', CONFIG.get('int_dilations', 0)),
-                    prefix=prefix
+                    prefix=prefix,
+                    use_inverse=use_inv
                 )
             elif img_type == 'preregistered_wsi':
                 df = self.quantify_preregistered_wsi(

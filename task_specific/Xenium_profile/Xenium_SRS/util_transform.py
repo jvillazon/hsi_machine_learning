@@ -324,7 +324,7 @@ def apply_roi_transform_from_json(json_path: Union[str, Path],
                                   cell_seg_df: pd.DataFrame,
                                   clip_to_roi: bool = False,
                                   return_roi_bounds: bool = True,
-                                  flip_y: bool = True,
+                                  flip_y: bool = False,
                                   use_inverse: bool = False) -> pd.DataFrame:
     """
     Simple interface to transform cell coordinates using transformation JSON.

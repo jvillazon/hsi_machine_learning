@@ -1,0 +1,78 @@
+{
+    "input_path": "C:\\Users\\jvill\\OneDrive - UC San Diego\\Xenium-SRS\\202610 ActionableResults\\raw_stich_data_srs_outputs\\all_images_arithmetic_roi_metrics.parquet",
+    "output_dir": "C:\\Users\\jvill\\OneDrive - UC San Diego\\Xenium-SRS\\202610 ActionableResults\\raw_stich_data_srs_outputs\\group_stats_plots\\conditions_within_labels",
+    "group_cols": [
+        "Condition",
+        "Label"
+    ],
+    "combine_two_groups": false,
+    "sample_col": "Sample ID",
+    "lookup_table": {
+        "source_col": "Sample ID",
+        "target_col": "Condition",
+        "mapping": {
+            "KPMP_038": "Reference",
+            "3782": "AKI",
+            "3990": "CKD"
+        }
+    },
+    "filter_values": ["FIB", "aFIB", "CKD"],
+    "value_cols": [
+        "Redox_Ratio Mean",
+        "Lipid_to_Protein Mean",
+        "Lipid_Unsaturation Mean",
+        "Col_Thickness Mean",
+        "Col_Coherence Mean",
+        "% Centroid_1 (Cholesterol (ovine))",
+        "% Centroid_2 (Kidney Background)",
+        "% Centroid_3 (Kidney Background)",
+        "% Centroid_4 (18:1 Cholesterol Ester)",
+        "% Centroid_5 (Kidney Background)",
+        "% Dominant Centroid",
+        "% 18:1 Cholesterol Ester",
+        "% Cholesterol (ovine)",
+        "% PC Mix",
+        "% PE Mix",
+        "% PG Mix",
+        "% PI Mix",
+        
+        "% PS Mix",
+        "% DOPC",
+        "% DOPE",
+        "% DSPC",
+        "% 16:0 Cardiolipin",
+        "% 18:0 Lyso PA",
+        "% 18:1 LPA",
+        "% 16:0 CDP DG",
+        "% DAG 16:0",
+        "% TAG 16:0",
+        "% TAG Mix",
+        "% Palmitic Acid",
+        "% Stearic Acid",
+        "% Docosahexaenoic Acid",
+        "% Tetracosapentaenoic Acid",
+        "% Sphingosine",
+        "% Cer 18:1-12:0",
+        "% Cer 18:1-18:0",
+        "% Cer 18:1-18:1",
+        "% Cer 18:1-22:0",
+        "% Cer 18:1-24:0",
+        "% Cer 18:1-24:1",
+        "% Glucosylceramide (Gaucher's Spleen)"
+    ],
+    "filter_significant_only": true,
+    "min_effect_size_filter": 0.33,
+    "top_n_metrics": null,
+    "plot_types": "violin",
+    "show_points": true,
+    "max_points": 50,
+    "ignore_zeros": true,
+    "stats_mode": "nonparametric",
+    "min_effect_size_bracket": 0.147,
+    "palette": [
+        "#37498b",
+        "#e85b1e",
+        "#d9381e"
+    ],
+    "export_format": "parquet"
+}

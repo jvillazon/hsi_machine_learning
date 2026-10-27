@@ -1,0 +1,16 @@
+{
+  "input_path": "C:\\Users\\jvill\\OneDrive - UC San Diego\\integrated_pipeline\\WSI_data\\WSI_data\\Dataset_Root\\S21-K21_198_3\\S21-K21_198_3_rois-FIB-DN-all.parquet",
+  "output_dir": "C:\\Users\\jvill\\OneDrive - UC San Diego\\integrated_pipeline\\WSI_data\\WSI_data\\Dataset_Root\\S21-K21_198_3\\plots\\wsi_stats",
+  "group_cols": ["group", "Region"],
+  "sample_col": "Sample_ID",
+  "filter_values": {
+    "group": ["TAL", "PT", "DN", "VASC", "INTERSTITIAL", "GLOM", "DCT"],
+    "Region": ["outer cortex", "inner cortex", "outer stripe", "inner medulla", "inner stripe"]
+  },
+  "value_cols": ["Area_px"],
+  "plot_types": "both",
+  "combine_two_groups": false,
+  "ignore_zeros": true,
+  "stats_mode": "nonparametric",
+  "min_effect_size_bracket": 0.147
+}

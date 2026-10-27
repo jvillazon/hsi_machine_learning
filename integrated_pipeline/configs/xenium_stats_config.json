@@ -1,0 +1,24 @@
+{
+  "input_path": "D:\\ADATA Backup\\HuBMAP\\HuBMAP Xenium\\Xenium_data\\Xenium-round1-napari_rois.parquet",
+  "output_dir": "D:\\ADATA Backup\\HuBMAP\\HuBMAP Xenium\\Xenium_data\\plots\\xenium_stats",
+  "group_cols": ["Condition", "Label"],
+  "sample_col": "Sample_ID",
+  "lookup_table": {
+    "source_col": "Sample_ID",
+    "target_col": "Condition",
+    "mapping": {
+      "KPMP_038": "Reference",
+      "3782": "AKI",
+      "3990": "CKD"
+    }
+  },
+  "filter_values": {
+    "Label": ["PT", "altPT", "TAL", "altTAL", "DCT", "altDCT", "EC", "FIB", "POD", "IC"]
+  },
+  "value_cols": ["Area_px"],
+  "plot_types": "both",
+  "combine_two_groups": false,
+  "ignore_zeros": true,
+  "stats_mode": "nonparametric",
+  "min_effect_size_bracket": 0.147
+}

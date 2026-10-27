@@ -1,0 +1,32 @@
+{
+  "input_path": "C:\\Users\\jvill\\OneDrive - UC San Diego\\Vallon Kidney\\10-14-26 BR_Images_HSI data\\Round2-arithmetic\\all_images_roi_metrics-final.parquet",
+  "output_dir": "C:\\Users\\jvill\\OneDrive - UC San Diego\\Vallon Kidney\\10-14-26 BR_Images_HSI data\\Round2-plots\\group_stats",
+  "group_cols": ["Condition", "Label"],
+  "sample_col": "Sample ID",
+  "filter_values": {
+    "Label": ["PT-S1/S2", "PT-S3", "cTAL", "mTAL"]
+  },
+  "value_cols": [
+    "% Sterols",
+    "% Cardiolipins",
+    "% Phospholipids",
+    "% Lysophospholipids",
+    "% Glycerols",
+    "% Sphingolipids",
+    "% SFA",
+    "% PUFA",
+    "LD Count",
+    "LD Total Area (um2)",
+    "LD Mean Area (um2)",
+    "LD Area Fraction (%)",
+    "Protein_Turnover Mean",
+    "Lipid_Turnover Mean",
+    "Lipid_to_Protein Mean",
+    "Lipid_Unsaturation Mean"
+  ],
+  "plot_types": "both",
+  "combine_two_groups": false,
+  "ignore_zeros": true,
+  "stats_mode": "nonparametric",
+  "min_effect_size_bracket": 0.147
+}

@@ -7,18 +7,18 @@
 
 .EXAMPLE
   .\run_step4_split_mosaic_rois.ps1
-  $env:TILE_DIR="E:\Data\Jorge\01_HumanKidney_HuBMAP\Xenium_datasets\Ref\roi2"; .\run_step4_split_mosaic_rois.ps1
+  $env:TILE_DIR="E:\Data\Jorge\01_HumanKidney_HuBMAP\Xenium_datasets\Ref\roi1"; .\run_step4_split_mosaic_rois.ps1
 #>
 
 $ErrorActionPreference = "Stop"
 
 # --- CONFIGURABLE VARIABLES (Edit these or pass as environment variables) -----
-$INPUT_FILE = if ($env:INPUT_FILE) { $env:INPUT_FILE } else { "C:\Users\jvill\OneDrive - UC San Diego\Xenium-SRS\Xenium_data\Xen24_KPMP_038_ref-selected\ref-roi2-HSI_cells_gui_rois.parquet" }
-$OUTPUT_DIR = if ($env:OUTPUT_DIR) { $env:OUTPUT_DIR } else { "C:\Users\jvill\OneDrive - UC San Diego\Xenium-SRS\Xenium_data\Xen24_KPMP_038_ref-selected\ref-roi2-HSI_all_mosaics" }
+$INPUT_FILE = if ($env:INPUT_FILE) { $env:INPUT_FILE } else { "C:\Users\jvill\OneDrive - UC San Diego\Xenium-SRS\Xenium_data\Xen24_3990_ckd-selected\ckd-roi1-HSI_cells_gui_rois.parquet" }
+$OUTPUT_DIR = if ($env:OUTPUT_DIR) { $env:OUTPUT_DIR } else { "C:\Users\jvill\OneDrive - UC San Diego\Xenium-SRS\Xenium_data\Xen24_3990_ckd-selected\ckd-roi1-HSI_all_mosaics" }
 $OUTPUT_PREFIX = if ($env:OUTPUT_PREFIX) { $env:OUTPUT_PREFIX } else { "" }
 
 # Option A: Automatic discovery from tile directory
-$TILE_DIR = if ($env:TILE_DIR) { $env:TILE_DIR } else { "C:\Users\jvill\OneDrive - UC San Diego\Xenium-SRS\hSRS_data\KPMP_038-roi2" }
+$TILE_DIR = if ($env:TILE_DIR) { $env:TILE_DIR } else { "C:\Users\jvill\OneDrive - UC San Diego\Xenium-SRS\hSRS_data\3990-roi1" }
 
 # Option B: Manual grid parameters (used if TILE_DIR is not provided or to override)
 $GRID_ROWS = if ($env:GRID_ROWS) { $env:GRID_ROWS } else { "" }
@@ -37,7 +37,7 @@ $CROP_MODE = if ($env:CROP_MODE) { $env:CROP_MODE } else { "intersect" }
 # Clip polygon vertices strictly to tile boundaries [0, W] x [0, H]
 $CLIP_VERTICES = if ($env:CLIP_VERTICES) { $env:CLIP_VERTICES } else { "true" }
 
-$SAMPLE_ID = if ($env:SAMPLE_ID) { $env:SAMPLE_ID } else { "KPMP_038" }
+$SAMPLE_ID = if ($env:SAMPLE_ID) { $env:SAMPLE_ID } else { "3990" }
 $FORMAT = if ($env:FORMAT) { $env:FORMAT } else { "both" }
 $GENERATE_MASKS = if ($env:GENERATE_MASKS) { $env:GENERATE_MASKS } else { "false" }
 $PIXEL_SIZE = if ($env:PIXEL_SIZE) { $env:PIXEL_SIZE } else { "0.4971847" }
@@ -45,7 +45,7 @@ $PIXEL_SIZE = if ($env:PIXEL_SIZE) { $env:PIXEL_SIZE } else { "0.4971847" }
 # Cohesive vs individual tile parquet/csv output
 $SAVE_INDIVIDUAL = if ($env:SAVE_INDIVIDUAL) { $env:SAVE_INDIVIDUAL } else { "false" }
 $COHESIVE_NAME = if ($env:COHESIVE_NAME) { $env:COHESIVE_NAME } else { "" }
-$STITCHED_IMAGE = if ($env:STITCHED_IMAGE) { $env:STITCHED_IMAGE } else { "D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\Normalized_Images_xenium-HSI\ref-roi2-HSI\Protein-ref-roi2-HSI.tif" }
+$STITCHED_IMAGE = if ($env:STITCHED_IMAGE) { $env:STITCHED_IMAGE } else { "D:\ADATA Backup\HuBMAP\HuBMAP Xenium\Xenium HSI\Normalized_Images_xenium-HSI\ckd-roi1-HSI\Protein-ckd-roi1-HSI.tif" }
 $TARGET_CANVAS_SHAPE = if ($env:TARGET_CANVAS_SHAPE) { $env:TARGET_CANVAS_SHAPE } else { "" }
 # ------------------------------------------------------------------------------
 

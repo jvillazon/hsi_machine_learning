@@ -376,7 +376,9 @@ def plot_single_group_axes(
     strip_palette_dict: Optional[Dict[Any, Any]] = None,
     error_bar_type: str = ERROR_BAR_TYPE,
     font_scale: float = FONT_SCALE,
-    ignore_zeros: bool = False
+    ignore_zeros: bool = False,
+    show_points: bool = True,
+    max_points: Optional[int] = None
 ) -> Tuple[Optional[Dict[str, Any]], Optional[pd.DataFrame]]:
     """
     Renders either a Violin plot or a Bar plot with median points, strip dots,
@@ -465,23 +467,36 @@ def plot_single_group_axes(
             linewidth=1.2, zorder=1
         )
 
-    # 2. Overlay Strip Plot
-    if strip_hue_col and strip_hue_col in sub.columns:
-        s_order = strip_order if strip_order is not None else sorted(sub[strip_hue_col].dropna().unique())
-        s_pal = strip_palette_dict if strip_palette_dict is not None else build_palette_dict(s_order, STRIP_PALETTE)
-        sns.stripplot(
-            data=sub, x=group_col, y=value_col, order=order,
-            hue=strip_hue_col, hue_order=s_order, palette=s_pal,
-            dodge=False, jitter=0.22, size=5, alpha=0.75,
-            edgecolor="black", linewidth=0.5, ax=ax, legend=False, zorder=3
-        )
-    else:
-        sns.stripplot(
-            data=sub, x=group_col, y=value_col, order=order,
-            hue=group_col, hue_order=order, palette=palette_dict,
-            dodge=False, jitter=0.22, size=5, alpha=0.6,
-            edgecolor="black", linewidth=0.5, ax=ax, legend=False, zorder=3
-        )
+    # 2. Overlay Strip Plot (points)
+    if show_points and (max_points is None or max_points > 0):
+        strip_sub = sub
+        if max_points is not None and max_points > 0 and len(strip_sub) > max_points:
+            per_cat_limit = max(1, max_points // max(1, len(order)))
+            sample_chunks = []
+            for cat in order:
+                cat_df = strip_sub[strip_sub[group_col] == cat]
+                if len(cat_df) > per_cat_limit:
+                    sample_chunks.append(cat_df.sample(n=per_cat_limit, random_state=42))
+                else:
+                    sample_chunks.append(cat_df)
+            strip_sub = pd.concat(sample_chunks, ignore_index=True) if sample_chunks else strip_sub
+
+        if strip_hue_col and strip_hue_col in strip_sub.columns:
+            s_order = strip_order if strip_order is not None else sorted(strip_sub[strip_hue_col].dropna().unique())
+            s_pal = strip_palette_dict if strip_palette_dict is not None else build_palette_dict(s_order, STRIP_PALETTE)
+            sns.stripplot(
+                data=strip_sub, x=group_col, y=value_col, order=order,
+                hue=strip_hue_col, hue_order=s_order, palette=s_pal,
+                dodge=False, jitter=0.22, size=4, alpha=0.75,
+                edgecolor="black", linewidth=0.5, ax=ax, legend=False, zorder=3
+            )
+        else:
+            sns.stripplot(
+                data=strip_sub, x=group_col, y=value_col, order=order,
+                hue=group_col, hue_order=order, palette=palette_dict,
+                dodge=False, jitter=0.22, size=4, alpha=0.6,
+                edgecolor="black", linewidth=0.5, ax=ax, legend=False, zorder=3
+            )
 
     # 3. Central Tendency Marker & Text Overlay (Median by default)
     ymin, ymax = ax.get_ylim()
@@ -731,7 +746,12 @@ def run_group_stats_pipeline(
     error_bar_type: str = ERROR_BAR_TYPE,
     lookup_table: Optional[Union[Dict[str, Any], str, Path]] = None,
     lookup_source_col: Optional[str] = None,
-    lookup_target_col: str = "Condition"
+    lookup_target_col: str = "Condition",
+    show_points: bool = True,
+    max_points: Optional[int] = None,
+    export_format: str = "both",
+    export_csv: Optional[bool] = None,
+    export_parquet: Optional[bool] = None
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Executes the end-to-end visualization and statistical testing pipeline.
@@ -872,7 +892,8 @@ def run_group_stats_pipeline(
                     palette=palette, add_brackets=add_brackets,
                     strip_hue_col=strip_hue_col, strip_order=strip_order,
                     strip_palette_dict=strip_palette_dict, error_bar_type=error_bar_type,
-                    font_scale=font_scale, ignore_zeros=ignore_zeros
+                    font_scale=font_scale, ignore_zeros=ignore_zeros,
+                    show_points=show_points, max_points=max_points
                 )
                 fig.tight_layout()
                 fig_path = os.path.join(ptype_dir, f"{clean_name}.png")
@@ -931,7 +952,8 @@ def run_group_stats_pipeline(
                         palette=palette, add_brackets=add_brackets,
                         strip_hue_col=strip_hue_col, strip_order=strip_order,
                         strip_palette_dict=strip_palette_dict, error_bar_type=error_bar_type,
-                        font_scale=font_scale, ignore_zeros=ignore_zeros
+                        font_scale=font_scale, ignore_zeros=ignore_zeros,
+                        show_points=show_points, max_points=max_points
                     )
                     fig.tight_layout()
                     fig_path = os.path.join(ptype_dir, f"{clean_name}.png")
@@ -985,7 +1007,8 @@ def run_group_stats_pipeline(
                             palette=palette, add_brackets=False,
                             strip_hue_col=strip_hue_col, strip_order=strip_order,
                             strip_palette_dict=strip_palette_dict, error_bar_type=error_bar_type,
-                            font_scale=font_scale, ignore_zeros=ignore_zeros
+                            font_scale=font_scale, ignore_zeros=ignore_zeros,
+                            show_points=show_points, max_points=max_points
                         )
                         temp_results.append((ax, omni, ph, sub_facet, fval))
                         
@@ -1050,16 +1073,39 @@ def run_group_stats_pipeline(
     desc_df = pd.concat(descriptive_records, ignore_index=True) if descriptive_records else pd.DataFrame()
     stratified_df = pd.concat(stratified_records, ignore_index=True) if stratified_records else pd.DataFrame()
 
+    # Resolve output formats
+    fmt = str(export_format or "both").lower()
+    should_export_parquet = (export_parquet is True) or (fmt in ["parquet", "both"] and export_parquet is not False)
+    should_export_csv = (export_csv is True) or (fmt in ["csv", "both"] and export_csv is not False)
+    if export_csv is False and export_parquet is None:
+        should_export_csv = False
+        should_export_parquet = True
+    if export_parquet is False and export_csv is None:
+        should_export_parquet = False
+        should_export_csv = True
+
+    def _export_table(df_table: pd.DataFrame, file_stem: str):
+        if df_table is None or df_table.empty:
+            return
+        out_base = os.path.join(effective_output_dir, file_stem)
+        saved = []
+        if should_export_parquet:
+            p_path = f"{out_base}.parquet"
+            df_table.to_parquet(p_path, index=False)
+            saved.append(p_path)
+        if should_export_csv:
+            c_path = f"{out_base}.csv"
+            df_table.to_csv(c_path, index=False)
+            saved.append(c_path)
+        if saved:
+            print(f"Exported {file_stem} to: {', '.join(saved)}")
+
     if not omnibus_df.empty:
         if "p_unc" in omnibus_df.columns:
             omnibus_df["p_unc_formatted"] = omnibus_df["p_unc"].apply(format_p_value)
             omnibus_df["significance"] = omnibus_df["p_unc"].apply(p_to_stars)
-        if stats_mode.lower() == "nonparametric":
-            omnibus_path = os.path.join(effective_output_dir, "kruskal_wallis_results.csv")
-        else:
-            omnibus_path = os.path.join(effective_output_dir, "welch_anova_results.csv")
-        omnibus_df.to_csv(omnibus_path, index=False)
-        print(f"Exported Omnibus results to: {omnibus_path}")
+        omni_stem = "kruskal_wallis_results" if stats_mode.lower() == "nonparametric" else "welch_anova_results"
+        _export_table(omnibus_df, omni_stem)
 
     if not posthoc_df.empty:
         if "pval" in posthoc_df.columns:
@@ -1073,22 +1119,14 @@ def run_group_stats_pipeline(
         ] if c in posthoc_df.columns]
         other_cols = [c for c in posthoc_df.columns if c not in lead_cols]
         posthoc_df = posthoc_df[lead_cols + other_cols]
-        if stats_mode.lower() == "nonparametric":
-            posthoc_path = os.path.join(effective_output_dir, "dunns_pairwise_fdr_cliffs_delta.csv")
-        else:
-            posthoc_path = os.path.join(effective_output_dir, "games_howell_pairwise_results.csv")
-        posthoc_df.to_csv(posthoc_path, index=False)
-        print(f"Exported pairwise post-hoc results to: {posthoc_path}")
+        ph_stem = "dunns_pairwise_fdr_cliffs_delta" if stats_mode.lower() == "nonparametric" else "games_howell_pairwise_results"
+        _export_table(posthoc_df, ph_stem)
 
     if not desc_df.empty:
-        desc_path = os.path.join(effective_output_dir, "descriptive_statistics_summary.csv")
-        desc_df.to_csv(desc_path, index=False)
-        print(f"Exported descriptive statistics summary to: {desc_path}")
+        _export_table(desc_df, "descriptive_statistics_summary")
 
     if not stratified_df.empty:
-        strat_path = os.path.join(effective_output_dir, "stratified_sample_wilcoxon.csv")
-        stratified_df.to_csv(strat_path, index=False)
-        print(f"Exported Stratified Wilcoxon & Replicate Concordance to: {strat_path}")
+        _export_table(stratified_df, "stratified_sample_wilcoxon")
 
     print(f"\n=======================================================")
     print(f" Pipeline Complete! Visualizations & Stats saved to:")

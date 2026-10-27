@@ -61,7 +61,7 @@ except ImportError:
 # 1. CONFIGURATION (Edit here for default runs)
 # ==============================================================================
 DEFAULT_DATA_PATH = r"C:\Users\jvill\OneDrive - UC San Diego\integrated_pipeline\WSI_data\WSI_data\CODEX_clusters-regions_masks_output_csv-test\output.csv"
-DEFAULT_OUTPUT_DIR = r"./plots/group_statistics_output"
+DEFAULT_OUTPUT_DIR = r"C:\Users\jvill\OneDrive - UC San Diego\integrated_pipeline\WSI_data\group_statistics_output"
 
 # Grouping settings
 GROUP_COLS = ["group", "mask_name"]                 # 1 or 2 columns, e.g. ["group"] or ["group", "mask_name"]
@@ -246,7 +246,10 @@ def run_group_statistics_pipeline(
     sample_col: Optional[str] = None,
     output_dir: Optional[str] = DEFAULT_OUTPUT_DIR,
     ignore_zeros: bool = IGNORE_ZEROS,
-    exclude_cols: Optional[List[str]] = None
+    exclude_cols: Optional[List[str]] = None,
+    export_format: str = "both",
+    export_csv: Optional[bool] = None,
+    export_parquet: Optional[bool] = None
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Optional[pd.DataFrame]]:
     """
     Main statistical pipeline driver. Iterates through all metrics across 1 or 2 groups.
@@ -304,42 +307,79 @@ def run_group_statistics_pipeline(
                 desc = compute_nonparametric_descriptives(d, item, g_col, sample_col=resolved_sample_col, ignore_zeros=ignore_zeros)
                 desc['group_by'] = g_col
                 desc['facet'] = None
+                desc['facet_col'] = None
+                desc['facet_name'] = None
                 desc_records.append(desc)
                 
                 # 2. Kruskal-Wallis omnibus
                 kw = run_kruskal_wallis(d, item, g_col, ignore_zeros=ignore_zeros)
                 if kw is not None:
-                    omnibus_records.append({**kw, "item": item, "group_by": g_col, "facet": None})
+                    omnibus_records.append({
+                        **kw, 
+                        "item": item, 
+                        "group_by": g_col, 
+                        "facet": None,
+                        "facet_col": None,
+                        "facet_name": None
+                    })
                     
                 # 3. Dunn's post-hoc with BH-FDR & Cliff's Delta
                 ph = run_dunns_posthoc_fdr(d, item, g_col, alpha=alpha, min_cliffs_delta=min_cliffs_delta, ignore_zeros=ignore_zeros)
                 if ph is not None and not ph.empty:
+                    ph = ph.copy()
                     ph["item"] = item
                     ph["group_by"] = g_col
+                    ph["group_A"] = ph["A"]
+                    ph["group_B"] = ph["B"]
+                    ph["comparison"] = ph["A"].astype(str) + " vs " + ph["B"].astype(str)
                     ph["facet"] = None
+                    ph["facet_col"] = None
+                    ph["facet_name"] = None
                     posthoc_records.append(ph)
                     
                 # 4. Stratified Wilcoxon across Sample ID
                 if resolved_sample_col:
                     strat = run_stratified_sample_wilcoxon(d, item, g_col, resolved_sample_col, alpha=alpha, ignore_zeros=ignore_zeros)
                     if strat is not None and not strat.empty:
+                        strat = strat.copy()
                         strat["item"] = item
+                        strat["group_by"] = g_col
+                        strat["group_A"] = strat["Group_A"]
+                        strat["group_B"] = strat["Group_B"]
+                        strat["comparison"] = strat["Group_A"].astype(str) + " vs " + strat["Group_B"].astype(str)
                         strat["facet"] = None
+                        strat["facet_col"] = None
+                        strat["facet_name"] = None
                         stratified_records.append(strat)
             else:
                 # Legacy parametric mode
                 desc = compute_nonparametric_descriptives(d, item, g_col, sample_col=resolved_sample_col, ignore_zeros=ignore_zeros)
                 desc['group_by'] = g_col
                 desc['facet'] = None
+                desc['facet_col'] = None
+                desc['facet_name'] = None
                 desc_records.append(desc)
                 
                 aov, ph = run_welch_games_howell(d, item, g_col, alpha=alpha, ignore_zeros=ignore_zeros)
                 if aov is not None:
-                    omnibus_records.append({**aov, "item": item, "group_by": g_col, "facet": None})
+                    omnibus_records.append({
+                        **aov, 
+                        "item": item, 
+                        "group_by": g_col, 
+                        "facet": None,
+                        "facet_col": None,
+                        "facet_name": None
+                    })
                 if ph is not None and not ph.empty:
+                    ph = ph.copy()
                     ph["item"] = item
                     ph["group_by"] = g_col
+                    ph["group_A"] = ph["A"]
+                    ph["group_B"] = ph["B"]
+                    ph["comparison"] = ph["A"].astype(str) + " vs " + ph["B"].astype(str)
                     ph["facet"] = None
+                    ph["facet_col"] = None
+                    ph["facet_name"] = None
                     posthoc_records.append(ph)
 
         elif len(group_cols) == 2:
@@ -352,38 +392,83 @@ def run_group_statistics_pipeline(
                     desc = compute_nonparametric_descriptives(d, item, combo_col, sample_col=resolved_sample_col, ignore_zeros=ignore_zeros)
                     desc['group_by'] = f"{g1}+{g2} (combined)"
                     desc['facet'] = None
+                    desc['facet_col'] = g2
+                    desc['facet_name'] = None
                     desc_records.append(desc)
                     
                     kw = run_kruskal_wallis(d, item, combo_col, ignore_zeros=ignore_zeros)
                     if kw is not None:
-                        omnibus_records.append({**kw, "item": item, "group_by": f"{g1}+{g2} (combined)", "facet": None})
+                        omnibus_records.append({
+                            **kw, 
+                            "item": item, 
+                            "group_by": f"{g1}+{g2} (combined)", 
+                            "facet": None,
+                            "facet_col": g2,
+                            "facet_name": None
+                        })
                         
                     ph = run_dunns_posthoc_fdr(d, item, combo_col, alpha=alpha, min_cliffs_delta=min_cliffs_delta, ignore_zeros=ignore_zeros)
                     if ph is not None and not ph.empty:
+                        ph = ph.copy()
                         ph["item"] = item
                         ph["group_by"] = f"{g1}+{g2} (combined)"
-                        ph["facet"] = None
+                        ph["comparison"] = ph["A"].astype(str) + " vs " + ph["B"].astype(str)
+                        a_parts = ph["A"].astype(str).str.split(r"\s*\|\s*", n=1, regex=True)
+                        b_parts = ph["B"].astype(str).str.split(r"\s*\|\s*", n=1, regex=True)
+                        ph["group_A"] = a_parts.str[0]
+                        ph["facet_A"] = a_parts.str[1]
+                        ph["group_B"] = b_parts.str[0]
+                        ph["facet_B"] = b_parts.str[1]
+                        ph["facet_col"] = g2
+                        ph["facet_name"] = np.where(ph["facet_A"] == ph["facet_B"], ph["facet_A"], ph["facet_A"] + " vs " + ph["facet_B"])
+                        ph["facet"] = np.where(ph["facet_A"] == ph["facet_B"], f"{g2}=" + ph["facet_A"], f"{g2}=" + ph["facet_A"] + " vs " + f"{g2}=" + ph["facet_B"])
                         posthoc_records.append(ph)
                         
                     if resolved_sample_col:
                         strat = run_stratified_sample_wilcoxon(d, item, combo_col, resolved_sample_col, alpha=alpha, ignore_zeros=ignore_zeros)
                         if strat is not None and not strat.empty:
+                            strat = strat.copy()
                             strat["item"] = item
+                            strat["group_by"] = f"{g1}+{g2} (combined)"
+                            strat["group_A"] = strat["Group_A"]
+                            strat["group_B"] = strat["Group_B"]
+                            strat["comparison"] = strat["Group_A"].astype(str) + " vs " + strat["Group_B"].astype(str)
                             strat["facet"] = None
+                            strat["facet_col"] = g2
+                            strat["facet_name"] = None
                             stratified_records.append(strat)
                 else:
                     desc = compute_nonparametric_descriptives(d, item, combo_col, sample_col=resolved_sample_col, ignore_zeros=ignore_zeros)
                     desc['group_by'] = f"{g1}+{g2} (combined)"
                     desc['facet'] = None
+                    desc['facet_col'] = g2
+                    desc['facet_name'] = None
                     desc_records.append(desc)
                     
                     aov, ph = run_welch_games_howell(d, item, combo_col, alpha=alpha, ignore_zeros=ignore_zeros)
                     if aov is not None:
-                        omnibus_records.append({**aov, "item": item, "group_by": f"{g1}+{g2} (combined)", "facet": None})
+                        omnibus_records.append({
+                            **aov, 
+                            "item": item, 
+                            "group_by": f"{g1}+{g2} (combined)", 
+                            "facet": None,
+                            "facet_col": g2,
+                            "facet_name": None
+                        })
                     if ph is not None and not ph.empty:
+                        ph = ph.copy()
                         ph["item"] = item
                         ph["group_by"] = f"{g1}+{g2} (combined)"
-                        ph["facet"] = None
+                        ph["comparison"] = ph["A"].astype(str) + " vs " + ph["B"].astype(str)
+                        a_parts = ph["A"].astype(str).str.split(r"\s*\|\s*", n=1, regex=True)
+                        b_parts = ph["B"].astype(str).str.split(r"\s*\|\s*", n=1, regex=True)
+                        ph["group_A"] = a_parts.str[0]
+                        ph["facet_A"] = a_parts.str[1]
+                        ph["group_B"] = b_parts.str[0]
+                        ph["facet_B"] = b_parts.str[1]
+                        ph["facet_col"] = g2
+                        ph["facet_name"] = np.where(ph["facet_A"] == ph["facet_B"], ph["facet_A"], ph["facet_A"] + " vs " + ph["facet_B"])
+                        ph["facet"] = np.where(ph["facet_A"] == ph["facet_B"], f"{g2}=" + ph["facet_A"], f"{g2}=" + ph["facet_A"] + " vs " + f"{g2}=" + ph["facet_B"])
                         posthoc_records.append(ph)
             else:
                 facets = [fval for fval in d[g2].dropna().unique()]
@@ -395,38 +480,82 @@ def run_group_statistics_pipeline(
                     if mode == "nonparametric":
                         desc = compute_nonparametric_descriptives(sub, item, g1, sample_col=resolved_sample_col, ignore_zeros=ignore_zeros)
                         desc['group_by'] = g1
+                        desc['facet_col'] = g2
+                        desc['facet_name'] = fval
+                        desc[g2] = fval
                         desc['facet'] = f"{g2}={fval}"
                         desc_records.append(desc)
                         
                         kw = run_kruskal_wallis(sub, item, g1, ignore_zeros=ignore_zeros)
                         if kw is not None:
-                            omnibus_records.append({**kw, "item": item, "group_by": g1, "facet": f"{g2}={fval}"})
+                            omnibus_records.append({
+                                **kw, 
+                                "item": item, 
+                                "group_by": g1, 
+                                "facet_col": g2,
+                                "facet_name": fval,
+                                g2: fval,
+                                "facet": f"{g2}={fval}"
+                            })
                             
                         ph = run_dunns_posthoc_fdr(sub, item, g1, alpha=alpha, min_cliffs_delta=min_cliffs_delta, ignore_zeros=ignore_zeros)
                         if ph is not None and not ph.empty:
+                            ph = ph.copy()
                             ph["item"] = item
                             ph["group_by"] = g1
+                            ph["group_A"] = ph["A"]
+                            ph["group_B"] = ph["B"]
+                            ph["comparison"] = ph["A"].astype(str) + " vs " + ph["B"].astype(str)
+                            ph["facet_col"] = g2
+                            ph["facet_name"] = fval
+                            ph[g2] = fval
                             ph["facet"] = f"{g2}={fval}"
                             posthoc_records.append(ph)
                             
                         if resolved_sample_col:
                             strat = run_stratified_sample_wilcoxon(sub, item, g1, resolved_sample_col, alpha=alpha, ignore_zeros=ignore_zeros)
                             if strat is not None and not strat.empty:
+                                strat = strat.copy()
                                 strat["item"] = item
+                                strat["group_by"] = g1
+                                strat["group_A"] = strat["Group_A"]
+                                strat["group_B"] = strat["Group_B"]
+                                strat["comparison"] = strat["Group_A"].astype(str) + " vs " + strat["Group_B"].astype(str)
+                                strat["facet_col"] = g2
+                                strat["facet_name"] = fval
+                                strat[g2] = fval
                                 strat["facet"] = f"{g2}={fval}"
                                 stratified_records.append(strat)
                     else:
                         desc = compute_nonparametric_descriptives(sub, item, g1, sample_col=resolved_sample_col, ignore_zeros=ignore_zeros)
                         desc['group_by'] = g1
+                        desc['facet_col'] = g2
+                        desc['facet_name'] = fval
+                        desc[g2] = fval
                         desc['facet'] = f"{g2}={fval}"
                         desc_records.append(desc)
                         
                         aov, ph = run_welch_games_howell(sub, item, g1, alpha=alpha, ignore_zeros=ignore_zeros)
                         if aov is not None:
-                            omnibus_records.append({**aov, "item": item, "group_by": g1, "facet": f"{g2}={fval}"})
+                            omnibus_records.append({
+                                **aov, 
+                                "item": item, 
+                                "group_by": g1, 
+                                "facet_col": g2,
+                                "facet_name": fval,
+                                g2: fval,
+                                "facet": f"{g2}={fval}"
+                            })
                         if ph is not None and not ph.empty:
+                            ph = ph.copy()
                             ph["item"] = item
                             ph["group_by"] = g1
+                            ph["group_A"] = ph["A"]
+                            ph["group_B"] = ph["B"]
+                            ph["comparison"] = ph["A"].astype(str) + " vs " + ph["B"].astype(str)
+                            ph["facet_col"] = g2
+                            ph["facet_name"] = fval
+                            ph[g2] = fval
                             ph["facet"] = f"{g2}={fval}"
                             posthoc_records.append(ph)
 
@@ -443,10 +572,20 @@ def run_group_statistics_pipeline(
         omnibus_df["p_unc_formatted"] = omnibus_df["p_unc"].apply(format_p_value)
         omnibus_df["significance"] = omnibus_df["p_unc"].apply(p_to_stars)
         if "H_stat" in omnibus_df.columns:
-            lead_cols = ["item", "group_by", "facet", "H_stat", "df", "p_unc", "p_unc_formatted", "significance", "eta_sq_h", "k_groups", "N_total"]
+            lead_cols = [
+                "item", "group_by", "facet_col", "facet_name", "facet",
+                "H_stat", "df", "p_unc", "p_unc_formatted", "significance", "eta_sq_h", "k_groups", "N_total"
+            ]
         else:
-            lead_cols = ["item", "group_by", "facet", "F", "df1", "df2", "p_unc", "p_unc_formatted", "significance", "np2", "k_groups", "N_total"]
-        omnibus_df = omnibus_df[[c for c in lead_cols if c in omnibus_df.columns]]
+            lead_cols = [
+                "item", "group_by", "facet_col", "facet_name", "facet",
+                "F", "df1", "df2", "p_unc", "p_unc_formatted", "significance", "np2", "k_groups", "N_total"
+            ]
+        if len(group_cols) == 2 and group_cols[1] in omnibus_df.columns:
+            g2_name = group_cols[1]
+            if g2_name not in lead_cols:
+                lead_cols.insert(lead_cols.index("facet_name") + 1, g2_name)
+        omnibus_df = omnibus_df[[c for c in lead_cols if c in omnibus_df.columns] + [c for c in omnibus_df.columns if c not in lead_cols]]
 
     if not posthoc_df.empty:
         if "pval" in posthoc_df.columns:
@@ -455,39 +594,85 @@ def run_group_statistics_pipeline(
             posthoc_df["q_fdr_bh_formatted"] = posthoc_df["q_fdr_bh"].apply(format_p_value)
             
         lead_cols = [
-            "item", "group_by", "facet", "A", "B", "N(A)", "N(B)", 
+            "item", "group_by", "facet_col", "facet_name", "facet",
+            "group_A", "group_B", "comparison", "A", "B", 
+            "facet_A", "facet_B",
+            "N(A)", "N(B)", 
             "median(A)", "median(B)", "iqr(A)", "iqr(B)", "diff", "pct_diff",
             "Z", "pval_raw", "q_fdr_bh", "q_fdr_bh_formatted", "significance", 
             "is_significant", "cliffs_delta", "delta_95_ci", "effect_size_magnitude", 
             "is_biologically_significant", "mean(A)", "mean(B)", "cohen_d", "hedges_g"
         ]
-        posthoc_df = posthoc_df[[c for c in lead_cols if c in posthoc_df.columns]]
+        if len(group_cols) == 2 and group_cols[1] in posthoc_df.columns:
+            g2_name = group_cols[1]
+            if g2_name not in lead_cols:
+                lead_cols.insert(lead_cols.index("facet_name") + 1, g2_name)
+        posthoc_df = posthoc_df[[c for c in lead_cols if c in posthoc_df.columns] + [c for c in posthoc_df.columns if c not in lead_cols]]
 
-    # Save CSV Reports
+    if not desc_df.empty:
+        desc_lead = ["Metric", "item", "group_by", group_cols[0], "facet_col", "facet_name", "facet"]
+        if len(group_cols) == 2 and group_cols[1] in desc_df.columns:
+            g2_name = group_cols[1]
+            if g2_name not in desc_lead:
+                desc_lead.insert(desc_lead.index("facet_name") + 1, g2_name)
+        desc_df = desc_df[[c for c in desc_lead if c in desc_df.columns] + [c for c in desc_df.columns if c not in desc_lead]]
+
+    if not stratified_df.empty:
+        strat_lead = [
+            "item", "Metric", "group_by", "facet_col", "facet_name", "facet",
+            "group_A", "group_B", "comparison", "Group_A", "Group_B",
+            "Strata_Column", "N_Strata_Analyzed", "Van_Elteren_Z", "Van_Elteren_p", 
+            "Van_Elteren_Sig", "N_Replicates_Tested", "Replicate_Test_Type", 
+            "Replicate_Median_p", "Replicate_Median_Sig", "Biological_Concordance"
+        ]
+        if len(group_cols) == 2 and group_cols[1] in stratified_df.columns:
+            g2_name = group_cols[1]
+            if g2_name not in strat_lead:
+                strat_lead.insert(strat_lead.index("facet_name") + 1, g2_name)
+        stratified_df = stratified_df[[c for c in strat_lead if c in stratified_df.columns] + [c for c in stratified_df.columns if c not in strat_lead]]
+
+    # Save Reports
     if output_dir:
-        if mode == "nonparametric":
-            omnibus_path = os.path.join(output_dir, "kruskal_wallis_results.csv")
-            posthoc_path = os.path.join(output_dir, "dunns_posthoc_fdr_cliffs_delta.csv")
-        else:
-            omnibus_path = os.path.join(output_dir, "welch_anova_results.csv")
-            posthoc_path = os.path.join(output_dir, "games_howell_results.csv")
-            
-        desc_path = os.path.join(output_dir, "descriptive_statistics.csv")
-        strat_path = os.path.join(output_dir, "stratified_replicate_wilcoxon.csv")
+        fmt = str(export_format or "both").lower()
+        should_export_parquet = (export_parquet is True) or (fmt in ["parquet", "both"] and export_parquet is not False)
+        should_export_csv = (export_csv is True) or (fmt in ["csv", "both"] and export_csv is not False)
+        if export_csv is False and export_parquet is None:
+            should_export_csv = False
+            should_export_parquet = True
+        if export_parquet is False and export_csv is None:
+            should_export_parquet = False
+            should_export_csv = True
+
+        def _save_table(df_tbl: pd.DataFrame, file_stem: str):
+            if df_tbl is None or df_tbl.empty:
+                return []
+            base_p = os.path.join(output_dir, file_stem)
+            saved_paths = []
+            if should_export_parquet:
+                p_p = f"{base_p}.parquet"
+                df_tbl.to_parquet(p_p, index=False)
+                saved_paths.append(p_p)
+            if should_export_csv:
+                c_p = f"{base_p}.csv"
+                df_tbl.to_csv(c_p, index=False)
+                saved_paths.append(c_p)
+            return saved_paths
+
+        omni_stem = "kruskal_wallis_results" if mode == "nonparametric" else "welch_anova_results"
+        posthoc_stem = "dunns_posthoc_fdr_cliffs_delta" if mode == "nonparametric" else "games_howell_results"
         
-        omnibus_df.to_csv(omnibus_path, index=False)
-        posthoc_df.to_csv(posthoc_path, index=False)
-        desc_df.to_csv(desc_path, index=False)
-        if not stratified_df.empty:
-            stratified_df.to_csv(strat_path, index=False)
+        omni_paths = _save_table(omnibus_df, omni_stem)
+        posthoc_paths = _save_table(posthoc_df, posthoc_stem)
+        desc_paths = _save_table(desc_df, "descriptive_statistics")
+        strat_paths = _save_table(stratified_df, "stratified_replicate_wilcoxon")
         
         print("\n" + "=" * 80)
         print("Statistical Analysis Complete!")
-        print(f"  [1] Omnibus Test:            {omnibus_path}")
-        print(f"  [2] Pairwise Post-Hoc:       {posthoc_path}")
-        print(f"  [3] Descriptive Statistics:  {desc_path}")
-        if not stratified_df.empty:
-            print(f"  [4] Stratified Concordance:  {strat_path}")
+        print(f"  [1] Omnibus Test:            {', '.join(omni_paths)}")
+        print(f"  [2] Pairwise Post-Hoc:       {', '.join(posthoc_paths)}")
+        print(f"  [3] Descriptive Statistics:  {', '.join(desc_paths)}")
+        if strat_paths:
+            print(f"  [4] Stratified Concordance:  {', '.join(strat_paths)}")
         print("=" * 80)
 
     return omnibus_df, posthoc_df, desc_df, (stratified_df if not stratified_df.empty else None)

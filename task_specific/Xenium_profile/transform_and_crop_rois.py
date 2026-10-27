@@ -357,8 +357,12 @@ def transform_and_crop_rois(
         coords[:, 1] -= parsed_off_y
 
     n_pts = len(coords)
-    homogeneous = np.hstack([coords, np.ones((n_pts, 1))])
-    transformed_coords = (matrix @ homogeneous.T).T[:, :2]
+    homogeneous = np.hstack([coords, np.ones((n_pts, 1), dtype=np.float64)])
+    transformed_homo = (matrix @ homogeneous.T).T
+    # Perspective divide by w (for projective/homography transforms; w=1.0 for affine)
+    w_vec = transformed_homo[:, 2:3]
+    w_safe = np.where(np.abs(w_vec) > 1e-12, w_vec, 1.0)
+    transformed_coords = transformed_homo[:, :2] / w_safe
 
     df_vertices["x_roi"] = transformed_coords[:, 0]
     df_vertices["y_roi"] = transformed_coords[:, 1]
@@ -414,6 +418,13 @@ def transform_and_crop_rois(
             ):
                 continue
             pts_use = pts_u
+        elif crop_mode == "clip":
+            # Sutherland-Hodgman box clipping against canvas
+            from core.roi_transform import clip_polygon_to_box
+            pts_clipped = clip_polygon_to_box(pts_u.tolist(), 0.0, 0.0, float(roi_w), float(roi_h))
+            if len(pts_clipped) < 3:
+                continue
+            pts_use = np.array(pts_clipped, dtype=np.float64)
         else:  # 'none'
             pts_use = pts_u
 
@@ -600,7 +611,7 @@ def main():
     parser.add_argument("--reference-mask", default="", help="Path to reference mask for auto-detecting alignment offset")
     parser.add_argument("--flip-y", action="store_true", default=True, help="Invert Y axis for coordinate orientation")
     parser.add_argument("--no-flip-y", dest="flip_y", action="store_false", help="Do not invert Y axis")
-    parser.add_argument("--crop-mode", choices=["intersect", "strict", "none"], default="intersect", help="ROI cropping mode")
+    parser.add_argument("--crop-mode", choices=["intersect", "strict", "none", "clip"], default="intersect", help="ROI cropping mode ('none', 'intersect', 'clip', 'strict')")
     parser.add_argument("--use-inverse", action="store_true", default=False, help="Apply the inverse transformation matrix (e.g. matrix_xy_px_inv or np.linalg.inv)")
     parser.add_argument("--sample-id", default="1", help="Sample ID for GUI table")
     parser.add_argument("--roi-name", default="", help="ROI / Image name for GUI table")
